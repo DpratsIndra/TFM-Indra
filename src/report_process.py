@@ -1,51 +1,53 @@
-import fitz
+import fitz  # PyMuPDF
 import re
 import os
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_core.documents import Document
 
-def extract_text_from_pdf(pdf_path):
-    print(f'Extrayendo texto del PDF: {pdf_path}')
-    if not os.path.exists(pdf_path):
-        raise FileNotFoundError(f"El archivo {pdf_path} no existe.")
-    
-    doc = fitz.open(pdf_path)
-    text = ""
-    for page in doc:
-        text += page.get_text('text') + "\n"
-    return text
-    
-def safe_iocs(text):
-    # Sustituye los IOCs por etiquetas genéricas para proteger la información sensible y evitar confundir al modelo de embeddings
-    print('Sustituyendo IOCs por etiquetas genéricas...')
-    # Expresiones regulares para detectar IPs (IPv4 e IPv6), URLs, hashes, correos electrónicos y dominios
-    patterns = {
-        'IP_ADDRESS': r'\b(?:\d{1,3}\.){3}\d{1,3}\b|\b(?:[0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}\b',
-        'URL': r'\bhttps?://[^\s]+|www\.[^\s]+',
-        'HASH': r'\b[a-fA-F0-9]{32}\b|\b[a-fA-F0-9]{40}\b|\b[a-fA-F0-9]{64}\b',
-        'EMAIL': r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b',
-        'DOMAIN': r'\b(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}\b'
-    }  
-    for label, pattern in patterns.items():
-        text = re.sub(pattern, f'[{label}]', text)
-    return text
+class CTIReportProcessor:
+    def __init__(self, chunk_size=1000, chunk_overlap=150):
+        self.splitter = RecursiveCharacterTextSplitter(
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+            separators=["\n\n", "\n", ". ", " "]
+        )
+        # Diccionario de IoCs
+        self.patterns = {
+            'IP_ADDRESS': r'\b(?:\d{1,3}\.){3}\d{1,3}\b|\b(?:[0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}\b',
+            'URL': r'\bhttps?://[^\s]+|www\.[^\s]+',
+            'HASH': r'\b[a-fA-F0-9]{32}\b|\b[a-fA-F0-9]{40}\b|\b[a-fA-F0-9]{64}\b',
+            'EMAIL': r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b',
+            'DOMAIN': r'\b(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}\b'
+        }
 
-def text_split(text, chunk_size=1000, chunk_overlap=200):
-    print(f'Segmentando el texto en fragmentos de {chunk_size} caracteres con un solapamiento de {chunk_overlap} caracteres...')
-    text_splitter = RecursiveCharacterTextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
-    chunks = text_splitter.split_text(text)
-    print(f'Texto segmentado en {len(chunks)} fragmentos.')
-    return chunks
-
-def main():
-    pdf_path = 'data/APT29 attacks Embassies using CVE-2023-38831 - report en.pdf'
-    try:
-        text = extract_text_from_pdf(pdf_path)
-        text = safe_iocs(text)
-        chunks = text_split(text)
+    def process_pdf(self, file_path):
+        """Extrae, limpia y segmenta un PDF en documentos LangChain."""
+        filename = os.path.basename(file_path)
+        print(f"[*] Procesando: {filename}")
         
-        print(f'\nPrimer fragmento de texto:\n{chunks[0]}')
-    except Exception as e:
-        print(f'Error: {e}')
+        doc = fitz.open(file_path)
+        langchain_docs = []
 
-if __name__ == "__main__":
-    main()
+        for page_num, page in enumerate(doc):
+            text = page.get_text("text")
+            
+            # 1. Limpieza de IoCs (Privacidad y reducción de ruido)
+            for label, pattern in self.patterns.items():
+                text = re.sub(pattern, f"<{label}>", text)
+            
+            # 2. Segmentación (Chunking)
+            chunks = self.splitter.split_text(text)
+            
+            # 3. Creación de Objetos Documento con Metadatos granulares
+            for chunk in chunks:
+                langchain_docs.append(Document(
+                    page_content=chunk,
+                    metadata={
+                        "source": filename,
+                        "page": page_num + 1,
+                        "type": "report_chunk"
+                    }
+                ))
+        
+        print(f"[+] {filename} segmentado en {len(langchain_docs)} fragmentos.")
+        return langchain_docs

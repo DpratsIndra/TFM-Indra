@@ -7,3 +7,5 @@ tfm_env/
 *.log
 *.aux
 *.synctex.gz
+qdrant_data/
+.env
