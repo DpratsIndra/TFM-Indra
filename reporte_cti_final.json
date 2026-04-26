@@ -1,0 +1,93 @@
+[
+    {
+        "technique_id": "T1560.001",
+        "technique_name": "Archive via Utility",
+        "executive_summary": "During the campaign, attackers leveraged a newly discovered vulnerability in WinRAR (CVE-2023-38831) to facilitate their intrusion by exploiting it through specially crafted ZIP archives. This allowed them to execute arbitrary code and compress files using the utility, effectively utilizing the 'Archive via Utility' technique (T1560.001). The malicious content was hidden within these compressed archives, which were then used to carry out further malicious activities.",
+        "pages_detected": [
+            2,
+            7,
+            9
+        ]
+    },
+    {
+        "technique_id": "T1566.003",
+        "technique_name": "Spearphishing via Service",
+        "executive_summary": "APT29 leveraged the Spearphishing via Service (T1566.003) technique to target diplomatic accounts, including those of the Ministry of Foreign Affairs in Azerbaijan and Italy, as well as embassies in Greece and Romania, and email accounts of a prominent Greek ISP. The attackers employed phishing emails with enticing lures portraying BMW car sales, a tactic previously used by APT29 in attacks on embassies in Kyiv. By utilizing third-party services to deliver these spearphishing messages, the attackers aimed to gain access to victims' systems, exploiting their trust in legitimate services to bypass security measures and achieve their objectives.",
+        "pages_detected": [
+            3,
+            4
+        ]
+    },
+    {
+        "technique_id": "T1598",
+        "technique_name": "Phishing for Information",
+        "executive_summary": "An attacker leveraged the T1598: Phishing for Information technique throughout a campaign, utilizing spearphishing tactics to elicit sensitive information from victims. The phishing emails were crafted with a specific theme, such as a BMW car for sale, designed to pique the interest of targeted individuals and gain their trust. By employing this tactic, the attacker aimed to extract confidential data from unsuspecting recipients, thereby compromising their security posture.",
+        "pages_detected": [
+            4
+        ]
+    },
+    {
+        "technique_id": "T1027.015",
+        "technique_name": "Compression",
+        "executive_summary": "Across the campaign, threat actors leveraged compression to evade detection by surreptitiously inserting folders with matching names in ZIP archives. This technique allowed them to conceal malicious activity within seemingly innocuous files, thereby avoiding triggering security controls and evading discovery. By utilizing this tactic, the attackers successfully compromised multiple systems, underscoring the effectiveness of their approach in staying under the radar.",
+        "pages_detected": [
+            5
+        ]
+    },
+    {
+        "technique_id": "T1204.002",
+        "technique_name": "Malicious File",
+        "executive_summary": "An adversary leveraged the Malicious File (T1204.002) technique throughout the campaign, exploiting user trust to gain execution. The attackers introduced malicious files that were executed by the system when users opened them, relying on human interaction to initiate the attack chain. This tactic allowed the adversary to bypass traditional security controls and establish a foothold within the compromised environment.",
+        "pages_detected": [
+            5
+        ]
+    },
+    {
+        "technique_id": "T1090.004",
+        "technique_name": "Domain Fronting",
+        "executive_summary": "An adversary leveraged Ngrok's services to execute a domain fronting tactic, utilizing free static domains provided by Ngrok as subdomains under '<DOMAIN>'. This allowed them to mask malicious activities by storing next-stage PowerShell payloads and establishing covert communication channels through legitimate-looking URLs. The adversaries exploited this technique to evade detection and maintain persistence within the compromised environment.",
+        "pages_detected": [
+            6
+        ]
+    },
+    {
+        "technique_id": "T1496",
+        "technique_name": "Resource Hijacking",
+        "executive_summary": "During the campaign, threat actors leveraged Resource Hijacking (T1496) to exploit Ngrok's capabilities for covert communication with compromised systems. By hijacking resources, they were able to establish a tunnel through which they could transmit data while evading detection by security controls. This technique allowed them to maintain persistence and control over compromised systems, further enabling their malicious activities.",
+        "pages_detected": [
+            6
+        ]
+    },
+    {
+        "technique_id": "T1203",
+        "technique_name": "Exploitation for Client Execution",
+        "executive_summary": "An attacker leveraged the Exploitation for Client Execution (T1203) technique throughout a campaign, targeting client applications with malicious files designed to exploit software vulnerabilities. The exploitation resulted in the execution of arbitrary code, allowing the attacker to achieve their objectives. This technique was consistently employed across multiple instances, underscoring its central role in the attack's success.",
+        "pages_detected": [
+            7
+        ]
+    },
+    {
+        "technique_id": "T1190",
+        "technique_name": "Exploit Public-Facing Application",
+        "executive_summary": "An adversary utilizing the Sednit APT tactics, techniques, and procedures (TTPs) exploited a publicly disclosed vulnerability in WinRAR, identified as CVE-2023-38831, to gain unauthorized access to targeted systems. This exploitation of a public-facing application is consistent with the MITRE ATT&CK technique T1190: Exploit Public-Facing Application. The successful exploitation of this vulnerability allowed the adversary to execute malicious code and potentially compromise sensitive data within the affected environment.",
+        "pages_detected": [
+            8
+        ]
+    },
+    {
+        "technique_id": "T1598.002",
+        "technique_name": "Spearphishing Attachment",
+        "executive_summary": "APT29 has leveraged the Spearphishing Attachment tactic (T1598.002) in their campaign, utilizing a BMW car for sale lure theme to deceive targets. This technique involves sending malicious attachments via email that appear to be legitimate business communications or advertisements, but actually contain malware designed to gather sensitive information about the target organization. The attackers' use of this tactic suggests a targeted and sophisticated approach, as they tailor their lures to specific themes and interests in order to increase the likelihood of successful exploitation. As a result, APT29 has been able to successfully infiltrate multiple organizations, compromising their systems and potentially gaining access to sensitive data.",
+        "pages_detected": [
+            9
+        ]
+    },
+    {
+        "technique_id": "T1027.009",
+        "technique_name": "Embedded Payloads",
+        "executive_summary": "An attacker leveraged the Embedded Payloads technique (T1027.009) to conceal malicious code within a PowerShell script, payload_1.ps1, embedded within a file. This tactic was employed across multiple instances of the campaign, indicating a deliberate effort to evade detection and maintain persistence on compromised systems.",
+        "pages_detected": [
+            10
+        ]
+    }
+]

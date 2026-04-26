@@ -7,8 +7,8 @@ from qdrant_client import QdrantClient
 from langchain_ollama import ChatOllama
 from langchain_core.prompts import ChatPromptTemplate
 
-# Importamos tu módulo de la Fase 1
 from report_process import CTIReportProcessor
+from consolidator import ReportConsolidator
 
 # 1. Definimos la estructura ESTRICTA que queremos que devuelva la IA
 class TTPDetection(BaseModel):
@@ -122,14 +122,27 @@ Analyze the fragment and return the structured JSON output.
         return final_report
 
 def main():
-    # Asegúrate de tener tu modelo local corriendo (ej. ollama run llama3.1:8b)
-    analyzer = ThreatAnalyzer(model_name="llama3.1:8b") # Cambia a qwen2.5 si usaste ese
+    import json
     
+    # 1. Configuración
     pdf_path = "data/APT29 attacks Embassies using CVE-2023-38831 - report en.pdf"
-    resultados = analyzer.analyze_pdf(pdf_path)
+    modelo_llm = "llama3.1:8b" # Cambia esto si usas qwen2.5
     
-    print("\n=== RESUMEN FINAL DEL REPORTE ===")
-    print(json.dumps(resultados, indent=4, ensure_ascii=False))
+    # 2. Analizar el PDF (Fases 1 a 3)
+    analyzer = ThreatAnalyzer(model_name=modelo_llm)
+    raw_results = analyzer.analyze_pdf(pdf_path)
+    
+    # 3. Consolidar resultados (Fase 4)
+    print("\n--- INICIANDO FASE DE CONSOLIDACIÓN ---")
+    consolidator = ReportConsolidator(model_name=modelo_llm)
+    final_report = consolidator.consolidate(raw_results)
+    
+    # 4. Guardar a archivo JSON final
+    output_path = "reporte_cti_final.json"
+    with open(output_path, "w", encoding="utf-8") as f:
+        json.dump(final_report, f, indent=4, ensure_ascii=False)
+        
+    print(f"\n[!!!] PROCESO COMPLETADO. Informe ejecutivo guardado en '{output_path}'.")
 
 if __name__ == "__main__":
     main()
