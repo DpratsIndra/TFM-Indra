@@ -42,22 +42,24 @@ class ThreatAnalyzer:
         
         # El Prompt: La trampa de seguridad y las reglas del SOC
         self.prompt = ChatPromptTemplate.from_messages([
-            ("system", """Eres un analista Senior de Ciberinteligencia (CTI) Nivel 3.
-Tu objetivo es analizar un fragmento de un reporte de seguridad y determinar si se describe una táctica o técnica de ataque real.
+           ("system", """You are a Senior Cyber Threat Intelligence (CTI) Analyst.
+Your task is to perform high-precision mapping between attack evidence and the MITRE ATT&CK framework.
 
-REGLAS ESTRICTAS:
-1. Analiza el texto proporcionado. Si el texto habla de acciones normales de usuarios, descripciones de herramientas de defensa, o contexto inofensivo, clasifícalo como is_malicious = False.
-2. Si el texto describe un ATAQUE REAL, revisa la lista de Técnicas Candidatas de MITRE ATT&CK que se te proporciona.
-3. Elige la técnica candidata que MEJOR describa el ataque. NO te inventes IDs de técnicas que no estén en la lista de candidatas.
-4. Tu justificación debe ser técnica y basarse en las evidencias del texto."""),
+STRICT RULES:
+1. You will be provided with the 10 most likely MITRE techniques retrieved by a search engine.
+2. Analyze the report fragment carefully. If there is NO clear and evident match with any MITRE technique, set is_malicious = False.
+3. Do not force a mapping if the text is merely informative, introductory, or describes legitimate administrative actions.
+4. If an attack is present, select the technique that best fits the SPECIFIC behavior.
+5. Ignore candidates that share keywords but do not match the attacker's INTENT described in the fragment.
+6. Your justification must be technical, concise, and based strictly on the provided text."""),
             ("human", """
---- FRAGMENTO DEL REPORTE ---
+--- REPORT FRAGMENT ---
 {report_chunk}
 
---- TÉCNICAS CANDIDATAS DE MITRE (Recuperadas de la Base de Datos) ---
+--- MITRE ATT&CK CANDIDATES (Top 10 from Database) ---
 {mitre_candidates}
 
-Analiza el fragmento y devuelve el JSON correspondiente.
+Analyze the fragment and return the structured JSON output.
 """)
         ])
         
