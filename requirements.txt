@@ -1,0 +1,20 @@
+# LangChain y Ecosistema
+langchain-core>=0.2.0
+langchain-community
+langchain-ollama
+langchain-qdrant
+langchain-huggingface
+langchain-text-splitters
+
+# Base de Datos Vectorial
+qdrant-client
+fastembed
+
+# Procesamiento de Documentos y Texto
+pymupdf
+pydantic
+requests
+
+# IA y Embeddings
+sentence-transformers
+torch
