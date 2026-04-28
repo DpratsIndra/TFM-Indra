@@ -10,12 +10,14 @@ from langchain_core.prompts import ChatPromptTemplate
 from report_process import CTIReportProcessor
 from consolidator import ReportConsolidator
 
-# 1. Definimos la estructura ESTRICTA que queremos que devuelva la IA
-class TTPDetection(BaseModel):
-    is_malicious: bool = Field(description="True si el texto describe una acción maliciosa de un atacante. False si es contexto inofensivo, explicaciones generales o acciones de un administrador.")
-    technique_id: str = Field(description="ID de la técnica de MITRE (ej. T1547.001). Si is_malicious es False, devuelve 'N/A'.")
-    technique_name: str = Field(description="Nombre de la técnica. Si is_malicious es False, devuelve 'N/A'.")
-    justification: str = Field(description="Razonamiento técnico paso a paso de por qué has elegido esa técnica o por qué has decidido que el texto es inofensivo.")
+class TechniqueMatch(BaseModel):
+    technique_id: str = Field(description="ID de la técnica de MITRE (ej. T1547.001).")
+    technique_name: str = Field(description="Nombre de la técnica.")
+    justification: str = Field(description="Razonamiento técnico paso a paso de por qué has elegido esta técnica.")
+
+class ChunkAnalysis(BaseModel):
+    is_malicious: bool = Field(description="True si el texto describe acciones de un atacante. False si es contexto inofensivo.")
+    detected_techniques: List[TechniqueMatch] = Field(description="Lista de TODAS las técnicas de MITRE presentes en el texto. Puede estar vacía si is_malicious es False.")
 
 class ThreatAnalyzer:
     def __init__(self, model_name: str = "llama3.1:8b"):
@@ -38,20 +40,19 @@ class ThreatAnalyzer:
         # Usamos temperature=0 para que sea analítico y determinista (cero creatividad)
         self.llm = ChatOllama(model=model_name, temperature=0)
         # Forzamos al modelo a devolver siempre nuestro esquema Pydantic
-        self.structured_llm = self.llm.with_structured_output(TTPDetection)
+        self.structured_llm = self.llm.with_structured_output(ChunkAnalysis)
         
         # El Prompt: La trampa de seguridad y las reglas del SOC
         self.prompt = ChatPromptTemplate.from_messages([
            ("system", """You are a Senior Cyber Threat Intelligence (CTI) Analyst.
-Your task is to perform high-precision mapping between attack evidence and the MITRE ATT&CK framework.
+Your task is to perform high-precision multi-label mapping between attack evidence and the MITRE ATT&CK framework.
 
 STRICT RULES:
 1. You will be provided with the 10 most likely MITRE techniques retrieved by a search engine.
-2. Analyze the report fragment carefully. If there is NO clear and evident match with any MITRE technique, set is_malicious = False.
-3. Do not force a mapping if the text is merely informative, introductory, or describes legitimate administrative actions.
-4. If an attack is present, select the technique that best fits the SPECIFIC behavior.
-5. Ignore candidates that share keywords but do not match the attacker's INTENT described in the fragment.
-6. Your justification must be technical, concise, and based strictly on the provided text."""),
+2. Analyze the report fragment carefully. If there is NO clear attack, set is_malicious = False and leave detected_techniques empty.
+3. If an attack is present, extract ALL techniques from the candidates list that are explicitly occurring in the fragment. A single text can contain multiple techniques.
+4. Only select techniques from the provided candidates list. Do not hallucinate IDs.
+5. Your justification for each technique must be technical and concise."""),
             ("human", """
 --- REPORT FRAGMENT ---
 {report_chunk}
@@ -96,23 +97,25 @@ Analyze the fragment and return the structured JSON output.
             
             # Fase 3: Inferencia con Ollama
             try:
-                result : TTPDetection = self.analysis_chain.invoke({
+                result : ChunkAnalysis = self.analysis_chain.invoke({
                     "report_chunk": chunk.page_content,
                     "mitre_candidates": candidates_text
                 })
                 
-                # Si el LLM detectó que era un ataque real, lo guardamos
-                if result.is_malicious:
-                    print(f"   [!] DETECCIÓN: {result.technique_id} - {result.technique_name}")
-                    print(f"   [>] Justificación: {result.justification}\n")
-                    
-                    final_report.append({
-                        "chunk_id": i+1,
-                        "page": chunk.metadata["page"],
-                        "technique_id": result.technique_id,
-                        "technique_name": result.technique_name,
-                        "justification": result.justification
-                    })
+                # Si el LLM detectó que era un ataque real y encontró técnicas, las guardamos
+                if result.is_malicious and result.detected_techniques:
+                    print(f"   [!] DETECTADAS {len(result.detected_techniques)} TÉCNICAS:")
+                    for tech in result.detected_techniques:
+                        print(f"      - {tech.technique_id} ({tech.technique_name})")
+                        print(f"        Justificación: {tech.justification}\n")
+                        
+                        final_report.append({
+                            "chunk_id": i+1,
+                            "page": chunk.metadata["page"],
+                            "technique_id": tech.technique_id,
+                            "technique_name": tech.technique_name,
+                            "justification": tech.justification
+                        })
                 else:
                     print(f"   [OK] Texto inofensivo. Contexto ignorado.\n")
                     
