@@ -18,3 +18,8 @@ requests
 # IA y Embeddings
 sentence-transformers
 torch
+
+# UI Dashboard
+streamlit
+unstructured[pdf]
+python-dotenv

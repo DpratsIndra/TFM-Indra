@@ -1,0 +1,95 @@
+import sys
+import os
+import tempfile
+import streamlit as st
+
+# Add the project root to the python path so imports from src work smoothly
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
+from src.core.ioc_masker import IoCMasker
+from src.langchain_pipeline.phase1_ingestion import ReportIngestor
+
+# Setup Page Configuration
+st.set_page_config(page_title="CTI Preprocessing Inspector", layout="wide")
+st.title("🛡️ CTI Preprocessing Inspector")
+st.markdown("Sube un reporte CTI (PDF) para visualizar el comportamiento de **Fase 1: Ingesta, Sanitización de IoCs y Semantic Chunking**.")
+
+# 1. Upload de Archivo
+uploaded_file = st.file_uploader("Sube un reporte CTI (PDF)", type=["pdf"])
+
+if uploaded_file is not None:
+    # Save the uploaded file to a temporary location so ReportIngestor can read it
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
+        tmp_file.write(uploaded_file.read())
+        tmp_file_path = tmp_file.name
+
+    st.success(f"Archivo cargado correctamente: {uploaded_file.name}")
+
+    with st.spinner("Procesando y dividiendo el reporte (Phase 1)..."):
+        # 2. Procesamiento en Memoria
+        ingestor = ReportIngestor(chunk_size=1500, chunk_overlap=300)
+        masker = IoCMasker()
+        
+        try:
+            # Obtener el texto puro (sin enmascarar ni dividir) para la comparativa
+            raw_docs = ingestor.load_pdf(tmp_file_path)
+            raw_text = "\n\n".join([doc.page_content for doc in raw_docs])
+            
+            # Obtener los chunks finales (enmascarados y divididos)
+            chunked_docs = ingestor.process_report(tmp_file_path)
+            
+            # 3. Visualización de Sanitización (Máscaras)
+            st.header("1. Visualización de Sanitización (IoC Masking)")
+            st.markdown("Compara el texto original extraído del PDF con el texto procesado por `IoCMasker`.")
+            
+            col1, col2 = st.columns(2)
+            
+            # Tomamos una muestra generosa del inicio del documento (ej. primeros 3000 caracteres)
+            sample_raw_text = raw_text[:3000] + ("..." if len(raw_text) > 3000 else "")
+            sample_masked_text = masker.mask_text(sample_raw_text)
+            
+            # Función para resaltar los tags en el markdown de Streamlit
+            def highlight_tags(text: str) -> str:
+                tags = ["<IoC_URL>", "<IoC_EMAIL>", "<IoC_IPv6>", "<IoC_IPv4>", "<IoC_HASH>", "<IoC_DOMAIN>"]
+                highlighted = text
+                for tag in tags:
+                    # Streamlit Markdown soporta colores mediante HTML inline
+                    highlighted = highlighted.replace(tag, f"**<span style='color:#FF4B4B;'>{tag}</span>**")
+                return highlighted
+
+            with col1:
+                st.subheader("Extracto del Texto Original")
+                st.text_area("Raw Text", value=sample_raw_text, height=400, disabled=True, label_visibility="collapsed")
+                
+            with col2:
+                st.subheader("Texto Sanitizado")
+                # Mostramos como markdown permitiendo HTML para que se vea el color rojo en los Tags
+                st.markdown(
+                    f"<div style='height: 400px; overflow-y: scroll; padding: 10px; border: 1px solid #ccc; border-radius: 5px; background-color: #f9f9f9; color: black; font-family: monospace; white-space: pre-wrap;'>"
+                    f"{highlight_tags(sample_masked_text)}"
+                    f"</div>", 
+                    unsafe_allow_html=True
+                )
+                
+            st.markdown("---")
+            
+            # 4. Visualización de Chunks
+            st.header("2. División Semántica (Chunking)")
+            st.markdown("Revisa cómo el `RecursiveCharacterTextSplitter` ha dividido el documento.")
+            
+            with st.expander("Ver Chunks Generados"):
+                total_chunks = len(chunked_docs)
+                st.write(f"**Total de Chunks:** {total_chunks}")
+                
+                for i, doc in enumerate(chunked_docs):
+                    chunk_length = len(doc.page_content)
+                    st.markdown(f"#### Chunk {i + 1}/{total_chunks} (Longitud: {chunk_length} caracteres)")
+                    st.info(doc.page_content)
+                    
+        except Exception as e:
+            st.error(f"Error procesando el archivo: {e}")
+            
+        finally:
+            # Limpiar archivo temporal
+            if os.path.exists(tmp_file_path):
+                os.remove(tmp_file_path)
