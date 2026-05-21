@@ -201,32 +201,43 @@ class MitreIndexer:
             logger.error(f"Qdrant Connection or Indexing Error: {e}. Ensure Qdrant is running.")
             return None
 
+def setup_mitre_index(qdrant_url: str = "http://localhost:6333", collection_name: str = "mitre_attack"):
+    """
+    Función de conveniencia para descargar el dataset y poblar Qdrant automáticamente.
+    """
+    import os
+    import urllib.request
+    
+    mitre_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../data/mitre_data'))
+    mitre_file = os.path.join(mitre_dir, 'enterprise-attack.json')
+    
+    os.makedirs(mitre_dir, exist_ok=True)
+    
+    if not os.path.exists(mitre_file):
+        url = "https://raw.githubusercontent.com/mitre-attack/attack-stix-data/master/enterprise-attack/enterprise-attack.json"
+        logger.info(f"Descargando datos oficiales de MITRE ATT&CK desde {url}...")
+        print(f"Descargando datos oficiales de MITRE ATT&CK desde {url}...")
+        urllib.request.urlretrieve(url, mitre_file)
+        logger.info("Descarga completada.")
+        print("Descarga completada.")
+        
+    logger.info("Iniciando Fase 2: Construcción de la Base Vectorial (Qdrant)...")
+    print("Iniciando Fase 2: Construcción de la Base Vectorial (Qdrant)...")
+    indexer = MitreIndexer(qdrant_url=qdrant_url, collection_name=collection_name)
+    store = indexer.build_vector_store(mitre_file)
+    if not store:
+        raise Exception("Fallo al construir el índice de MITRE en Qdrant.")
+    return store
+
 if __name__ == "__main__":
     import os
     import sys
-    import urllib.request
     
     # Add project root to sys.path
     sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
     
-    # Setup paths
-    mitre_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../data/mitre_data'))
-    mitre_file = os.path.join(mitre_dir, 'enterprise-attack.json')
-    
-    # Create directory if it doesn't exist
-    os.makedirs(mitre_dir, exist_ok=True)
-    
-    # Download MITRE data if not present
-    if not os.path.exists(mitre_file):
-        url = "https://raw.githubusercontent.com/mitre-attack/attack-stix-data/master/enterprise-attack/enterprise-attack.json"
-        print(f"Descargando datos oficiales de MITRE ATT&CK desde {url}...")
-        urllib.request.urlretrieve(url, mitre_file)
-        print("Descarga completada.")
-        
-    print("Iniciando Fase 2: Construcción de la Base Vectorial (Qdrant)...")
-    indexer = MitreIndexer()
-    store = indexer.build_vector_store(mitre_file)
-    if store:
+    try:
+        setup_mitre_index()
         print("¡Indexación finalizada con éxito! Ya puedes ejecutar main_pipeline.py")
-    else:
-        print("Hubo un error durante la indexación.")
+    except Exception as e:
+        print(f"Hubo un error durante la indexación: {e}")

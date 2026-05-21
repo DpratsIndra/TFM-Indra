@@ -84,8 +84,15 @@ def run_cti_extraction(pdf_path: str) -> str:
     collection_name = "mitre_attack"
     
     try:
-        # Se asume que el Indexer (Fase 2) ya construyó la DB previamente
         client = QdrantClient(url=qdrant_url)
+        
+        # Verificamos si la colección existe; si no, la creamos
+        if not client.collection_exists(collection_name):
+            logger.info(f"[SETUP] La colección '{collection_name}' no existe. Ejecutando Indexer (Fase 2)...")
+            from src.langchain_pipeline.phase2_indexer import setup_mitre_index
+            setup_mitre_index(qdrant_url, collection_name)
+            logger.info("[SETUP] Colección MITRE ATT&CK construida exitosamente.")
+            
         embeddings = HuggingFaceEmbeddings(model_name="BAAI/bge-m3")
         vector_store = QdrantVectorStore(
             client=client,
@@ -93,8 +100,8 @@ def run_cti_extraction(pdf_path: str) -> str:
             embedding=embeddings
         )
     except Exception as e:
-        logger.error(f"Fallo crítico al conectar con Qdrant. ¿Está el contenedor corriendo? Error: {e}")
-        return json.dumps({"error": "Fallo de conexión a Base de Datos Vectorial", "detalle": str(e)})
+        logger.error(f"Fallo crítico al conectar con Qdrant o inicializar la DB. ¿Está el contenedor corriendo? Error: {e}")
+        return json.dumps({"error": "Fallo de conexión o inicialización en Qdrant", "detalle": str(e)})
 
     # ------------------------------------------------------------------
     # PHASE 3: Hybrid Retrieval y Cross-Encoder Reranking
