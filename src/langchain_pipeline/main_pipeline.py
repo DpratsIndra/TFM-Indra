@@ -128,40 +128,45 @@ def run_cti_extraction(pdf_path: str) -> str:
     # ------------------------------------------------------------------
     logger.info("[FASE 4] Consultando al LLM para confirmación estructurada...")
     
-    preferred_model = os.getenv("LLM_MODEL", "llama3.1:8b")
+    model_name = os.getenv("LLM_MODEL", "llama3.1:8b")
     base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
     
-    # Estrategia de Fallback: Si no hay RAM suficiente para el modelo preferido,
-    # bajamos gradualmente de tamaño a modelos más ligeros.
-    fallback_models = [preferred_model, "llama3.2:3b", "qwen2.5:1.5b"]
-    confirmed_ttps = None
+    # Lista de modelos con fallback a modelos más pequeños por si hay un error de OOM
+    fallback_models = [model_name, "llama3.2", "phi3:mini", "qwen2.5:1.5b"]
+    llm = None
     
-    for model_name in fallback_models:
-        logger.info(f"[FASE 4] Preparando modelo LLM: {model_name} ...")
+    for m in fallback_models:
+        logger.info(f"Intentando cargar el modelo LLM: {m}...")
+        temp_llm = ChatOllama(model=m, base_url=base_url, temperature=0.0)
         try:
-            # Asegurarnos de que el modelo esté descargado localmente (ejecución silenciosa)
-            subprocess.run(["ollama", "pull", model_name], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            
-            # Instanciamos ChatOllama forzando temperature=0 para obtener máxima determinística analítica
-            llm = ChatOllama(model=model_name, base_url=base_url, temperature=0.0)
-            
-            analyzer = TTPAnalyzer(llm=llm)
-            confirmed_ttps = analyzer.analyze_candidates(filtered_candidates)
-            
-            logger.info(f"[FASE 4] ✅ Inferencia completada con éxito usando {model_name}.")
-            break # Si funciona, salimos del bucle de fallbacks
-            
+            # Ejecutamos un invoke de prueba para forzar la carga en memoria
+            temp_llm.invoke("test")
+            logger.info(f"Modelo {m} cargado exitosamente en memoria.")
+            llm = temp_llm
+            break
         except Exception as e:
             error_msg = str(e).lower()
-            logger.warning(f"⚠️ [FASE 4] Fallo al usar {model_name}. Error: {e}")
-            if "memory" in error_msg or "system memory" in error_msg:
-                logger.info(f"🔄 [FASE 4] Memoria insuficiente para {model_name}, intentando con un modelo más pequeño...")
-            continue
+            if "not found" in error_msg:
+                logger.info(f"El modelo {m} no está instalado localmente. Intentando descargarlo (pull)...")
+                try:
+                    subprocess.run(["ollama", "pull", m], check=True)
+                    # Re-test tras la descarga
+                    temp_llm.invoke("test")
+                    logger.info(f"Modelo {m} descargado y cargado exitosamente.")
+                    llm = temp_llm
+                    break
+                except Exception as pull_e:
+                    logger.warning(f"Fallo al descargar o ejecutar el modelo {m} tras hacer pull. Error: {pull_e}")
+            else:
+                logger.warning(f"El modelo {m} falló (probablemente por memoria insuficiente). Error: {e}")
             
-    if confirmed_ttps is None:
-        logger.error("❌ [FASE 4] Todos los modelos de fallback fallaron. No hay memoria suficiente.")
-        return json.dumps([{"error": "Fallo de Inferencia LLM por falta de memoria u otros errores."}])
+    if not llm:
+        logger.error("Ninguno de los modelos LLM pudo cargarse. Verifica tu RAM y conexión a internet.")
+        return json.dumps({"error": "Fallo en la fase de inferencia LLM (Sin modelos disponibles o memoria insuficiente)"})
         
+    analyzer = TTPAnalyzer(llm=llm)
+    confirmed_ttps = analyzer.analyze_candidates(filtered_candidates)
+    
     # ------------------------------------------------------------------
     # EXTRACCIÓN DE RESULTADOS
     # ------------------------------------------------------------------
