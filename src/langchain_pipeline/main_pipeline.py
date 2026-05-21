@@ -53,6 +53,11 @@ from src.langchain_pipeline.phase4_inference import TTPAnalyzer
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+# Silenciar los molestos errores de conexión en segundo plano de LangSmith/HTTP
+logging.getLogger("langsmith.client").setLevel(logging.CRITICAL)
+logging.getLogger("urllib3.connectionpool").setLevel(logging.CRITICAL)
+logging.getLogger("httpx").setLevel(logging.CRITICAL)
+
 def run_cti_extraction(pdf_path: str) -> str:
     """
     Orquesta el flujo completo de 4 Fases de LangChain para extraer 
@@ -92,6 +97,9 @@ def run_cti_extraction(pdf_path: str) -> str:
             from src.langchain_pipeline.phase2_indexer import setup_mitre_index
             setup_mitre_index(qdrant_url, collection_name)
             logger.info("[SETUP] Colección MITRE ATT&CK construida exitosamente.")
+            # IMPORTANTE: Re-instanciar el cliente Qdrant. La indexación tarda mucho tiempo
+            # y el pool de conexiones HTTP original puede cerrarse por inactividad.
+            client = QdrantClient(url=qdrant_url)
             
         embeddings = HuggingFaceEmbeddings(model_name="BAAI/bge-m3")
         vector_store = QdrantVectorStore(
@@ -120,15 +128,40 @@ def run_cti_extraction(pdf_path: str) -> str:
     # ------------------------------------------------------------------
     logger.info("[FASE 4] Consultando al LLM para confirmación estructurada...")
     
-    model_name = os.getenv("LLM_MODEL", "llama3.1:8b")
+    preferred_model = os.getenv("LLM_MODEL", "llama3.1:8b")
     base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
     
-    # Instanciamos ChatOllama forzando temperature=0 para obtener máxima determinística analítica
-    llm = ChatOllama(model=model_name, base_url=base_url, temperature=0.0)
+    # Estrategia de Fallback: Si no hay RAM suficiente para el modelo preferido,
+    # bajamos gradualmente de tamaño a modelos más ligeros.
+    fallback_models = [preferred_model, "llama3.2:3b", "qwen2.5:1.5b"]
+    confirmed_ttps = None
     
-    analyzer = TTPAnalyzer(llm=llm)
-    confirmed_ttps = analyzer.analyze_candidates(filtered_candidates)
-    
+    for model_name in fallback_models:
+        logger.info(f"[FASE 4] Preparando modelo LLM: {model_name} ...")
+        try:
+            # Asegurarnos de que el modelo esté descargado localmente (ejecución silenciosa)
+            subprocess.run(["ollama", "pull", model_name], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            
+            # Instanciamos ChatOllama forzando temperature=0 para obtener máxima determinística analítica
+            llm = ChatOllama(model=model_name, base_url=base_url, temperature=0.0)
+            
+            analyzer = TTPAnalyzer(llm=llm)
+            confirmed_ttps = analyzer.analyze_candidates(filtered_candidates)
+            
+            logger.info(f"[FASE 4] ✅ Inferencia completada con éxito usando {model_name}.")
+            break # Si funciona, salimos del bucle de fallbacks
+            
+        except Exception as e:
+            error_msg = str(e).lower()
+            logger.warning(f"⚠️ [FASE 4] Fallo al usar {model_name}. Error: {e}")
+            if "memory" in error_msg or "system memory" in error_msg:
+                logger.info(f"🔄 [FASE 4] Memoria insuficiente para {model_name}, intentando con un modelo más pequeño...")
+            continue
+            
+    if confirmed_ttps is None:
+        logger.error("❌ [FASE 4] Todos los modelos de fallback fallaron. No hay memoria suficiente.")
+        return json.dumps([{"error": "Fallo de Inferencia LLM por falta de memoria u otros errores."}])
+        
     # ------------------------------------------------------------------
     # EXTRACCIÓN DE RESULTADOS
     # ------------------------------------------------------------------
