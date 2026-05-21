@@ -131,39 +131,9 @@ def run_cti_extraction(pdf_path: str) -> str:
     model_name = os.getenv("LLM_MODEL", "llama3.1:8b")
     base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
     
-    # Lista de modelos con fallback a modelos más pequeños por si hay un error de OOM
-    fallback_models = [model_name, "llama3.2", "phi3:mini", "qwen2.5:1.5b"]
-    llm = None
+    # Instanciamos ChatOllama forzando temperature=0 para obtener máxima determinística analítica
+    llm = ChatOllama(model=model_name, base_url=base_url, temperature=0.0)
     
-    for m in fallback_models:
-        logger.info(f"Intentando cargar el modelo LLM: {m}...")
-        temp_llm = ChatOllama(model=m, base_url=base_url, temperature=0.0)
-        try:
-            # Ejecutamos un invoke de prueba para forzar la carga en memoria
-            temp_llm.invoke("test")
-            logger.info(f"Modelo {m} cargado exitosamente en memoria.")
-            llm = temp_llm
-            break
-        except Exception as e:
-            error_msg = str(e).lower()
-            if "not found" in error_msg:
-                logger.info(f"El modelo {m} no está instalado localmente. Intentando descargarlo (pull)...")
-                try:
-                    subprocess.run(["ollama", "pull", m], check=True)
-                    # Re-test tras la descarga
-                    temp_llm.invoke("test")
-                    logger.info(f"Modelo {m} descargado y cargado exitosamente.")
-                    llm = temp_llm
-                    break
-                except Exception as pull_e:
-                    logger.warning(f"Fallo al descargar o ejecutar el modelo {m} tras hacer pull. Error: {pull_e}")
-            else:
-                logger.warning(f"El modelo {m} falló (probablemente por memoria insuficiente). Error: {e}")
-            
-    if not llm:
-        logger.error("Ninguno de los modelos LLM pudo cargarse. Verifica tu RAM y conexión a internet.")
-        return json.dumps({"error": "Fallo en la fase de inferencia LLM (Sin modelos disponibles o memoria insuficiente)"})
-        
     analyzer = TTPAnalyzer(llm=llm)
     confirmed_ttps = analyzer.analyze_candidates(filtered_candidates)
     

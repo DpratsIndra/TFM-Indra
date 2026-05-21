@@ -123,11 +123,15 @@ class TTPAnalyzer:
         else:
             logger.info("Perfil LOCAL detectado: Ejecutando cadena de forma secuencial (For-loop)...")
             # Para evitar OOM en Ollama o hardware modesto
-            for inp in inputs:
+            for i, inp in enumerate(inputs, 1):
                 try:
+                    logger.info(f"[{i}/{len(inputs)}] Consultando al LLM para la técnica: {inp['mitre_technique_id']}...")
                     response = chain.invoke(inp)
                     if response:
                         results.append(response)
+                        # Opcional: mostrar si el LLM confirmó o descartó la técnica
+                        estado = "CONFIRMADA" if response.is_present else "DESCARTADA"
+                        logger.info(f" -> Técnica {inp['mitre_technique_id']} {estado}.")
                 except Exception as e:
                     logger.error(f"Error procesando la técnica {inp['mitre_technique_id']}: {e}")
                     
