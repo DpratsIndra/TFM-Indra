@@ -134,14 +134,30 @@ def run_cti_extraction(pdf_path: str) -> str:
     # Instanciamos ChatOllama forzando temperature=0 para obtener máxima determinística analítica
     llm = ChatOllama(model=model_name, base_url=base_url, temperature=0.0)
     
+    # Verificamos si el modelo está instalado; si no, lo descargamos automáticamente
+    try:
+        logger.info(f"[FASE 4] Comprobando disponibilidad del modelo {model_name}...")
+        llm.invoke("test")
+    except Exception as e:
+        if "not found" in str(e).lower() or "never pull" in str(e).lower():
+            logger.info(f"[FASE 4] El modelo {model_name} no está instalado. Descargando (esto puede tardar varios minutos)...")
+            try:
+                subprocess.run(["ollama", "pull", model_name], check=True)
+                logger.info(f"[FASE 4] Modelo {model_name} descargado y listo para usar.")
+            except Exception as pull_e:
+                logger.error(f"Fallo crítico al descargar el modelo {model_name}. Error: {pull_e}")
+                return json.dumps({"error": f"No se pudo descargar el modelo LLM: {model_name}"})
+        else:
+            logger.warning(f"[FASE 4] Advertencia al probar el modelo {model_name}: {e}")
+            
     analyzer = TTPAnalyzer(llm=llm)
     confirmed_ttps = analyzer.analyze_candidates(filtered_candidates)
     
     # ------------------------------------------------------------------
     # EXTRACCIÓN DE RESULTADOS
     # ------------------------------------------------------------------
-    # Convertimos los objetos de Pydantic a diccionarios y luego a JSON
-    output_dict_list = [ttp.model_dump() for ttp in confirmed_ttps]
+    # Convertimos los objetos de Pydantic a diccionarios excluyendo 'is_present' para limpiar el output final
+    output_dict_list = [ttp.model_dump(exclude={'is_present'}) for ttp in confirmed_ttps]
     
     logger.info("--- Pipeline Finalizado con Éxito ---")
     return output_dict_list

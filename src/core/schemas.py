@@ -7,17 +7,29 @@ class TTPDetection(BaseModel):
     """
     technique_id: str = Field(
         ...,
-        description="El ID de la técnica de MITRE ATT&CK (ej. T1059)."
+        description="The MITRE ATT&CK technique ID (e.g. T1059)."
+    )
+    tactic: List[str] = Field(
+        default_factory=list,
+        description="List of associated MITRE tactics obtained from context."
+    )
+    technique_name: str = Field(
+        default="",
+        description="The full name of the MITRE ATT&CK technique."
     )
     is_present: bool = Field(
         ...,
-        description="True si la evidencia demuestra inequívocamente el ataque. False si es un falso positivo o una mención benigna/defensiva."
+        description="True if the evidence unequivocally demonstrates the attacker used this technique. False if it is a false positive, benign, or defensive mention."
     )
-    technical_justification: str = Field(
+    confidence_score: float = Field(
+        default=0.0,
+        description="Confidence score coming from the retrieval phase."
+    )
+    justification: str = Field(
         ...,
-        description="Explicación técnica de por qué se detectó (o por qué se descartó) esta técnica, citando el texto original proporcionado."
+        description="Technical explanation of why this technique was detected (or why it was rejected), quoting the original provided text."
     )
-    iocs_found: List[str] = Field(
-        default_factory=list,
-        description="Lista de las etiquetas enmascaradas encontradas en la evidencia (ej. ['<IoC_IPv4>', '<IoC_HASH>'])."
+    procedure: str = Field(
+        ...,
+        description="A concise explanation of the exact, specific action the attacker took in this report (The MITRE ATT&CK Procedure)."
     )

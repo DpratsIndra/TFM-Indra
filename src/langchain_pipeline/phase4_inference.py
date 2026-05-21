@@ -46,27 +46,28 @@ class TTPAnalyzer:
             ChatPromptTemplate: Plantilla estructurada para invocar al LLM.
         """
         system_instruction = (
-            "Actúa como analista CTI. Tu objetivo es confirmar si los chunks demuestran el uso de la técnica."
+            "Act as an expert CTI and MITRE ATT&CK analyst. Your objective is to analyze extracts from a threat "
+            "intelligence report and deterministically confirm if they demonstrate the use of the indicated technique. "
+            "You must extract the 'justification' (why it was detected) and the 'procedure' (a concise explanation "
+            "of the exact and specific action the attacker took in this report)."
         )
+        
+        # Aplicar el patrón "Prompt Repetition" doblando el prompt de sistema y el del usuario
+        if self.use_prompt_repetition:
+            system_instruction = f"{system_instruction}\n\n{system_instruction}"
         
         user_message = (
-            "### CONTEXTO MITRE\n"
-            "{mitre_technique_id} - {mitre_description}\n\n"
-            "### EVIDENCIA DEL REPORTE\n"
+            "### MITRE CONTEXT\n"
+            "Technique: {mitre_technique_id} - {mitre_technique_name}\n"
+            "Tactics: {mitre_tactics}\n\n"
+            "### REPORT EVIDENCE\n"
             "{supporting_chunks}\n\n"
+            "Based EXCLUSIVELY on the provided evidence, "
+            "is the use of the {mitre_technique_id} technique confirmed? Return the structured JSON."
         )
         
-        # Aplicar el patrón "Prompt Repetition" para mitigar alucinaciones / distracciones del LLM
         if self.use_prompt_repetition:
-            user_message += (
-                "Let me repeat that: Basándote EXCLUSIVAMENTE en la evidencia proporcionada, "
-                "¿se confirma el uso de la técnica {mitre_technique_id}? Devuelve el JSON estructurado."
-            )
-        else:
-            user_message += (
-                "Basándote EXCLUSIVAMENTE en la evidencia proporcionada, "
-                "¿se confirma el uso de la técnica {mitre_technique_id}? Devuelve el JSON estructurado."
-            )
+            user_message = f"{user_message}\n\n{user_message}"
             
         return ChatPromptTemplate.from_messages([
             ("system", system_instruction),
@@ -100,8 +101,11 @@ class TTPAnalyzer:
             
             inputs.append({
                 "mitre_technique_id": tech_id,
-                "mitre_description": data.get("name", "Desconocida"),
-                "supporting_chunks": joined_chunks
+                "mitre_technique_name": data.get("name", "Desconocida"),
+                "mitre_tactics": ", ".join(data.get("tactics", [])),
+                "supporting_chunks": joined_chunks,
+                "_meta_tactics": data.get("tactics", []),
+                "_meta_score": data.get("score", 0.0)
             })
             
         logger.info(f"Preparados {len(inputs)} candidatos para inferencia LLM.")
@@ -115,8 +119,13 @@ class TTPAnalyzer:
                 # LLMs grandes en la nube o clusters GPU aguantan batching
                 batch_responses = chain.batch(inputs)
                 
-                # Descartar nulos por si hubo fallos de red/parseo
-                results.extend([res for res in batch_responses if res is not None])
+                # Descartar nulos por si hubo fallos de red/parseo y poblar metadata
+                for inp, res in zip(inputs, batch_responses):
+                    if res is not None:
+                        res.tactic = inp["_meta_tactics"]
+                        res.technique_name = inp["mitre_technique_name"]
+                        res.confidence_score = inp["_meta_score"]
+                        results.append(res)
             except Exception as e:
                 logger.error(f"Error durante el batching en AWS: {e}")
                 
@@ -128,7 +137,11 @@ class TTPAnalyzer:
                     logger.info(f"[{i}/{len(inputs)}] Consultando al LLM para la técnica: {inp['mitre_technique_id']}...")
                     response = chain.invoke(inp)
                     if response:
+                        response.tactic = inp["_meta_tactics"]
+                        response.technique_name = inp["mitre_technique_name"]
+                        response.confidence_score = inp["_meta_score"]
                         results.append(response)
+                        
                         # Opcional: mostrar si el LLM confirmó o descartó la técnica
                         estado = "CONFIRMADA" if response.is_present else "DESCARTADA"
                         logger.info(f" -> Técnica {inp['mitre_technique_id']} {estado}.")

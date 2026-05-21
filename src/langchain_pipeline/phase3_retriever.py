@@ -118,13 +118,21 @@ class CandidateRetriever:
             for doc in final_candidates:
                 tech_id = doc.metadata.get("technique_id", "Unknown")
                 tech_name = doc.metadata.get("name", "Unknown")
+                tactics_str = doc.metadata.get("tactics", "")
+                score = doc.metadata.get("rerank_score", 0.0)
                 
                 # Initialize the technique entry if it's the first time we see it
                 if tech_id not in grouped_results:
                     grouped_results[tech_id] = {
                         "name": tech_name,
+                        "tactics": [t.strip() for t in tactics_str.split(",") if t.strip()],
+                        "score": score,
                         "supporting_chunks": []
                     }
+                else:
+                    # Keep the maximum confidence score seen across chunks for this technique
+                    if score > grouped_results[tech_id]["score"]:
+                        grouped_results[tech_id]["score"] = score
                     
                 # Append the chunk to the supporting chunks only if it's unique
                 # This prevents redundant context from overloading the LLM in Phase 4
