@@ -24,18 +24,6 @@ def bootstrap_environment():
     except FileNotFoundError:
         print("⚠️ [BOOTSTRAP] 'ollama' no está instalado o no se encuentra en el PATH.")
 
-    # 3. Iniciar Qdrant en Docker
-    print("🗄️ [BOOTSTRAP] Levantando contenedor de Qdrant vía Docker...")
-    try:
-        # Usamos subprocess.run sin check=True para no detenernos si ya está corriendo
-        subprocess.run(
-            ["docker", "run", "-d", "-p", "6333:6333", "-p", "6334:6334", "qdrant/qdrant"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL
-        )
-    except FileNotFoundError:
-        print("⚠️ [BOOTSTRAP] 'docker' no encontrado. Asegúrate de tener Docker instalado.")
-
     print("⏳ [BOOTSTRAP] Esperando 5 segundos para que los servicios estén listos...\n")
     time.sleep(5)
 
