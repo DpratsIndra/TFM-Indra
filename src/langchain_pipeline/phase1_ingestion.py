@@ -3,7 +3,8 @@ from typing import List
 
 from langchain_community.document_loaders import UnstructuredPDFLoader
 from langchain_core.documents import Document
-from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_experimental.text_splitter import SemanticChunker
+from langchain_huggingface import HuggingFaceEmbeddings
 
 from src.core.ioc_masker import IoCMasker
 
@@ -20,20 +21,20 @@ class ReportIngestor:
         Initializes the ReportIngestor with chunking parameters and IoC masker.
         
         Args:
-            chunk_size (int): The maximum size of each text chunk.
-            chunk_overlap (int): The overlap between consecutive chunks to preserve context.
+            chunk_size (int): Deprecated. Maintained for backward compatibility.
+            chunk_overlap (int): Deprecated. Maintained for backward compatibility.
         """
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
         
         self.ioc_masker = IoCMasker()
         
-        # We use RecursiveCharacterTextSplitter for optimal semantic chunking.
-        # It tries to split on paragraphs, then sentences, then words.
-        self.text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=self.chunk_size,
-            chunk_overlap=self.chunk_overlap,
-            separators=["\n\n", "\n", ".", " ", ""]
+        # Utilizamos SemanticChunker para hacer una partición basada en significado (embeddings)
+        # Esto agrupa frases semánticamente relacionadas en lugar de solo por caracteres.
+        self.embeddings = HuggingFaceEmbeddings(model_name="BAAI/bge-m3")
+        self.text_splitter = SemanticChunker(
+            self.embeddings,
+            breakpoint_threshold_type="percentile" # Separa cuando hay una caída abrupta de similitud
         )
 
     def load_pdf(self, file_path: str) -> List[Document]:
@@ -52,7 +53,7 @@ class ReportIngestor:
             
         # Using mode='single' groups text together but retains Unstructured's smart parsing
         # Alternatively, mode='elements' returns a document per paragraph. 
-        # Since we use RecursiveCharacterTextSplitter later, 'single' or 'elements' both work well.
+        # Since we use SemanticChunker later, 'single' is preferred to provide full context.
         loader = UnstructuredPDFLoader(file_path, mode="single")
         documents = loader.load()
         return documents

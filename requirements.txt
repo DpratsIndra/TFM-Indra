@@ -5,7 +5,7 @@ langchain-ollama
 langchain-qdrant
 langchain-huggingface
 langchain-text-splitters
-
+langchain-experimental
 # Base de Datos Vectorial
 qdrant-client
 fastembed

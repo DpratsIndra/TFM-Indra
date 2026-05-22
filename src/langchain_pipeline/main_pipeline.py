@@ -134,21 +134,21 @@ def run_cti_extraction(pdf_path: str) -> str:
     # Instanciamos ChatOllama forzando temperature=0 para obtener máxima determinística analítica
     llm = ChatOllama(model=model_name, base_url=base_url, temperature=0.0)
     
-    # Verificamos si el modelo está instalado; si no, lo descargamos automáticamente
+    # Verificamos si el modelo está instalado consultando la CLI de Ollama directamente
+    # Esto es mucho más rápido y seguro que hacer un llm.invoke() que puede quedarse colgado
     try:
         logger.info(f"[FASE 4] Comprobando disponibilidad del modelo {model_name}...")
-        llm.invoke("test")
-    except Exception as e:
-        if "not found" in str(e).lower() or "never pull" in str(e).lower():
+        check_result = subprocess.run(["ollama", "show", model_name], capture_output=True)
+        
+        if check_result.returncode != 0:
             logger.info(f"[FASE 4] El modelo {model_name} no está instalado. Descargando (esto puede tardar varios minutos)...")
-            try:
-                subprocess.run(["ollama", "pull", model_name], check=True)
-                logger.info(f"[FASE 4] Modelo {model_name} descargado y listo para usar.")
-            except Exception as pull_e:
-                logger.error(f"Fallo crítico al descargar el modelo {model_name}. Error: {pull_e}")
-                return json.dumps({"error": f"No se pudo descargar el modelo LLM: {model_name}"})
+            subprocess.run(["ollama", "pull", model_name], check=True)
+            logger.info(f"[FASE 4] Modelo {model_name} descargado y listo para usar.")
         else:
-            logger.warning(f"[FASE 4] Advertencia al probar el modelo {model_name}: {e}")
+            logger.info(f"[FASE 4] El modelo {model_name} ya está disponible en el sistema.")
+            
+    except Exception as e:
+        logger.warning(f"[FASE 4] No se pudo verificar o descargar el modelo automáticamente mediante la CLI. Error: {e}")
             
     analyzer = TTPAnalyzer(llm=llm)
     confirmed_ttps = analyzer.analyze_candidates(filtered_candidates)
