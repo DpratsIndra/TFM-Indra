@@ -3,8 +3,7 @@ from typing import List
 
 from langchain_community.document_loaders import UnstructuredPDFLoader
 from langchain_core.documents import Document
-from langchain_experimental.text_splitter import SemanticChunker
-from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 from src.core.ioc_masker import IoCMasker
 
@@ -21,20 +20,21 @@ class ReportIngestor:
         Initializes the ReportIngestor with chunking parameters and IoC masker.
         
         Args:
-            chunk_size (int): Deprecated. Maintained for backward compatibility.
-            chunk_overlap (int): Deprecated. Maintained for backward compatibility.
+            chunk_size (int): The maximum character size for each chunk.
+            chunk_overlap (int): Overlap in characters to maintain context.
         """
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
         
         self.ioc_masker = IoCMasker()
         
-        # Utilizamos SemanticChunker para hacer una partición basada en significado (embeddings)
-        # Esto agrupa frases semánticamente relacionadas en lugar de solo por caracteres.
-        self.embeddings = HuggingFaceEmbeddings(model_name="BAAI/bge-m3")
-        self.text_splitter = SemanticChunker(
-            self.embeddings,
-            breakpoint_threshold_type="percentile" # Separa cuando hay una caída abrupta de similitud
+        # Usamos RecursiveCharacterTextSplitter para garantizar un tamaño de chunk predecible.
+        # SemanticChunker a veces agrupa demasiadas páginas en un solo chunk gigante,
+        # lo que provoca que el Reranker (limitado a 512 tokens) trunque el texto y pierda contexto.
+        self.text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=self.chunk_size,
+            chunk_overlap=self.chunk_overlap,
+            separators=["\n\n", "\n", ".", " ", ""]
         )
 
     def load_pdf(self, file_path: str) -> List[Document]:
