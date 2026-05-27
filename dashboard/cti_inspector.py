@@ -1,3 +1,5 @@
+# To run: conda activate tfm_env 
+# streamlit run dashboard/cti_inspector.py 
 import sys
 import os
 import tempfile

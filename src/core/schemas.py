@@ -1,6 +1,24 @@
 from typing import List
 from pydantic import BaseModel, Field
 
+class Evidence(BaseModel):
+    location: str = Field(
+        ...,
+        description="The location of the evidence (e.g., 'Page 3, Chunk 5')."
+    )
+    procedure: str = Field(
+        ...,
+        description="A concise explanation of the exact, specific action the attacker took in this report (The MITRE ATT&CK Procedure)."
+    )
+    justification: str = Field(
+        ...,
+        description="Technical explanation of why this chunk demonstrates the technique, quoting the original provided text."
+    )
+    confidence_score: float = Field(
+        ...,
+        description="Confidence score coming from the retrieval phase."
+    )
+
 class TTPDetection(BaseModel):
     """
     Pydantic schema to enforce structured LLM output for MITRE ATT&CK technique detection.
@@ -21,15 +39,7 @@ class TTPDetection(BaseModel):
         ...,
         description="True if the evidence unequivocally demonstrates the attacker used this technique. False if it is a false positive, benign, or defensive mention."
     )
-    confidence_score: float = Field(
-        default=0.0,
-        description="Confidence score coming from the retrieval phase."
-    )
-    justification: str = Field(
-        ...,
-        description="Technical explanation of why this technique was detected (or why it was rejected), quoting the original provided text."
-    )
-    procedure: str = Field(
-        ...,
-        description="A concise explanation of the exact, specific action the attacker took in this report (The MITRE ATT&CK Procedure)."
+    occurrences: List[Evidence] = Field(
+        default_factory=list,
+        description="A list of specific occurrences/evidence blocks where the technique was confirmed."
     )

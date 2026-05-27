@@ -9,6 +9,9 @@ class IoCMasker:
     
     def __init__(self) -> None:
         # Regex patterns compiled for performance
+        
+        self.large_payload_pattern = re.compile(r'\b[a-zA-Z0-9+/=]{150,}\b')
+        
         # URLs: Matches http, https, ftp
         self.url_pattern = re.compile(
             r'(?:https?|ftp)://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+',
@@ -47,6 +50,15 @@ class IoCMasker:
             re.IGNORECASE
         )
 
+    def _refang(self, text: str) -> str:
+        """
+        Reverts defanged IoCs to their original form before masking.
+        """
+        text = text.replace('hxxps', 'https')
+        text = text.replace('hxxp', 'http')
+        text = text.replace('[.]', '.')
+        return text
+
     def mask_text(self, text: str) -> str:
         """
         Masks all identified IoCs in the provided text with typed tags.
@@ -63,8 +75,12 @@ class IoCMasker:
         if not text:
             return text
             
+        text = self._refang(text)
+        
+        masked_text = self.large_payload_pattern.sub('<LARGE_PAYLOAD_REMOVED>', text)
+        
         # 1. URLs (most complex, contains domains/paths)
-        masked_text = self.url_pattern.sub('<IoC_URL>', text)
+        masked_text = self.url_pattern.sub('<IoC_URL>', masked_text)
         
         # 2. Emails (contains domains)
         masked_text = self.email_pattern.sub('<IoC_EMAIL>', masked_text)
@@ -77,8 +93,6 @@ class IoCMasker:
         masked_text = self.hash_pattern.sub('<IoC_HASH>', masked_text)
         
         # 5. Domains (done after URLs and Emails to prevent partial overrides)
-        # Note: In a real prod env, we might want a stricter domain regex to avoid 
-        # matching filenames like "report.pdf", but for CTI context this is standard.
         masked_text = self.domain_pattern.sub('<IoC_DOMAIN>', masked_text)
         
         return masked_text

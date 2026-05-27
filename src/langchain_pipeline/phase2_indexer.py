@@ -203,7 +203,8 @@ class MitreIndexer:
 
 def setup_mitre_index(qdrant_url: str = "http://localhost:6333", collection_name: str = "mitre_attack"):
     """
-    Función de conveniencia para descargar el dataset y poblar Qdrant automáticamente.
+    Helper function to automatically download the MITRE ATT&CK dataset
+    and populate the Qdrant vector database if it hasn't been set up yet.
     """
     import os
     import urllib.request

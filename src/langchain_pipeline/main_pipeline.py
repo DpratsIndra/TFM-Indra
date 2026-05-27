@@ -17,12 +17,15 @@ def bootstrap_environment():
     except Exception as e:
         print(f"⚠️ [BOOTSTRAP] Error instalando dependencias: {e}")
 
-    # 2. Iniciar Ollama en segundo plano
-    print("🦙 [BOOTSTRAP] Iniciando servicio Ollama...")
-    try:
-        subprocess.Popen(["ollama", "serve"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except FileNotFoundError:
-        print("⚠️ [BOOTSTRAP] 'ollama' no está instalado o no se encuentra en el PATH.")
+    llm_provider = os.environ.get("LLM_PROVIDER", "ollama").lower()
+    
+    if llm_provider == "ollama":
+        # 2. Iniciar Ollama en segundo plano
+        print("🦙 [BOOTSTRAP] Iniciando servicio Ollama...")
+        try:
+            subprocess.Popen(["ollama", "serve"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except FileNotFoundError:
+            print("⚠️ [BOOTSTRAP] 'ollama' no está instalado o no se encuentra en el PATH.")
 
     print("⏳ [BOOTSTRAP] Esperando 5 segundos para que los servicios estén listos...\n")
     time.sleep(5)
@@ -39,13 +42,14 @@ from dotenv import load_dotenv
 # Cargar variables de entorno ANTES de importar LangChain (forzando override para que actualice la API key si cambió)
 load_dotenv(override=True)
 
-from langchain_ollama import ChatOllama
+# Import pipeline phases (Ingestion FIRST to prevent OpenMP/segfault conflicts with torch/onnxruntime)
+from src.langchain_pipeline.phase1_ingestion import ReportIngestor
+
+# Se importarán dinámicamente según la configuración
 from langchain_qdrant import QdrantVectorStore
 from langchain_huggingface import HuggingFaceEmbeddings
 from qdrant_client import QdrantClient
 
-# Import pipeline phases
-from src.langchain_pipeline.phase1_ingestion import ReportIngestor
 from src.langchain_pipeline.phase3_retriever import CandidateRetriever
 from src.langchain_pipeline.phase4_inference import TTPAnalyzer
 
@@ -117,7 +121,7 @@ def run_cti_extraction(pdf_path: str) -> str:
     logger.info("[FASE 3] Recuperando y re-evaluando candidatos de MITRE...")
     retriever = CandidateRetriever(vector_store=vector_store)
     # top_k y threshold pueden ser ajustados empíricamente
-    filtered_candidates = retriever.get_filtered_mitre_candidates(report_chunks, threshold=0.45)
+    filtered_candidates = retriever.get_filtered_mitre_candidates(report_chunks, threshold=0.4)
     
     if not filtered_candidates:
         logger.warning("[FASE 3] No se encontraron candidatos con alto grado de confianza. Fin de pipeline.")
@@ -128,27 +132,42 @@ def run_cti_extraction(pdf_path: str) -> str:
     # ------------------------------------------------------------------
     logger.info("[FASE 4] Consultando al LLM para confirmación estructurada...")
     
-    model_name = os.getenv("LLM_MODEL", "llama3.1:8b")
-    base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+    llm_provider = os.getenv("LLM_PROVIDER", "ollama").lower()
     
-    # Instanciamos ChatOllama forzando temperature=0 para obtener máxima determinística analítica
-    llm = ChatOllama(model=model_name, base_url=base_url, temperature=0.0)
-    
-    # Verificamos si el modelo está instalado consultando la CLI de Ollama directamente
-    # Esto es mucho más rápido y seguro que hacer un llm.invoke() que puede quedarse colgado
-    try:
-        logger.info(f"[FASE 4] Comprobando disponibilidad del modelo {model_name}...")
-        check_result = subprocess.run(["ollama", "show", model_name], capture_output=True)
+    if llm_provider == "gemini":
+        logger.info("[FASE 4] Configurando Google Gemini para inferencia (más rápido)...")
+        from langchain_google_genai import ChatGoogleGenerativeAI
+        # Usamos gemini-flash-lite-latest por defecto para consumir menos cuota
+        gemini_model = os.getenv("GEMINI_MODEL", "gemini-flash-lite-latest")
         
-        if check_result.returncode != 0:
-            logger.info(f"[FASE 4] El modelo {model_name} no está instalado. Descargando (esto puede tardar varios minutos)...")
-            subprocess.run(["ollama", "pull", model_name], check=True)
-            logger.info(f"[FASE 4] Modelo {model_name} descargado y listo para usar.")
-        else:
-            logger.info(f"[FASE 4] El modelo {model_name} ya está disponible en el sistema.")
+        if not os.getenv("GOOGLE_API_KEY") or os.getenv("GOOGLE_API_KEY") == "your_api_key_here":
+            logger.error("⚠️ [FASE 4] Falta la GOOGLE_API_KEY en el entorno para usar Gemini.")
+            return json.dumps({"error": "Falta GOOGLE_API_KEY en el .env"})
             
-    except Exception as e:
-        logger.warning(f"[FASE 4] No se pudo verificar o descargar el modelo automáticamente mediante la CLI. Error: {e}")
+        llm = ChatGoogleGenerativeAI(model=gemini_model, temperature=0.0)
+    else:
+        logger.info("[FASE 4] Configurando Ollama local para inferencia...")
+        model_name = os.getenv("LLM_MODEL", "llama3.1:8b")
+        base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+        
+        from langchain_ollama import ChatOllama
+        # Instanciamos ChatOllama forzando temperature=0 para obtener máxima determinística analítica
+        llm = ChatOllama(model=model_name, base_url=base_url, temperature=0.0)
+        
+        # Verificamos si el modelo está instalado consultando la CLI de Ollama directamente
+        try:
+            logger.info(f"[FASE 4] Comprobando disponibilidad del modelo {model_name}...")
+            check_result = subprocess.run(["ollama", "show", model_name], capture_output=True)
+            
+            if check_result.returncode != 0:
+                logger.info(f"[FASE 4] El modelo {model_name} no está instalado. Descargando...")
+                subprocess.run(["ollama", "pull", model_name], check=True)
+                logger.info(f"[FASE 4] Modelo {model_name} descargado y listo para usar.")
+            else:
+                logger.info(f"[FASE 4] El modelo {model_name} ya está disponible en el sistema.")
+                
+        except Exception as e:
+            logger.warning(f"[FASE 4] No se pudo verificar o descargar el modelo automáticamente mediante la CLI. Error: {e}")
             
     analyzer = TTPAnalyzer(llm=llm)
     confirmed_ttps = analyzer.analyze_candidates(filtered_candidates)

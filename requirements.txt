@@ -1,7 +1,11 @@
+# Conda: conda install -y -c conda-forge tesseract poppler
+# Ubuntu/Debian: sudo apt-get install -y tesseract-ocr poppler-utils
+
 # LangChain y Ecosistema
 langchain-core>=0.2.0
 langchain-community
 langchain-ollama
+langchain-google-genai
 langchain-qdrant
 langchain-huggingface
 langchain-text-splitters

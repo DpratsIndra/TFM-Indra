@@ -15,44 +15,42 @@ load_dotenv()
 
 class TTPAnalyzer:
     """
-    Maneja la Fase 4 del pipeline de LangChain: Inferencia y Mapeo LLM.
-    Utiliza LCEL para interrogar al modelo con salidas estructuradas, soportando
-    Prompt Repetition y perfiles de ejecución dinámicos (LOCAL vs AWS).
+    Handles Phase 4: LLM Inference and Mapping.
+    Uses LangChain Expression Language (LCEL) to prompt the model and enforce a structured output.
+    Adapts execution to sequential or batched depending on the environment profile (LOCAL vs AWS).
     """
 
     def __init__(self, llm: BaseChatModel) -> None:
         """
-        Inicializa el analizador de TTPs con el LLM especificado.
+        Initializes the TTP Analyzer.
         
         Args:
-            llm (BaseChatModel): Una instancia inicializada de un ChatModel de LangChain (ej. ChatOllama).
+            llm: A configured LangChain ChatModel (e.g., ChatOllama).
         """
         self.llm = llm
         
-        # Obtener variables de entorno (o usar valores por defecto seguros)
+        # Determine environment settings
         self.use_prompt_repetition = os.getenv("USE_PROMPT_REPETITION", "False").lower() in ("true", "1", "yes")
-        
-        # Soportamos ENVIRONMENT_PROFILE o EXECUTION_PROFILE como nombre de variable
         self.execution_profile = os.getenv("EXECUTION_PROFILE", os.getenv("ENVIRONMENT_PROFILE", "LOCAL")).upper()
         
-        logger.info(f"TTPAnalyzer inicializado. Perfil: {self.execution_profile}, Prompt Repetition: {self.use_prompt_repetition}")
+        logger.info(f"TTPAnalyzer started. Profile: {self.execution_profile}, Prompt Repetition: {self.use_prompt_repetition}")
 
     def _build_prompt_template(self) -> ChatPromptTemplate:
         """
-        Construye la plantilla del prompt dinámicamente con los tres bloques solicitados,
-        inyectando la lógica de 'Prompt Repetition' si está activada en la configuración.
-        
-        Returns:
-            ChatPromptTemplate: Plantilla estructurada para invocar al LLM.
+        Builds the prompt template dynamically.
+        Injects 'Prompt Repetition' if enabled to reinforce instructions for smaller models.
         """
         system_instruction = (
-            "Act as an expert CTI and MITRE ATT&CK analyst. Your objective is to analyze extracts from a threat "
-            "intelligence report and deterministically confirm if they demonstrate the use of the indicated technique. "
-            "You must extract the 'justification' (why it was detected) and the 'procedure' (a concise explanation "
-            "of the exact and specific action the attacker took in this report)."
+            "You are a CTI expert. Verify if the provided report excerpts "
+            "prove the use of the specified MITRE ATT&CK technique.\n"
+            "Rules:\n"
+            "1. Analyze all evidence blocks carefully.\n"
+            "2. If ANY block confirms the technique, set `is_present` to true and add each confirming block to the `occurrences` list.\n"
+            "3. If NO blocks confirm it, set `is_present` to false and leave `occurrences` empty.\n"
+            "4. Strictly use the exact `location` and `Score` provided in the evidence tags."
         )
         
-        # Aplicar el patrón "Prompt Repetition" doblando el prompt de sistema y el del usuario
+        # Apply the 'Prompt Repetition' pattern by repeating the system instructions
         if self.use_prompt_repetition:
             system_instruction = f"{system_instruction}\n\n{system_instruction}"
         
@@ -76,80 +74,84 @@ class TTPAnalyzer:
 
     def analyze_candidates(self, candidates_dict: Dict[str, Dict[str, Any]]) -> List[TTPDetection]:
         """
-        Ejecuta la cadena LCEL para analizar los candidatos de MITRE filtrados en la Fase 3.
-        Adapta la ejecución a paralelo (.batch) o secuencial según el perfil (AWS/LOCAL).
-        
-        Args:
-            candidates_dict (Dict[str, Dict]): Diccionario de candidatos recuperados.
-            
-        Returns:
-            List[TTPDetection]: Una lista con las detecciones donde is_present == True.
+        Runs the LLM chain to analyze the retrieved MITRE candidates.
+        Uses batching in AWS or sequential execution locally to avoid Out-Of-Memory (OOM) issues.
         """
         if not candidates_dict:
-            logger.warning("No hay candidatos para analizar.")
+            logger.warning("No candidates to analyze.")
             return []
 
         prompt = self._build_prompt_template()
         
-        # Construcción de la cadena LCEL forzando el esquema Pydantic
+        # Build the LCEL chain with forced structured output
         chain = prompt | self.llm.with_structured_output(TTPDetection)
         
         inputs = []
         for tech_id, data in candidates_dict.items():
-            # Unir los chunks que soportan esta técnica para dárselos como evidencia
-            joined_chunks = "\n---\n".join(data.get("supporting_chunks", []))
+            formatted_chunks = []
+            for idx, chunk_data in enumerate(data.get("supporting_chunks", []), 1):
+                loc = chunk_data.get("location", "Unknown")
+                score = chunk_data.get("score", 0.0)
+                txt = chunk_data.get("text", "")
+                formatted_chunks.append(f"[Evidence {idx} | Location: {loc} | Score: {score}]\n{txt}\n")
+                
+            joined_chunks = "\n---\n".join(formatted_chunks)
             
             inputs.append({
                 "mitre_technique_id": tech_id,
-                "mitre_technique_name": data.get("name", "Desconocida"),
+                "mitre_technique_name": data.get("name", "Unknown"),
                 "mitre_tactics": ", ".join(data.get("tactics", [])),
                 "supporting_chunks": joined_chunks,
-                "_meta_tactics": data.get("tactics", []),
-                "_meta_score": data.get("score", 0.0)
+                "_meta_tactics": data.get("tactics", [])
             })
             
-        logger.info(f"Preparados {len(inputs)} candidatos para inferencia LLM.")
+        logger.info(f"Prepared {len(inputs)} candidates for LLM inference.")
         
         results: List[TTPDetection] = []
         
-        # Orquestación de la ejecución basada en Hardware/Perfil
         if self.execution_profile == "AWS":
-            logger.info("Perfil AWS detectado: Ejecutando cadena en paralelo (Batching)...")
+            logger.info("AWS Profile detected: Running chain in parallel (Batching)...")
             try:
-                # LLMs grandes en la nube o clusters GPU aguantan batching
                 batch_responses = chain.batch(inputs)
                 
-                # Descartar nulos por si hubo fallos de red/parseo y poblar metadata
+                # Filter out nulls (failed parsing) and populate metadata
                 for inp, res in zip(inputs, batch_responses):
                     if res is not None:
                         res.tactic = inp["_meta_tactics"]
                         res.technique_name = inp["mitre_technique_name"]
-                        res.confidence_score = inp["_meta_score"]
                         results.append(res)
             except Exception as e:
-                logger.error(f"Error durante el batching en AWS: {e}")
+                logger.error(f"Error during AWS batching: {e}")
                 
         else:
-            logger.info("Perfil LOCAL detectado: Ejecutando cadena de forma secuencial (For-loop)...")
-            # Para evitar OOM en Ollama o hardware modesto
+            logger.info("LOCAL Profile detected: Running chain sequentially...")
+            # Import for rate limiting
+            import time
+            is_gemini = "google" in str(type(self.llm)).lower()
+
+            # Run sequentially to prevent OOM errors on local hardware
             for i, inp in enumerate(inputs, 1):
                 try:
-                    logger.info(f"[{i}/{len(inputs)}] Consultando al LLM para la técnica: {inp['mitre_technique_id']}...")
+                    logger.info(f"[{i}/{len(inputs)}] Querying LLM for technique: {inp['mitre_technique_id']}...")
                     response = chain.invoke(inp)
                     if response:
                         response.tactic = inp["_meta_tactics"]
                         response.technique_name = inp["mitre_technique_name"]
-                        response.confidence_score = inp["_meta_score"]
                         results.append(response)
                         
-                        # Opcional: mostrar si el LLM confirmó o descartó la técnica
-                        estado = "CONFIRMADA" if response.is_present else "DESCARTADA"
-                        logger.info(f" -> Técnica {inp['mitre_technique_id']} {estado}.")
+                        status = "CONFIRMED" if response.is_present else "DISCARDED"
+                        logger.info(f" -> Technique {inp['mitre_technique_id']} {status}.")
+                        
+                    # Prevenir el error 429 de Rate Limit (ej. 5 req/min en Free Tier)
+                    if is_gemini and i < len(inputs):
+                        logger.info("Esperando 12s para respetar la cuota gratuita de la API de Gemini...")
+                        time.sleep(12)
+                        
                 except Exception as e:
-                    logger.error(f"Error procesando la técnica {inp['mitre_technique_id']}: {e}")
+                    logger.error(f"Error processing technique {inp['mitre_technique_id']}: {e}")
                     
-        # Filtramos para devolver ÚNICAMENTE las detecciones marcadas como verdaderas por el LLM
+        # Filter and return ONLY confirmed detections
         confirmed_ttps = [res for res in results if res.is_present]
         
-        logger.info(f"Inferencia finalizada. {len(confirmed_ttps)} técnicas confirmadas.")
+        logger.info(f"Inference complete. {len(confirmed_ttps)} techniques confirmed.")
         return confirmed_ttps

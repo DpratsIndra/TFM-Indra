@@ -1,9 +1,10 @@
 import os
+import re
 from typing import List
 
 from langchain_community.document_loaders import UnstructuredPDFLoader
 from langchain_core.documents import Document
-from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_text_splitters import RecursiveCharacterTextSplitter, MarkdownHeaderTextSplitter
 
 from src.core.ioc_masker import IoCMasker
 
@@ -11,8 +12,8 @@ from src.core.ioc_masker import IoCMasker
 class ReportIngestor:
     """
     Handles Phase 1 of the LangChain pipeline: Ingestion.
-    Responsible for loading PDF reports, parsing their structure, masking IoCs, 
-    and splitting the text into semantic chunks for vector embedding.
+    Responsible for loading PDF reports, filtering noise (headers, footers, boilerplate),
+    reconstructing structural Markdown, masking IoCs, and chunking semantically.
     """
 
     def __init__(self, chunk_size: int = 1500, chunk_overlap: int = 300) -> None:
@@ -25,71 +26,139 @@ class ReportIngestor:
         """
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
-        
         self.ioc_masker = IoCMasker()
         
-        # Usamos RecursiveCharacterTextSplitter para garantizar un tamaño de chunk predecible.
-        # SemanticChunker a veces agrupa demasiadas páginas en un solo chunk gigante,
-        # lo que provoca que el Reranker (limitado a 512 tokens) trunque el texto y pierda contexto.
-        self.text_splitter = RecursiveCharacterTextSplitter(
+        self.headers_to_split_on = [
+            ("#", "Header 1"),
+            ("##", "Header 2"),
+            ("###", "Header 3"),
+        ]
+        self.md_splitter = MarkdownHeaderTextSplitter(headers_to_split_on=self.headers_to_split_on)
+        
+        self.fallback_splitter = RecursiveCharacterTextSplitter(
             chunk_size=self.chunk_size,
             chunk_overlap=self.chunk_overlap,
             separators=["\n\n", "\n", ".", " ", ""]
         )
+        
+        self.boilerplate_keywords = [
+            "subscribe", "share on", "copyright ©", "copyright c",
+            "all rights reserved", "manage cookies"
+        ]
 
     def load_pdf(self, file_path: str) -> List[Document]:
         """
-        Loads a PDF file and extracts its content into LangChain Document objects.
-        Uses UnstructuredPDFLoader to preserve paragraph structure.
-        
-        Args:
-            file_path (str): Absolute or relative path to the PDF file.
-            
-        Returns:
-            List[Document]: A list of unchunked Document objects with metadata.
+        Loads a PDF file and extracts its elements using Unstructured.
+        Uses hi_res strategy for OCR and table extraction.
         """
         if not os.path.exists(file_path):
             raise FileNotFoundError(f"The file {file_path} does not exist.")
             
-        # Using mode='single' groups text together but retains Unstructured's smart parsing
-        # Alternatively, mode='elements' returns a document per paragraph. 
-        # Since we use SemanticChunker later, 'single' is preferred to provide full context.
-        loader = UnstructuredPDFLoader(file_path, mode="single")
-        documents = loader.load()
-        return documents
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        # Optional: fast page check using PyMuPDF to validate extraction later
+        try:
+            import fitz
+            pdf_doc = fitz.open(file_path)
+            num_pages = len(pdf_doc)
+            pdf_doc.close()
+        except Exception:
+            num_pages = 1
+            
+        logger.info(f"Loading PDF '{file_path}' using Unstructured hi_res strategy (Pages detected: {num_pages})...")
+            
+        # Using mode='elements', hi_res strategy for OCR, and inferring tables
+        loader = UnstructuredPDFLoader(
+            file_path, 
+            mode="elements", 
+            strategy="hi_res",
+            pdf_infer_table_structure=True
+        )
+        elements = loader.load()
+        
+        # Validation Logic: Suspiciously short extraction
+        total_text_len = sum(len(el.page_content) for el in elements)
+        if num_pages >= 3 and total_text_len < (num_pages * 50):
+            logger.warning(
+                f"🚨 ALERT: Extracted text is suspiciously short ({total_text_len} chars across {num_pages} pages). "
+                "The PDF might be a pure scanned image requiring forced full-page OCR or it's heavily obfuscated."
+            )
+            
+        return elements
 
     def process_report(self, file_path: str) -> List[Document]:
         """
         Main method to process a CTI report:
-        1. Loads the PDF.
-        2. Masks IoCs in the text.
-        3. Splits the text into chunks.
-        
-        Args:
-            file_path (str): The path to the PDF CTI report.
-            
-        Returns:
-            List[Document]: A list of sanitized and chunked Document objects.
+        1. Loads the PDF via unstructured elements.
+        2. Filters out noise and boilerplate.
+        3. Constructs a Markdown representation.
+        4. Masks IoCs.
+        5. Splits the text logically using Markdown headers & Recursive fallback.
         """
-        # 1. Load the raw documents
-        raw_documents = self.load_pdf(file_path)
+        import logging
+        logger = logging.getLogger(__name__)
         
-        # 2. Sanitize documents (Mask IoCs)
-        sanitized_documents = []
-        for doc in raw_documents:
-            masked_text = self.ioc_masker.mask_text(doc.page_content)
-            # Create a new Document object to preserve original metadata
-            sanitized_doc = Document(
-                page_content=masked_text,
-                metadata=doc.metadata.copy()
-            )
-            sanitized_documents.append(sanitized_doc)
-            
-        # 3. Chunk the sanitized documents
-        chunked_documents = self.text_splitter.split_documents(sanitized_documents)
+        raw_elements = self.load_pdf(file_path)
         
-        # Add a chunk index to the metadata for traceability
-        for i, chunk in enumerate(chunked_documents):
-            chunk.metadata['chunk_index'] = i
+        logger.info("[FASE 1] Limpiando ruido y reconstruyendo estructura Markdown...")
+        md_lines = []
+        for el in raw_elements:
+            cat = el.metadata.get("category", "NarrativeText")
+            text = el.page_content.strip()
+            page_num = el.metadata.get("page_number", "?")
             
-        return chunked_documents
+            if not text:
+                continue
+                
+            # Filter Headers and Footers
+            if cat in ["Header", "Footer"]:
+                continue
+                
+            # Filter Boilerplate and short NarrativeText
+            if cat == "NarrativeText":
+                lower_text = text.lower()
+                if any(bp in lower_text for bp in self.boilerplate_keywords):
+                    continue
+                if len(text.split()) < 5:
+                    continue
+                    
+            # Handle Tables
+            if cat == "Table":
+                text = el.metadata.get("text_as_html", text)
+                
+            # Format as Markdown and inject hidden page tracker
+            if cat == "Title":
+                md_lines.append(f"\n## {text} <!-- Page {page_num} -->\n")
+            elif cat == "ListItem":
+                md_lines.append(f"- {text} <!-- Page {page_num} -->")
+            else:
+                md_lines.append(f"{text} <!-- Page {page_num} -->\n")
+                
+        full_md = "\n".join(md_lines)
+        
+        logger.info("[FASE 1] Enmascarando Indicadores de Compromiso (IoCs) volátiles...")
+        # Mask IoCs on the combined text
+        sanitized_md = self.ioc_masker.mask_text(full_md)
+        
+        logger.info("[FASE 1] Aplicando chunking semántico por cabeceras y tamaño...")
+        # Split by Markdown Headers
+        md_docs = self.md_splitter.split_text(sanitized_md)
+        
+        # Fallback split for huge sections
+        final_docs = self.fallback_splitter.split_documents(md_docs)
+        
+        # Add metadata for traceability
+        for i, doc in enumerate(final_docs):
+            doc.metadata['chunk_index'] = i
+            # Extract the first page number found in the chunk
+            match = re.search(r'<!-- Page (\d+) -->', doc.page_content)
+            if match:
+                doc.metadata['page_number'] = match.group(1)
+            else:
+                doc.metadata['page_number'] = "Unknown"
+                
+            # Clean up the HTML comments so the LLM isn't distracted
+            doc.page_content = re.sub(r' <!-- Page \d+ -->', '', doc.page_content)
+            
+        return final_docs

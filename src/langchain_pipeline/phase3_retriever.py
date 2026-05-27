@@ -55,89 +55,83 @@ class CandidateRetriever:
         candidates = self.vector_store.similarity_search(chunk.page_content, k=top_k)
         return candidates
 
-    def _rerank_and_filter(self, chunk_text: str, candidates: List[Document], threshold: float = 0.45) -> List[Document]:
-        """
-        Reranks the initial candidates using the Cross-Encoder and filters out
-        those that score below the threshold.
-        
-        Args:
-            chunk_text (str): The text from the CTI report chunk.
-            candidates (List[Document]): The initial candidates from Qdrant.
-            threshold (float): The minimum score to accept a candidate.
-            
-        Returns:
-            List[Document]: The highly relevant candidates that passed the threshold.
-        """
-        if not candidates:
-            return []
-            
-        # Build pairs of (Query Chunk, Candidate MITRE Description)
-        pairs = [[chunk_text, doc.page_content] for doc in candidates]
-        
-        # Get relevance scores from the Cross-Encoder
-        scores = self.reranker.predict(pairs)
-        
-        filtered_candidates = []
-        for score, doc in zip(scores, candidates):
-            if score >= threshold:
-                # Store the score in metadata for reference or downstream logic
-                doc.metadata['rerank_score'] = float(score)
-                filtered_candidates.append(doc)
-                
-        # Optional: Sort the filtered candidates by score descending
-        filtered_candidates.sort(key=lambda x: x.metadata.get('rerank_score', 0), reverse=True)
-        return filtered_candidates
-
     def get_filtered_mitre_candidates(self, report_chunks: List[Document], threshold: float = 0.45) -> Dict[str, Dict[str, Any]]:
         """
-        Main orchestrator for the retrieval phase. Iterates over all CTI chunks,
-        fetches candidates, reranks them, and aggregates the results by technique_id.
+        Main orchestrator for the retrieval phase. Retrieves candidates for all chunks,
+        reranks them in a single optimized batch, and aggregates the results.
         
         Args:
-            report_chunks (List[Document]): The chunked documents from Phase 1.
-            threshold (float): The threshold for the Cross-Encoder reranker.
+            report_chunks (List[Document]): Chunked documents from Phase 1.
+            threshold (float): Minimum score for the Cross-Encoder.
             
         Returns:
-            Dict[str, Dict[str, Any]]: An aggregated mapping of MITRE techniques to their supporting chunks.
-            Example: {"T1059": {"name": "Command and Scripting", "supporting_chunks": ["chunk 1", "chunk 2"]}}
+            Dict[str, Dict[str, Any]]: Aggregated mapping of MITRE techniques to supporting chunks.
         """
         grouped_results: Dict[str, Dict[str, Any]] = {}
-        
         logger.info(f"Starting retrieval and reranking for {len(report_chunks)} chunks...")
         
+        all_initial_candidates = []
+        all_pairs = []
+        
+        # Step 1: Fast Vector Search (High Recall) for all chunks
         for chunk in report_chunks:
             chunk_text = chunk.page_content
+            candidates = self._get_initial_candidates(chunk, top_k=15)
+            all_initial_candidates.append((chunk, candidates))
             
-            # Step 1: Fast Vector Search (High Recall)
-            initial_candidates = self._get_initial_candidates(chunk, top_k=15)
-            
-            # Step 2: Accurate Reranking (High Precision)
-            final_candidates = self._rerank_and_filter(chunk_text, initial_candidates, threshold=threshold)
-            
-            # Step 3: Logical Grouping
-            for doc in final_candidates:
-                tech_id = doc.metadata.get("technique_id", "Unknown")
-                tech_name = doc.metadata.get("name", "Unknown")
-                tactics_str = doc.metadata.get("tactics", "")
-                score = doc.metadata.get("rerank_score", 0.0)
+            for doc in candidates:
+                all_pairs.append([chunk_text, doc.page_content])
                 
-                # Initialize the technique entry if it's the first time we see it
-                if tech_id not in grouped_results:
-                    grouped_results[tech_id] = {
-                        "name": tech_name,
-                        "tactics": [t.strip() for t in tactics_str.split(",") if t.strip()],
-                        "score": score,
-                        "supporting_chunks": []
-                    }
-                else:
-                    # Keep the maximum confidence score seen across chunks for this technique
-                    if score > grouped_results[tech_id]["score"]:
-                        grouped_results[tech_id]["score"] = score
+        # Step 2: Accurate Reranking in Batch (High Precision)
+        logger.info(f"Reranking {len(all_pairs)} pairs in batch mode...")
+        scores = self.reranker.predict(all_pairs) if all_pairs else []
+        
+        # Re-associate scores with chunks and apply filtering
+        score_idx = 0
+        for chunk, candidates in all_initial_candidates:
+            chunk_text = chunk.page_content
+            
+            # Extract page number based on loader metadata (PyMuPDF uses 'page', Unstructured uses 'page_number')
+            page_val = chunk.metadata.get("page")
+            if page_val is not None:
+                page_num = int(page_val) + 1  # PyMuPDF is 0-indexed
+            else:
+                page_num = chunk.metadata.get("page_number", "Unknown")
+                
+            chunk_idx = chunk.metadata.get("chunk_index", "Unknown")
+            
+            for doc in candidates:
+                score = float(scores[score_idx])
+                score_idx += 1
+                
+                if score >= threshold:
+                    tech_id = doc.metadata.get("technique_id", "Unknown")
+                    tech_name = doc.metadata.get("name", "Unknown")
+                    tactics_str = doc.metadata.get("tactics", "")
                     
-                # Append the chunk to the supporting chunks only if it's unique
-                # This prevents redundant context from overloading the LLM in Phase 4
-                if chunk_text not in grouped_results[tech_id]["supporting_chunks"]:
-                    grouped_results[tech_id]["supporting_chunks"].append(chunk_text)
-                    
+                    if tech_id not in grouped_results:
+                        grouped_results[tech_id] = {
+                            "name": tech_name,
+                            "tactics": [t.strip() for t in tactics_str.split(",") if t.strip()],
+                            "score": score,
+                            "supporting_chunks": []
+                        }
+                    else:
+                        if score > grouped_results[tech_id]["score"]:
+                            grouped_results[tech_id]["score"] = score
+                            
+                    is_unique = all(c["text"] != chunk_text for c in grouped_results[tech_id]["supporting_chunks"])
+                    if is_unique:
+                        grouped_results[tech_id]["supporting_chunks"].append({
+                            "text": chunk_text,
+                            "location": f"Page {page_num}, Chunk {chunk_idx}",
+                            "score": round(score, 4)
+                        })
+                        
+        for tech_id in grouped_results:
+            chunks = grouped_results[tech_id]["supporting_chunks"]
+            chunks.sort(key=lambda x: x["score"], reverse=True)
+            grouped_results[tech_id]["supporting_chunks"] = chunks
+            
         logger.info(f"Retrieval complete. Found {len(grouped_results)} unique techniques across all chunks.")
         return grouped_results
