@@ -40,7 +40,7 @@ class CandidateRetriever:
         logger.info(f"Loading Cross-Encoder model (BAAI/bge-reranker-base) on {self.device}...")
         self.reranker = CrossEncoder('BAAI/bge-reranker-base', device=self.device)
 
-    def _get_initial_candidates(self, chunk: Document, top_k: int = 15) -> List[Document]:
+    def _get_initial_candidates(self, chunk: Document, top_k: int = 35) -> List[Document]:
         """
         Retrieves the initial set of candidate MITRE techniques from Qdrant.
         
@@ -55,7 +55,7 @@ class CandidateRetriever:
         candidates = self.vector_store.similarity_search(chunk.page_content, k=top_k)
         return candidates
 
-    def get_filtered_mitre_candidates(self, report_chunks: List[Document], threshold: float = 0.45) -> Dict[str, Dict[str, Any]]:
+    def get_filtered_mitre_candidates(self, report_chunks: List[Document], threshold: float = 0.30) -> Dict[str, Dict[str, Any]]:
         """
         Main orchestrator for the retrieval phase. Retrieves candidates for all chunks,
         reranks them in a single optimized batch, and aggregates the results.
@@ -76,7 +76,7 @@ class CandidateRetriever:
         # Step 1: Fast Vector Search (High Recall) for all chunks
         for chunk in report_chunks:
             chunk_text = chunk.page_content
-            candidates = self._get_initial_candidates(chunk, top_k=15)
+            candidates = self._get_initial_candidates(chunk, top_k=35)
             all_initial_candidates.append((chunk, candidates))
             
             for doc in candidates:
@@ -84,7 +84,7 @@ class CandidateRetriever:
                 
         # Step 2: Accurate Reranking in Batch (High Precision)
         logger.info(f"Reranking {len(all_pairs)} pairs in batch mode...")
-        scores = self.reranker.predict(all_pairs) if all_pairs else []
+        scores = self.reranker.predict(all_pairs, batch_size=32, activation_fn=torch.nn.Sigmoid()) if all_pairs else []
         
         # Re-associate scores with chunks and apply filtering
         score_idx = 0
@@ -113,6 +113,7 @@ class CandidateRetriever:
                         grouped_results[tech_id] = {
                             "name": tech_name,
                             "tactics": [t.strip() for t in tactics_str.split(",") if t.strip()],
+                            "description": doc.metadata.get("full_description", ""), # EXTRACT FULL DESCRIPTION
                             "score": score,
                             "supporting_chunks": []
                         }

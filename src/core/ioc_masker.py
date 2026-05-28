@@ -46,7 +46,7 @@ class IoCMasker:
         # Domains: Matches standard domain formats
         # We apply this last or carefully so it doesn't mask parts of emails or valid prose
         self.domain_pattern = re.compile(
-            r'\b(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}\b',
+            r'\b(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+(?:com|org|net|info|biz|io|app|co|us|uk|ru|cn|dev|me|tv|ws|xyz|top|tk|ml|ga|cf|gq|site|online|tech)\b',
             re.IGNORECASE
         )
 

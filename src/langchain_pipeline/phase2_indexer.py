@@ -5,7 +5,8 @@ from typing import List, Dict, Any, Optional
 import torch
 from langchain_core.documents import Document
 from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_qdrant import QdrantVectorStore
+from langchain_qdrant import QdrantVectorStore, FastEmbedSparse, RetrievalMode
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 from qdrant_client import QdrantClient
 from qdrant_client.http.exceptions import UnexpectedResponse
 
@@ -162,6 +163,8 @@ class MitreIndexer:
             logger.error("No techniques extracted. Aborting vectorization.")
             return None
             
+        splitter = RecursiveCharacterTextSplitter(chunk_size=800, chunk_overlap=150)
+            
         documents = []
         for tech in techniques:
             enriched_content = self._enrich_description(tech)
@@ -171,11 +174,14 @@ class MitreIndexer:
                 "technique_id": tech.get("technique_id"),
                 "name": tech.get("name"),
                 "tactics": ", ".join(tech.get("tactics", [])),
-                "platforms": ", ".join(tech.get("platforms", []))
+                "platforms": ", ".join(tech.get("platforms", [])),
+                "full_description": tech.get("description", "").strip() # PRESERVE FULL TEXT FOR LLM
             }
             
-            doc = Document(page_content=enriched_content, metadata=metadata)
-            documents.append(doc)
+            # Chunk the enriched content for fast Cross-Encoder evaluation
+            chunks = splitter.split_text(enriched_content)
+            for chunk in chunks:
+                documents.append(Document(page_content=chunk, metadata=metadata))
             
         logger.info(f"Prepared {len(documents)} Document objects for vectorization.")
         
@@ -185,13 +191,18 @@ class MitreIndexer:
             # A lightweight query to verify the connection
             client.get_collections()
             
+            sparse_embeddings = FastEmbedSparse(model_name="Qdrant/bm25")
+            
             # Use LangChain's QdrantVectorStore to create the collection and embed documents
             logger.info(f"Indexing documents into Qdrant using device: {self.device}...")
             vector_store = QdrantVectorStore.from_documents(
                 documents=documents,
                 embedding=self.embeddings,
+                sparse_embedding=sparse_embeddings,
+                retrieval_mode=RetrievalMode.HYBRID,
                 url=self.qdrant_url,
                 collection_name=self.collection_name,
+                force_recreate=True,
             )
             logger.info("Successfully built and indexed the MITRE ATT&CK vector store.")
             return vector_store

@@ -16,7 +16,7 @@ class ReportIngestor:
     reconstructing structural Markdown, masking IoCs, and chunking semantically.
     """
 
-    def __init__(self, chunk_size: int = 1500, chunk_overlap: int = 300) -> None:
+    def __init__(self, chunk_size: int = 750, chunk_overlap: int = 150) -> None:
         """
         Initializes the ReportIngestor with chunking parameters and IoC masker.
         
@@ -33,7 +33,7 @@ class ReportIngestor:
             ("##", "Header 2"),
             ("###", "Header 3"),
         ]
-        self.md_splitter = MarkdownHeaderTextSplitter(headers_to_split_on=self.headers_to_split_on)
+        self.md_splitter = MarkdownHeaderTextSplitter(headers_to_split_on=self.headers_to_split_on, strip_headers=False)
         
         self.fallback_splitter = RecursiveCharacterTextSplitter(
             chunk_size=self.chunk_size,

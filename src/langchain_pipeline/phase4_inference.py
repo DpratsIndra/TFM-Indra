@@ -47,7 +47,10 @@ class TTPAnalyzer:
             "1. Analyze all evidence blocks carefully.\n"
             "2. If ANY block confirms the technique, set `is_present` to true and add each confirming block to the `occurrences` list.\n"
             "3. If NO blocks confirm it, set `is_present` to false and leave `occurrences` empty.\n"
-            "4. Strictly use the exact `location` and `Score` provided in the evidence tags."
+            "4. Use the exact `location` and `Score` provided in the evidence tags. You may infer the technique if the evidence strongly implies it, even if the exact MITRE keyword isn't verbatim in the text.\n"
+            "5. Contextualize masked tags: If an action involves a masked tag (e.g., a payload dropped from an <IoC_URL> or communication to an <IoC_DOMAIN>), deduce the tactical intent (e.g., Initial Access, Command and Control).\n"
+            "6. Utilize your inherent cybersecurity knowledge: When specific software, malware, living-off-the-land binaries (LOLBins), or command-line utilities are mentioned, autonomously deduce their primary function (e.g., credential dumping, network tunneling, process injection) to evaluate if they satisfy the MITRE technique.\n"
+            "7. Handle missing context gracefully: Because you are analyzing isolated chunks, if the text says 'the tool', 'the script', or 'it' performed an action that perfectly matches the technique, assume the subject refers implicitly to the malicious actor's tooling."
         )
         
         # Apply the 'Prompt Repetition' pattern by repeating the system instructions
@@ -57,7 +60,8 @@ class TTPAnalyzer:
         user_message = (
             "### MITRE CONTEXT\n"
             "Technique: {mitre_technique_id} - {mitre_technique_name}\n"
-            "Tactics: {mitre_tactics}\n\n"
+            "Tactics: {mitre_tactics}\n"
+            "Description: {mitre_description}\n\n"
             "### REPORT EVIDENCE\n"
             "{supporting_chunks}\n\n"
             "Based EXCLUSIVELY on the provided evidence, "
@@ -88,8 +92,11 @@ class TTPAnalyzer:
         
         inputs = []
         for tech_id, data in candidates_dict.items():
+            # Keep only the top 5 highest scored chunks to avoid LLM context limits
+            top_chunks = sorted(data.get("supporting_chunks", []), key=lambda x: x.get("score", 0.0), reverse=True)[:5]
+            
             formatted_chunks = []
-            for idx, chunk_data in enumerate(data.get("supporting_chunks", []), 1):
+            for idx, chunk_data in enumerate(top_chunks, 1):
                 loc = chunk_data.get("location", "Unknown")
                 score = chunk_data.get("score", 0.0)
                 txt = chunk_data.get("text", "")
@@ -101,6 +108,7 @@ class TTPAnalyzer:
                 "mitre_technique_id": tech_id,
                 "mitre_technique_name": data.get("name", "Unknown"),
                 "mitre_tactics": ", ".join(data.get("tactics", [])),
+                "mitre_description": data.get("description", "No description available."),
                 "supporting_chunks": joined_chunks,
                 "_meta_tactics": data.get("tactics", [])
             })

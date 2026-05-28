@@ -46,7 +46,7 @@ load_dotenv(override=True)
 from src.langchain_pipeline.phase1_ingestion import ReportIngestor
 
 # Se importarán dinámicamente según la configuración
-from langchain_qdrant import QdrantVectorStore
+from langchain_qdrant import QdrantVectorStore, FastEmbedSparse, RetrievalMode
 from langchain_huggingface import HuggingFaceEmbeddings
 from qdrant_client import QdrantClient
 
@@ -79,8 +79,10 @@ def run_cti_extraction(pdf_path: str) -> str:
     # PHASE 1: Ingesta y Particionado Semántico
     # ------------------------------------------------------------------
     logger.info("[FASE 1] Ingestando y sanitizando el reporte...")
+    t0 = time.time()
     ingestor = ReportIngestor(chunk_size=1500, chunk_overlap=300)
     report_chunks = ingestor.process_report(pdf_path)
+    p1_time = time.time() - t0
     logger.info(f"[FASE 1] Se generaron {len(report_chunks)} chunks enmascarados.")
     
     # ------------------------------------------------------------------
@@ -106,14 +108,22 @@ def run_cti_extraction(pdf_path: str) -> str:
             client = QdrantClient(url=qdrant_url)
             
         embeddings = HuggingFaceEmbeddings(model_name="BAAI/bge-m3")
+        sparse_embeddings = FastEmbedSparse(model_name="Qdrant/bm25")
         vector_store = QdrantVectorStore(
             client=client,
             collection_name=collection_name,
-            embedding=embeddings
+            embedding=embeddings,
+            sparse_embedding=sparse_embeddings,
+            retrieval_mode=RetrievalMode.HYBRID
         )
     except Exception as e:
         logger.error(f"Fallo crítico al conectar con Qdrant o inicializar la DB. ¿Está el contenedor corriendo? Error: {e}")
-        return json.dumps({"error": "Fallo de conexión o inicialización en Qdrant", "detalle": str(e)})
+        timing_metrics = {
+            "phase1_ingestion_seconds": round(p1_time, 2),
+            "phase3_retrieval_seconds": 0.0,
+            "phase4_inference_seconds": 0.0
+        }
+        return [{"error": "Fallo de conexión o inicialización en Qdrant", "detalle": str(e)}], timing_metrics
 
     # ------------------------------------------------------------------
     # PHASE 3: Hybrid Retrieval y Cross-Encoder Reranking
@@ -121,11 +131,18 @@ def run_cti_extraction(pdf_path: str) -> str:
     logger.info("[FASE 3] Recuperando y re-evaluando candidatos de MITRE...")
     retriever = CandidateRetriever(vector_store=vector_store)
     # top_k y threshold pueden ser ajustados empíricamente
+    t1 = time.time()
     filtered_candidates = retriever.get_filtered_mitre_candidates(report_chunks, threshold=0.4)
+    p3_time = time.time() - t1
     
     if not filtered_candidates:
         logger.warning("[FASE 3] No se encontraron candidatos con alto grado de confianza. Fin de pipeline.")
-        return json.dumps([])
+        timing_metrics = {
+            "phase1_ingestion_seconds": round(p1_time, 2),
+            "phase3_retrieval_seconds": round(p3_time, 2),
+            "phase4_inference_seconds": 0.0
+        }
+        return [], timing_metrics
         
     # ------------------------------------------------------------------
     # PHASE 4: Inferencia LLM y Salida Estructurada
@@ -137,12 +154,17 @@ def run_cti_extraction(pdf_path: str) -> str:
     if llm_provider == "gemini":
         logger.info("[FASE 4] Configurando Google Gemini para inferencia (más rápido)...")
         from langchain_google_genai import ChatGoogleGenerativeAI
-        # Usamos gemini-flash-lite-latest por defecto para consumir menos cuota
-        gemini_model = os.getenv("GEMINI_MODEL", "gemini-flash-lite-latest")
+        # Usamos gemini-3.5-flash por defecto (1.5 está deprecado)
+        gemini_model = os.getenv("GEMINI_MODEL", "gemini-3.5-flash")
         
         if not os.getenv("GOOGLE_API_KEY") or os.getenv("GOOGLE_API_KEY") == "your_api_key_here":
             logger.error("⚠️ [FASE 4] Falta la GOOGLE_API_KEY en el entorno para usar Gemini.")
-            return json.dumps({"error": "Falta GOOGLE_API_KEY en el .env"})
+            timing_metrics = {
+                "phase1_ingestion_seconds": round(p1_time, 2),
+                "phase3_retrieval_seconds": round(p3_time, 2),
+                "phase4_inference_seconds": 0.0
+            }
+            return [{"error": "Falta GOOGLE_API_KEY en el .env"}], timing_metrics
             
         llm = ChatGoogleGenerativeAI(model=gemini_model, temperature=0.0)
     else:
@@ -170,7 +192,9 @@ def run_cti_extraction(pdf_path: str) -> str:
             logger.warning(f"[FASE 4] No se pudo verificar o descargar el modelo automáticamente mediante la CLI. Error: {e}")
             
     analyzer = TTPAnalyzer(llm=llm)
+    t2 = time.time()
     confirmed_ttps = analyzer.analyze_candidates(filtered_candidates)
+    p4_time = time.time() - t2
     
     # ------------------------------------------------------------------
     # EXTRACCIÓN DE RESULTADOS
@@ -179,7 +203,12 @@ def run_cti_extraction(pdf_path: str) -> str:
     output_dict_list = [ttp.model_dump(exclude={'is_present'}) for ttp in confirmed_ttps]
     
     logger.info("--- Pipeline Finalizado con Éxito ---")
-    return output_dict_list
+    timing_metrics = {
+        "phase1_ingestion_seconds": round(p1_time, 2),
+        "phase3_retrieval_seconds": round(p3_time, 2),
+        "phase4_inference_seconds": round(p4_time, 2)
+    }
+    return output_dict_list, timing_metrics
 
 
 if __name__ == "__main__":
@@ -196,8 +225,8 @@ if __name__ == "__main__":
         
     start_time = time.time()
     
-    # run_cti_extraction ahora devuelve una lista de diccionarios
-    resultados_lista = run_cti_extraction(target_pdf)
+    # run_cti_extraction ahora devuelve una lista de diccionarios y métricas de tiempo
+    resultados_lista, timing_metrics = run_cti_extraction(target_pdf)
     
     end_time = time.time()
     execution_time = end_time - start_time
@@ -205,8 +234,9 @@ if __name__ == "__main__":
     # Crear el JSON final incluyendo métricas
     output_data = {
         "source_file": target_pdf,
-        "execution_time_seconds": round(execution_time, 2),
-        "execution_time_minutes": round(execution_time / 60, 2),
+        "total_execution_time_seconds": round(execution_time, 2),
+        "total_execution_time_minutes": round(execution_time / 60, 2),
+        "timing_breakdown": timing_metrics,
         "extracted_ttps": resultados_lista
     }
     
