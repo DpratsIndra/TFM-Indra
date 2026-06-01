@@ -10,6 +10,7 @@ langchain-qdrant
 langchain-huggingface
 langchain-text-splitters
 langchain-experimental
+langgraph
 # Base de Datos Vectorial
 qdrant-client
 fastembed

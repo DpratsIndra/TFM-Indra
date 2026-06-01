@@ -1,0 +1,2646 @@
+Directory structure:
+└── TFM-Indra/
+    ├── ARCHITECTURE.md
+    ├── requirements-dev.txt
+    ├── requirements.txt
+    ├── TFM.code-workspace
+    ├── dashboard/
+    │   └── cti_inspector.py
+    ├── data/
+    │   └── output/
+    │       ├── APT29attacksEmbassiesusingCVE-2023-38831-reporten_langgraph_result.json
+    │       └── APT29attacksEmbassiesusingCVE-2023-38831-reporten_results.json
+    ├── infrastructure/
+    │   └── docker-compose.yml
+    ├── src/
+    │   ├── debug_ngrok.py
+    │   ├── core/
+    │   │   ├── ioc_masker.py
+    │   │   └── schemas.py
+    │   ├── langchain_pipeline/
+    │   │   ├── main_pipeline.py
+    │   │   ├── phase1_ingestion.py
+    │   │   ├── phase2_indexer.py
+    │   │   ├── phase3_retriever.py
+    │   │   └── phase4_inference.py
+    │   └── langgraph_agents/
+    │       ├── graph_builder.py
+    │       ├── main_langgraph.py
+    │       ├── nodes.py
+    │       ├── state.py
+    │       └── tools.py
+    └── .antigravity/
+        └── rules.md
+
+================================================
+FILE: ARCHITECTURE.md
+================================================
+# CTI-RAG-Mapper Architecture
+
+This repository contains the codebase for extracting MITRE ATT&CK TTPs from unstructured CTI reports using LLMs.
+
+## Directory Structure
+
+```text
+cti-mapper/
+├── .antigravity/
+│   └── rules.md                  # IDE AI context rules
+├── data/
+│   ├── raw_reports/              # Input PDFs/txt files
+│   ├── mitre_data/               # MITRE ATT&CK STIX/JSON files
+│   └── output/                   # Generated JSON reports
+├── infrastructure/
+│   └── docker-compose.yml        # Qdrant Vector DB & Ollama setup
+├── src/
+│   ├── core/                     # Shared resources
+│   │   ├── config.py             # Env vars (Local vs AWS profile)
+│   │   ├── ioc_masker.py         # Regex logic for <IoC_IPv4>, etc.
+│   │   └── schemas.py            # Pydantic models (CTI_Extraction, etc.)
+│   ├── langchain_pipeline/       # Advanced RAG Approach
+│   │   ├── phase1_ingestion.py   # PDF Parsing & Semantic Chunking
+│   │   ├── phase2_indexer.py     # MITRE Hybrid Vectorization (Qdrant)
+│   │   ├── phase3_retriever.py   # Hybrid Retrieval & Cross-Encoder Reranking
+│   │   ├── phase4_inference.py   # LLM Map-Reduce Extraction
+│   │   └── main_pipeline.py      # LangChain Orchestrator
+│   └── langgraph_agents/         # Multi-Agent Approach (Future)
+│       ├── agents/
+│       ├── state.py
+│       └── graph_builder.py
+├── dashboard/
+│   └── cti_inspector.py  
+├── .env.example                  # Environment variables template
+├── ARCHITECTURE.md               # This file
+├── requirements.txt              # Prod dependencies
+└── requirements-dev.txt          # Testing & Linting
+
+
+================================================
+FILE: requirements-dev.txt
+================================================
+pytest
+pytest-asyncio
+black
+flake8
+mypy
+isort
+
+
+
+================================================
+FILE: requirements.txt
+================================================
+# Conda: conda install -y -c conda-forge tesseract poppler
+# Ubuntu/Debian: sudo apt-get install -y tesseract-ocr poppler-utils
+
+# LangChain y Ecosistema
+langchain-core>=0.2.0
+langchain-community
+langchain-ollama
+langchain-google-genai
+langchain-qdrant
+langchain-huggingface
+langchain-text-splitters
+langchain-experimental
+langgraph
+# Base de Datos Vectorial
+qdrant-client
+fastembed
+
+# Procesamiento de Documentos y Texto
+pymupdf
+pydantic
+requests
+
+# IA y Embeddings
+sentence-transformers
+torch
+
+# UI Dashboard
+streamlit
+unstructured[pdf]
+python-dotenv
+
+
+
+================================================
+FILE: TFM.code-workspace
+================================================
+{
+    "folders": [
+        {
+            "path": "."
+        }
+    ]
+}
+
+
+================================================
+FILE: dashboard/cti_inspector.py
+================================================
+# To run: conda activate tfm_env 
+# streamlit run dashboard/cti_inspector.py 
+import sys
+import os
+import tempfile
+import streamlit as st
+
+# Add the project root to the python path so imports from src work smoothly
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
+from src.core.ioc_masker import IoCMasker
+from src.langchain_pipeline.phase1_ingestion import ReportIngestor
+
+# Setup Page Configuration
+st.set_page_config(page_title="CTI Preprocessing Inspector", layout="wide")
+st.title("🛡️ CTI Preprocessing Inspector")
+st.markdown("Sube un reporte CTI (PDF) para visualizar el comportamiento de **Fase 1: Ingesta, Sanitización de IoCs y Semantic Chunking**.")
+
+# 1. Upload de Archivo
+uploaded_file = st.file_uploader("Sube un reporte CTI (PDF)", type=["pdf"])
+
+if uploaded_file is not None:
+    # Save the uploaded file to a temporary location so ReportIngestor can read it
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
+        tmp_file.write(uploaded_file.read())
+        tmp_file_path = tmp_file.name
+
+    st.success(f"Archivo cargado correctamente: {uploaded_file.name}")
+
+    with st.spinner("Procesando y dividiendo el reporte (Phase 1)..."):
+        # 2. Procesamiento en Memoria
+        ingestor = ReportIngestor(chunk_size=1500, chunk_overlap=300)
+        masker = IoCMasker()
+        
+        try:
+            # Obtener el texto puro (sin enmascarar ni dividir) para la comparativa
+            raw_docs = ingestor.load_pdf(tmp_file_path)
+            raw_text = "\n\n".join([doc.page_content for doc in raw_docs])
+            
+            # Obtener los chunks finales (enmascarados y divididos)
+            chunked_docs = ingestor.process_report(tmp_file_path)
+            
+            # 3. Visualización de Sanitización (Máscaras)
+            st.header("1. Visualización de Sanitización (IoC Masking)")
+            st.markdown("Compara el texto original extraído del PDF con el texto procesado por `IoCMasker`.")
+            
+            col1, col2 = st.columns(2)
+            
+            # Tomamos una muestra generosa del inicio del documento (ej. primeros 3000 caracteres)
+            sample_raw_text = raw_text[:3000] + ("..." if len(raw_text) > 3000 else "")
+            sample_masked_text = masker.mask_text(sample_raw_text)
+            
+            # Función para resaltar los tags en el markdown de Streamlit
+            def highlight_tags(text: str) -> str:
+                tags = ["<IoC_URL>", "<IoC_EMAIL>", "<IoC_IPv6>", "<IoC_IPv4>", "<IoC_HASH>", "<IoC_DOMAIN>"]
+                highlighted = text
+                for tag in tags:
+                    # Streamlit Markdown soporta colores mediante HTML inline
+                    highlighted = highlighted.replace(tag, f"**<span style='color:#FF4B4B;'>{tag}</span>**")
+                return highlighted
+
+            with col1:
+                st.subheader("Extracto del Texto Original")
+                st.text_area("Raw Text", value=sample_raw_text, height=400, disabled=True, label_visibility="collapsed")
+                
+            with col2:
+                st.subheader("Texto Sanitizado")
+                # Mostramos como markdown permitiendo HTML para que se vea el color rojo en los Tags
+                st.markdown(
+                    f"<div style='height: 400px; overflow-y: scroll; padding: 10px; border: 1px solid #ccc; border-radius: 5px; background-color: #f9f9f9; color: black; font-family: monospace; white-space: pre-wrap;'>"
+                    f"{highlight_tags(sample_masked_text)}"
+                    f"</div>", 
+                    unsafe_allow_html=True
+                )
+                
+            st.markdown("---")
+            
+            # 4. Visualización de Chunks
+            st.header("2. División Semántica (Chunking)")
+            st.markdown("Revisa cómo el `RecursiveCharacterTextSplitter` ha dividido el documento.")
+            
+            with st.expander("Ver Chunks Generados"):
+                total_chunks = len(chunked_docs)
+                st.write(f"**Total de Chunks:** {total_chunks}")
+                
+                for i, doc in enumerate(chunked_docs):
+                    chunk_length = len(doc.page_content)
+                    st.markdown(f"#### Chunk {i + 1}/{total_chunks} (Longitud: {chunk_length} caracteres)")
+                    st.info(doc.page_content)
+                    
+        except Exception as e:
+            st.error(f"Error procesando el archivo: {e}")
+            
+        finally:
+            # Limpiar archivo temporal
+            if os.path.exists(tmp_file_path):
+                os.remove(tmp_file_path)
+
+
+
+================================================
+FILE: data/output/APT29attacksEmbassiesusingCVE-2023-38831-reporten_langgraph_result.json
+================================================
+{
+    "source_file": "data/raw_reports/APT29attacksEmbassiesusingCVE-2023-38831-reporten.pdf",
+    "global_context": [
+        {
+            "type": "text",
+            "text": "The threat actor identified in this campaign is APT29, a group linked to Russia's Foreign Intelligence Service (SVR). The attackers utilized a WinRAR vulnerability (CVE-2023-38831) as their primary malware delivery mechanism to compromise target systems. The campaign specifically targeted diplomatic missions, embassies, and international organizations across several countries, including Azerbaijan, Greece, Romania, and Italy.",
+            "extras": {
+                "signature": "EjQKMgEMOdbHEF3NiMzyrNA57hazVe33zvSVZaG4z3bfTT/9ZHwQ6ow79v5U0XQO8UoT4At2"
+            }
+        }
+    ],
+    "total_chunks_processed": 14,
+    "extracted_ttps": [
+        {
+            "technique_id": "T1204.002",
+            "name": "User Execution: Malicious File",
+            "occurrences": [
+                {
+                    "location": "Page 1, Chunk 0",
+                    "procedure": "The attackers utilized a WinRAR vulnerability (CVE-2023-38831) as their primary malware delivery mechanism to compromise target systems."
+                }
+            ]
+        },
+        {
+            "technique_id": "T1204",
+            "name": "User Execution",
+            "occurrences": [
+                {
+                    "location": "Page 2, Chunk 2",
+                    "procedure": "The attackers relied on victims opening the lure documents (BMW car sale photos) to trigger the exploitation of the WinRAR vulnerability."
+                },
+                {
+                    "location": "Page 5, Chunk 6",
+                    "procedure": "The attacker uses a lure document (a PDF featuring a BMW car for sale) to entice the user to interact with the malicious file, leading to the execution of a script."
+                }
+            ]
+        },
+        {
+            "technique_id": "T1203",
+            "name": "Exploitation for Client Execution",
+            "occurrences": [
+                {
+                    "location": "Page 2, Chunk 2",
+                    "procedure": "The attackers utilized a WinRAR vulnerability (CVE-2023-38831) within lure documents to facilitate intrusion and gain access to compromised systems."
+                }
+            ]
+        },
+        {
+            "technique_id": "T1566.001",
+            "name": "Spearphishing Attachment",
+            "occurrences": [
+                {
+                    "location": "Page 2, Chunk 2",
+                    "procedure": "The attackers used enticing BMW car sale photos and documents as lures to deliver malicious content to diplomatic missions and embassies."
+                },
+                {
+                    "location": "Page 4, Chunk 4",
+                    "procedure": "The attackers sent phishing emails containing a malicious WinRAR archive file (DIPLOMATIC-CAR-F...MW.rar) disguised as a diplomatic car sale announcement to target diplomatic missions and embassies."
+                },
+                {
+                    "location": "Page 8, Chunk 10",
+                    "procedure": "The threat actor utilized emails with lures related to the European Parliament agenda to deliver malicious files exploiting the CVE-2023-38831 WinRAR vulnerability."
+                }
+            ]
+        },
+        {
+            "technique_id": "T1027.015",
+            "name": "Compression",
+            "occurrences": [
+                {
+                    "location": "Page 5, Chunk 5",
+                    "procedure": "The threat actor utilized a RAR archive (DIPLOMATIC-CAR-FOR-SALE-BMW.rar) to exploit CVE-2023-38831, leveraging the archive's structure to conceal and execute malicious content."
+                },
+                {
+                    "location": "Page 7, Chunk 8",
+                    "procedure": "The attackers utilized a specially crafted ZIP archive (DIPLOMATIC-CAR-FOR-SALE-BMW.rar) to deliver malicious code by exploiting the CVE-2023-38831 vulnerability in WinRAR."
+                }
+            ]
+        },
+        {
+            "technique_id": "T1566",
+            "name": "Phishing",
+            "occurrences": [
+                {
+                    "location": "Page 5, Chunk 5",
+                    "procedure": "The threat actor used a BMW car for sale theme as a lure in phishing attacks to deliver a malicious RAR archive."
+                },
+                {
+                    "location": "Page 5, Chunk 6",
+                    "procedure": "The attackers used a lure document themed as a BMW car for sale to trick targets into interacting with malicious content."
+                }
+            ]
+        },
+        {
+            "technique_id": "T1059.001",
+            "name": "PowerShell",
+            "occurrences": [
+                {
+                    "location": "Page 5, Chunk 6",
+                    "procedure": "The attackers executed a PowerShell script to download and execute a next-stage payload from a remote server."
+                }
+            ]
+        },
+        {
+            "technique_id": "T1071.001",
+            "name": "Web Protocols",
+            "occurrences": [
+                {
+                    "location": "Page 5, Chunk 6",
+                    "procedure": "The attackers utilized a Ngrok free static domain to establish communication with their malicious server for payload delivery."
+                }
+            ]
+        }
+    ],
+    "execution_metrics": {
+        "execution_time_seconds": 1349.51,
+        "execution_time_minutes": 22.49
+    }
+}
+
+
+================================================
+FILE: data/output/APT29attacksEmbassiesusingCVE-2023-38831-reporten_results.json
+================================================
+{
+    "source_file": "data/raw_reports/APT29attacksEmbassiesusingCVE-2023-38831-reporten.pdf",
+    "total_execution_time_seconds": 939.58,
+    "total_execution_time_minutes": 15.66,
+    "timing_breakdown": {
+        "phase1_ingestion_seconds": 32.4,
+        "phase3_retrieval_seconds": 545.96,
+        "phase4_inference_seconds": 350.41
+    },
+    "extracted_ttps": [
+        {
+            "technique_id": "T1204",
+            "tactic": [
+                "execution"
+            ],
+            "technique_name": "User Execution",
+            "occurrences": [
+                {
+                    "location": "Page 2, Chunk 2",
+                    "procedure": "The attacker used social engineering by sending enticing BMW car sale photos and documents to victims, which, when opened by the user, triggered the exploitation of a WinRAR vulnerability.",
+                    "justification": "The report states that 'APT29 ingeniously employed benign-looking lures in the form of enticing BMW car sale photos and documents, expertly crafted to draw in unsuspecting victims. The lure documents contained hidden, malicious content that exploited the WinRAR vulnerability'. This confirms that the execution of the malicious payload was dependent on the user opening the lure files.",
+                    "confidence_score": 0.5286
+                }
+            ]
+        },
+        {
+            "technique_id": "T1684.001",
+            "tactic": [
+                "stealth"
+            ],
+            "technique_name": "Impersonation",
+            "occurrences": [
+                {
+                    "location": "Page 4, Chunk 4",
+                    "procedure": "The adversary sent phishing emails using a 'diplomatic car sale' lure, impersonating a colleague or official source to entice targets to open a malicious attachment.",
+                    "justification": "The report states the attacker used 'phishing emails equipped with enticing lures, portraying BMW car sales' and includes an email body text: 'Dear colleagues, Please find in attachment an announcement for diplomatic car sale.' This demonstrates the use of a false persona to gain trust and trick the recipient into interacting with a malicious file.",
+                    "confidence_score": 0.9611
+                }
+            ]
+        },
+        {
+            "technique_id": "T1589.002",
+            "tactic": [
+                "reconnaissance"
+            ],
+            "technique_name": "Email Addresses",
+            "occurrences": [
+                {
+                    "location": "Page 4, Chunk 4",
+                    "procedure": "The adversary conducted a phishing campaign targeting over 200 specific email addresses.",
+                    "justification": "The report explicitly states that the campaign consisted of 'over 200 targeted email addresses', which confirms the adversary had gathered and utilized a list of victim email addresses for their operation.",
+                    "confidence_score": 0.9717
+                }
+            ]
+        },
+        {
+            "technique_id": "T1684",
+            "tactic": [
+                "stealth"
+            ],
+            "technique_name": "Social Engineering",
+            "occurrences": [
+                {
+                    "location": "Page 4, Chunk 4",
+                    "procedure": "The attacker used phishing emails with a deceptive 'diplomatic car sale' lure to trick recipients into opening a malicious attachment.",
+                    "justification": "The report states: 'The attack methodology entailed the use of phishing emails equipped with enticing lures, portraying BMW car sales... Please find in attachment an announcement for diplomatic car sale.' This demonstrates the use of a social engineering narrative to induce user action (opening a file) to deliver a payload.",
+                    "confidence_score": 0.9496
+                }
+            ]
+        },
+        {
+            "technique_id": "T1566.001",
+            "tactic": [
+                "initial-access"
+            ],
+            "technique_name": "Spearphishing Attachment",
+            "occurrences": [
+                {
+                    "location": "Page 4, Chunk 4",
+                    "procedure": "The attacker sent targeted phishing emails containing a malicious RAR archive file disguised as a diplomatic car sale announcement to gain initial access.",
+                    "justification": "The report explicitly states the use of 'phishing emails equipped with enticing lures' and provides evidence of an email body stating 'Please find in attachment an announcement for diplomatic car sale' followed by the filename 'DIPLOMATIC- CAR-F...MW.rar', confirming the delivery of a malicious attachment.",
+                    "confidence_score": 0.9311
+                }
+            ]
+        },
+        {
+            "technique_id": "T1683",
+            "tactic": [
+                "resource-development"
+            ],
+            "technique_name": "Generate Content",
+            "occurrences": [
+                {
+                    "location": "Page 4, Chunk 4",
+                    "procedure": "The adversary created a phishing lure disguised as a diplomatic car sale announcement to deceive targets.",
+                    "justification": "The report states the adversary used 'phishing emails equipped with enticing lures, portraying BMW car sales' and includes the text of the lure: 'Dear colleagues, Please find in attachment an announcement for diplomatic car sale.' This demonstrates the creation of written content (the email body and pretext) to support social engineering/phishing operations.",
+                    "confidence_score": 0.9822
+                }
+            ]
+        },
+        {
+            "technique_id": "T1027.015",
+            "tactic": [
+                "stealth"
+            ],
+            "technique_name": "Compression",
+            "occurrences": [
+                {
+                    "location": "Page 7, Chunk 8",
+                    "procedure": "The attacker created a specially crafted RAR/ZIP archive containing a benign file and a folder with an identical name containing malicious executable content to exploit a vulnerability in WinRAR.",
+                    "justification": "The report explicitly states that 'malicious actors can insert folders with matching names' within a 'specially crafted ZIP archive' to hide malicious content and execute arbitrary code, which constitutes the use of archive compression to obfuscate and deliver a payload.",
+                    "confidence_score": 0.8579
+                }
+            ]
+        }
+    ]
+}
+
+
+================================================
+FILE: infrastructure/docker-compose.yml
+================================================
+
+services:
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: qdrant-tfm
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - ./qdrant_data:/qdrant/storage
+
+
+================================================
+FILE: src/debug_ngrok.py
+================================================
+import os
+import torch
+from sentence_transformers import CrossEncoder
+from qdrant_client import QdrantClient
+from langchain_qdrant import QdrantVectorStore, FastEmbedSparse, RetrievalMode
+from langchain_huggingface import HuggingFaceEmbeddings
+
+def run_debug():
+    print("[*] Conectando a Qdrant y cargando modelos...")
+    qdrant_url = "http://localhost:6333"
+    client = QdrantClient(url=qdrant_url)
+    
+    embeddings = HuggingFaceEmbeddings(model_name="BAAI/bge-m3")
+    sparse_embeddings = FastEmbedSparse(model_name="Qdrant/bm25")
+    
+    vector_store = QdrantVectorStore(
+        client=client,
+        collection_name="mitre_attack",
+        embedding=embeddings,
+        sparse_embedding=sparse_embeddings,
+        retrieval_mode=RetrievalMode.HYBRID
+    )
+    
+    reranker = CrossEncoder('BAAI/bge-reranker-base', device='cpu')
+    
+    # Textos extraídos de tus logs de LangSmith
+    chunk_text = """Figure.3 “DIPLOMATIC-CAR-FOR-SALE-BMW.pdf” lure document.
+Figure.4 PowerShell script deploying .pdf lure and downloading next-stage payload from <IoC_DOMAIN>.
+Ngrok, at its core, is an incredibly versatile and cross-platform tool designed to expose local network ports securely to the internet through a process known as tunneling. However, in the context of cyber adversaries, Ngrok has taken on a diﬀerent role. Instead of legitimate purposes, adversaries have begun leveraging Ngrok to store their next-stage PowerShell payloads and establish covert communication channels.
+In this nefarious tactic, they utilize Ngrok's services by utilizing free static domains provided by Ngrok, typically in the form of a subdomain under "<IoC_DOMAIN>." These subdomains act as discrete and inconspicuous rendezvous points for their malicious payloads. This clever adaptation allows the adversaries to obfuscate their activities and communicate with compromised systems while evading detection. By exploiting Ngrok's capabilities in this manner, threat actors can further complicate cybersecurity eﬀorts and remain under the radar, making defense and attribution more challenging.
+6: HKLUK"""
+    
+    abstract_keywords = "Spearphishing Attachment, Remote File Download, Protocol Tunneling, Command and Control, Obfuscation, Payload Delivery, Living off the Land"
+    
+    # Esta es la query exacta que tu Extractor está enviando a mitre_oracle
+    search_query = f"Raw Text: {chunk_text}\nKeywords: {abstract_keywords}"
+    
+    print("\n" + "="*50)
+    print("1. BÚSQUEDA HÍBRIDA EN QDRANT (TOP 15)")
+    print("="*50)
+    
+    # Obtenemos candidatos con su score de Qdrant
+    candidates_with_scores = vector_store.similarity_search_with_score(search_query, k=15)
+    
+    t1572_found_in_qdrant = False
+    
+    for i, (doc, score) in enumerate(candidates_with_scores):
+        tech_id = doc.metadata.get('technique_id', 'Unknown')
+        name = doc.metadata.get('name', 'Unknown')
+        print(f"{i+1}. {tech_id} - {name} (Qdrant Score: {score:.4f})")
+        if tech_id == 'T1572':
+            t1572_found_in_qdrant = True
+
+    if not t1572_found_in_qdrant:
+        print("\n[!] ALERTA CRÍTICA: T1572 (Protocol Tunneling) NO FUE RECUPERADA POR QDRANT EN EL TOP 15.")
+        print("[!] Esto significa que el fallo está en la indexación de Qdrant o que el texto de la query 'diluye' a BM25.")
+        
+    print("\n" + "="*50)
+    print("2. EVALUACIÓN DEL CROSS-ENCODER (RERANKER)")
+    print("="*50)
+    
+    all_pairs = [[search_query, doc.page_content] for doc, _ in candidates_with_scores]
+    
+    if all_pairs:
+        # Extraemos logits brutos primero para ver qué está pensando el modelo matemáticamente
+        raw_logits = reranker.predict(all_pairs, batch_size=16)
+        # Extraemos probabilidades con Sigmoide
+        probabilities = reranker.predict(all_pairs, batch_size=16, activation_fn=torch.nn.Sigmoid())
+        
+        results = []
+        for i, (doc, _) in enumerate(candidates_with_scores):
+            tech_id = doc.metadata.get('technique_id', 'Unknown')
+            name = doc.metadata.get('name', 'Unknown')
+            results.append({
+                "id": tech_id, 
+                "name": name, 
+                "logit": raw_logits[i], 
+                "prob": probabilities[i]
+            })
+            
+        # Ordenar por probabilidad
+        results.sort(key=lambda x: x["prob"], reverse=True)
+        
+        for res in results:
+            marker = "--> [PASA EL CORTE >= 0.15]" if res["prob"] >= 0.15 else "    [RECHAZADO]"
+            print(f"{marker} {res['id']} - {res['name']} | Logit: {res['logit']:.4f} | Prob(Sigmoid): {res['prob']:.4f}")
+
+if __name__ == "__main__":
+    run_debug()
+
+
+
+================================================
+FILE: src/core/ioc_masker.py
+================================================
+import re
+
+class IoCMasker:
+    """
+    A utility class to mask Indicators of Compromise (IoCs) in Cyber Threat Intelligence (CTI) reports.
+    Replaces raw IPs, hashes, URLs, emails, and domains with typed semantic tags to prevent
+    data leakage or hallucination in embedding spaces and LLM prompts.
+    """
+    
+    def __init__(self) -> None:
+        # Regex patterns compiled for performance
+        
+        self.large_payload_pattern = re.compile(r'\b[a-zA-Z0-9+/=]{150,}\b')
+        
+        # URLs: Matches http, https, ftp
+        self.url_pattern = re.compile(
+            r'(?:https?|ftp)://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+',
+            re.IGNORECASE
+        )
+        
+        # Emails: Standard email address matching
+        self.email_pattern = re.compile(
+            r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b',
+            re.IGNORECASE
+        )
+        
+        # IPv6: Basic matching for IPv6 addresses
+        self.ipv6_pattern = re.compile(
+            r'\b(?:[a-fA-F0-9]{1,4}:){7}[a-fA-F0-9]{1,4}\b',
+            re.IGNORECASE
+        )
+        
+        # IPv4: Matches valid IPv4 octets
+        self.ipv4_pattern = re.compile(
+            r'\b(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.'
+            r'(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.'
+            r'(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.'
+            r'(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\b'
+        )
+        
+        # Hashes: MD5 (32), SHA1 (40), SHA256 (64)
+        self.hash_pattern = re.compile(
+            r'\b(?:[a-fA-F0-9]{32}|[a-fA-F0-9]{40}|[a-fA-F0-9]{64})\b'
+        )
+        
+        # Domains: Matches standard domain formats
+        # We apply this last or carefully so it doesn't mask parts of emails or valid prose
+        self.domain_pattern = re.compile(
+            r'\b(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+(?:com|org|net|info|biz|io|app|co|us|uk|ru|cn|dev|me|tv|ws|xyz|top|tk|ml|ga|cf|gq|site|online|tech)\b',
+            re.IGNORECASE
+        )
+
+    def _refang(self, text: str) -> str:
+        """
+        Reverts defanged IoCs to their original form before masking.
+        """
+        text = text.replace('hxxps', 'https')
+        text = text.replace('hxxp', 'http')
+        text = text.replace('[.]', '.')
+        return text
+
+    def mask_text(self, text: str) -> str:
+        """
+        Masks all identified IoCs in the provided text with typed tags.
+        
+        Order of substitution is critical to avoid partial matches 
+        (e.g., masking a domain inside an email or URL first).
+        
+        Args:
+            text (str): The raw text from the CTI report.
+            
+        Returns:
+            str: The sanitized text with IoCs masked.
+        """
+        if not text:
+            return text
+            
+        text = self._refang(text)
+        
+        masked_text = self.large_payload_pattern.sub('<LARGE_PAYLOAD_REMOVED>', text)
+        
+        # 1. URLs (most complex, contains domains/paths)
+        masked_text = self.url_pattern.sub('<IoC_URL>', masked_text)
+        
+        # 2. Emails (contains domains)
+        masked_text = self.email_pattern.sub('<IoC_EMAIL>', masked_text)
+        
+        # 3. IPv6 and IPv4
+        masked_text = self.ipv6_pattern.sub('<IoC_IPv6>', masked_text)
+        masked_text = self.ipv4_pattern.sub('<IoC_IPv4>', masked_text)
+        
+        # 4. Hashes (MD5, SHA1, SHA256)
+        masked_text = self.hash_pattern.sub('<IoC_HASH>', masked_text)
+        
+        # 5. Domains (done after URLs and Emails to prevent partial overrides)
+        masked_text = self.domain_pattern.sub('<IoC_DOMAIN>', masked_text)
+        
+        return masked_text
+
+
+
+================================================
+FILE: src/core/schemas.py
+================================================
+from typing import List
+from pydantic import BaseModel, Field
+
+class Evidence(BaseModel):
+    location: str = Field(
+        ...,
+        description="The location of the evidence (e.g., 'Page 3, Chunk 5')."
+    )
+    procedure: str = Field(
+        ...,
+        description="A concise explanation of the exact, specific action the attacker took in this report (The MITRE ATT&CK Procedure)."
+    )
+    justification: str = Field(
+        ...,
+        description="Technical explanation of why this chunk demonstrates the technique, quoting the original provided text."
+    )
+    confidence_score: float = Field(
+        ...,
+        description="Confidence score coming from the retrieval phase."
+    )
+
+class TTPDetection(BaseModel):
+    """
+    Pydantic schema to enforce structured LLM output for MITRE ATT&CK technique detection.
+    """
+    technique_id: str = Field(
+        ...,
+        description="The MITRE ATT&CK technique ID (e.g. T1059)."
+    )
+    tactic: List[str] = Field(
+        default_factory=list,
+        description="List of associated MITRE tactics obtained from context."
+    )
+    technique_name: str = Field(
+        default="",
+        description="The full name of the MITRE ATT&CK technique."
+    )
+    is_present: bool = Field(
+        ...,
+        description="True if the evidence unequivocally demonstrates the attacker used this technique. False if it is a false positive, benign, or defensive mention."
+    )
+    occurrences: List[Evidence] = Field(
+        default_factory=list,
+        description="A list of specific occurrences/evidence blocks where the technique was confirmed."
+    )
+
+
+
+================================================
+FILE: src/langchain_pipeline/main_pipeline.py
+================================================
+import sys
+import os
+import subprocess
+import time
+
+# Add the project root to the python path so imports from src work smoothly
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
+
+def bootstrap_environment():
+    """Instala dependencias e inicia los servicios requeridos (Ollama y Qdrant)."""
+    print("🚀 [BOOTSTRAP] Configurando el entorno de ejecución...")
+    
+    # 1. Instalar dependencias
+    print("📦 [BOOTSTRAP] Instalando dependencias de requirements.txt...")
+    try:
+        subprocess.run([sys.executable, "-m", "pip", "install", "-r", "requirements.txt"], check=True)
+    except Exception as e:
+        print(f"⚠️ [BOOTSTRAP] Error instalando dependencias: {e}")
+
+    llm_provider = os.environ.get("LLM_PROVIDER", "ollama").lower()
+    
+    if llm_provider == "ollama":
+        # 2. Iniciar Ollama en segundo plano
+        print("🦙 [BOOTSTRAP] Iniciando servicio Ollama...")
+        try:
+            subprocess.Popen(["ollama", "serve"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except FileNotFoundError:
+            print("⚠️ [BOOTSTRAP] 'ollama' no está instalado o no se encuentra en el PATH.")
+
+    print("⏳ [BOOTSTRAP] Esperando 5 segundos para que los servicios estén listos...\n")
+    time.sleep(5)
+
+# Ejecutamos el bootstrap ANTES de importar librerías de terceros
+# para evitar el error ModuleNotFoundError
+bootstrap_environment()
+
+import json
+import logging
+from typing import List
+
+from dotenv import load_dotenv
+# Cargar variables de entorno ANTES de importar LangChain (forzando override para que actualice la API key si cambió)
+load_dotenv(override=True)
+
+# Import pipeline phases (Ingestion FIRST to prevent OpenMP/segfault conflicts with torch/onnxruntime)
+from src.langchain_pipeline.phase1_ingestion import ReportIngestor
+
+# Se importarán dinámicamente según la configuración
+from langchain_qdrant import QdrantVectorStore, FastEmbedSparse, RetrievalMode
+from langchain_huggingface import HuggingFaceEmbeddings
+from qdrant_client import QdrantClient
+
+from src.langchain_pipeline.phase3_retriever import CandidateRetriever
+from src.langchain_pipeline.phase4_inference import TTPAnalyzer
+
+# Configuración básica de logs
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+# Silenciar los molestos errores de conexión en segundo plano de LangSmith/HTTP
+logging.getLogger("langsmith.client").setLevel(logging.CRITICAL)
+logging.getLogger("urllib3.connectionpool").setLevel(logging.CRITICAL)
+logging.getLogger("httpx").setLevel(logging.CRITICAL)
+
+def run_cti_extraction(pdf_path: str) -> str:
+    """
+    Orquesta el flujo completo de 4 Fases de LangChain para extraer 
+    las tácticas y técnicas de MITRE ATT&CK desde un reporte CTI.
+    
+    Args:
+        pdf_path (str): Ruta absoluta o relativa al reporte en formato PDF.
+        
+    Returns:
+        str: Cadena JSON formateada con las detecciones TTP confirmadas.
+    """
+    logger.info(f"--- Iniciando extracción CTI para: {pdf_path} ---")
+    
+    # ------------------------------------------------------------------
+    # PHASE 1: Ingesta y Particionado Semántico
+    # ------------------------------------------------------------------
+    logger.info("[FASE 1] Ingestando y sanitizando el reporte...")
+    t0 = time.time()
+    ingestor = ReportIngestor(chunk_size=1500, chunk_overlap=300)
+    report_chunks = ingestor.process_report(pdf_path)
+    p1_time = time.time() - t0
+    logger.info(f"[FASE 1] Se generaron {len(report_chunks)} chunks enmascarados.")
+    
+    # ------------------------------------------------------------------
+    # PHASE 2/3 SETUP: Conexión a Base de Datos Vectorial (MITRE)
+    # ------------------------------------------------------------------
+    logger.info("[SETUP] Conectando a la Base Vectorial Qdrant...")
+    qdrant_host = os.getenv("QDRANT_HOST", "localhost")
+    qdrant_port = os.getenv("QDRANT_PORT", "6333")
+    qdrant_url = f"http://{qdrant_host}:{qdrant_port}"
+    collection_name = "mitre_attack"
+    
+    try:
+        client = QdrantClient(url=qdrant_url)
+        
+        # Verificamos si la colección existe; si no, la creamos
+        if not client.collection_exists(collection_name):
+            logger.info(f"[SETUP] La colección '{collection_name}' no existe. Ejecutando Indexer (Fase 2)...")
+            from src.langchain_pipeline.phase2_indexer import setup_mitre_index
+            setup_mitre_index(qdrant_url, collection_name)
+            logger.info("[SETUP] Colección MITRE ATT&CK construida exitosamente.")
+            # IMPORTANTE: Re-instanciar el cliente Qdrant. La indexación tarda mucho tiempo
+            # y el pool de conexiones HTTP original puede cerrarse por inactividad.
+            client = QdrantClient(url=qdrant_url)
+            
+        embeddings = HuggingFaceEmbeddings(model_name="BAAI/bge-m3")
+        sparse_embeddings = FastEmbedSparse(model_name="Qdrant/bm25")
+        vector_store = QdrantVectorStore(
+            client=client,
+            collection_name=collection_name,
+            embedding=embeddings,
+            sparse_embedding=sparse_embeddings,
+            retrieval_mode=RetrievalMode.HYBRID
+        )
+    except Exception as e:
+        logger.error(f"Fallo crítico al conectar con Qdrant o inicializar la DB. ¿Está el contenedor corriendo? Error: {e}")
+        timing_metrics = {
+            "phase1_ingestion_seconds": round(p1_time, 2),
+            "phase3_retrieval_seconds": 0.0,
+            "phase4_inference_seconds": 0.0
+        }
+        return [{"error": "Fallo de conexión o inicialización en Qdrant", "detalle": str(e)}], timing_metrics
+
+    # ------------------------------------------------------------------
+    # PHASE 3: Hybrid Retrieval y Cross-Encoder Reranking
+    # ------------------------------------------------------------------
+    logger.info("[FASE 3] Recuperando y re-evaluando candidatos de MITRE...")
+    retriever = CandidateRetriever(vector_store=vector_store)
+    # top_k y threshold pueden ser ajustados empíricamente
+    t1 = time.time()
+    filtered_candidates = retriever.get_filtered_mitre_candidates(report_chunks, threshold=0.4)
+    p3_time = time.time() - t1
+    
+    if not filtered_candidates:
+        logger.warning("[FASE 3] No se encontraron candidatos con alto grado de confianza. Fin de pipeline.")
+        timing_metrics = {
+            "phase1_ingestion_seconds": round(p1_time, 2),
+            "phase3_retrieval_seconds": round(p3_time, 2),
+            "phase4_inference_seconds": 0.0
+        }
+        return [], timing_metrics
+        
+    # ------------------------------------------------------------------
+    # PHASE 4: Inferencia LLM y Salida Estructurada
+    # ------------------------------------------------------------------
+    logger.info("[FASE 4] Consultando al LLM para confirmación estructurada...")
+    
+    llm_provider = os.getenv("LLM_PROVIDER", "ollama").lower()
+    
+    if llm_provider == "gemini":
+        logger.info("[FASE 4] Configurando Google Gemini para inferencia (más rápido)...")
+        from langchain_google_genai import ChatGoogleGenerativeAI
+        # Usamos gemini-3.5-flash por defecto (1.5 está deprecado)
+        gemini_model = os.getenv("GEMINI_MODEL", "gemini-flash-lite-latest")
+        
+        if not os.getenv("GOOGLE_API_KEY") or os.getenv("GOOGLE_API_KEY") == "your_api_key_here":
+            logger.error("⚠️ [FASE 4] Falta la GOOGLE_API_KEY en el entorno para usar Gemini.")
+            timing_metrics = {
+                "phase1_ingestion_seconds": round(p1_time, 2),
+                "phase3_retrieval_seconds": round(p3_time, 2),
+                "phase4_inference_seconds": 0.0
+            }
+            return [{"error": "Falta GOOGLE_API_KEY en el .env"}], timing_metrics
+            
+        llm = ChatGoogleGenerativeAI(model=gemini_model, temperature=0.0)
+    else:
+        logger.info("[FASE 4] Configurando Ollama local para inferencia...")
+        model_name = os.getenv("LLM_MODEL", "llama3.1:8b")
+        base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+        
+        from langchain_ollama import ChatOllama
+        # Instanciamos ChatOllama forzando temperature=0 para obtener máxima determinística analítica
+        llm = ChatOllama(model=model_name, base_url=base_url, temperature=0.0)
+        
+        # Verificamos si el modelo está instalado consultando la CLI de Ollama directamente
+        try:
+            logger.info(f"[FASE 4] Comprobando disponibilidad del modelo {model_name}...")
+            check_result = subprocess.run(["ollama", "show", model_name], capture_output=True)
+            
+            if check_result.returncode != 0:
+                logger.info(f"[FASE 4] El modelo {model_name} no está instalado. Descargando...")
+                subprocess.run(["ollama", "pull", model_name], check=True)
+                logger.info(f"[FASE 4] Modelo {model_name} descargado y listo para usar.")
+            else:
+                logger.info(f"[FASE 4] El modelo {model_name} ya está disponible en el sistema.")
+                
+        except Exception as e:
+            logger.warning(f"[FASE 4] No se pudo verificar o descargar el modelo automáticamente mediante la CLI. Error: {e}")
+            
+    analyzer = TTPAnalyzer(llm=llm)
+    t2 = time.time()
+    confirmed_ttps = analyzer.analyze_candidates(filtered_candidates)
+    p4_time = time.time() - t2
+    
+    # ------------------------------------------------------------------
+    # EXTRACCIÓN DE RESULTADOS
+    # ------------------------------------------------------------------
+    # Convertimos los objetos de Pydantic a diccionarios excluyendo 'is_present' para limpiar el output final
+    output_dict_list = [ttp.model_dump(exclude={'is_present'}) for ttp in confirmed_ttps]
+    
+    logger.info("--- Pipeline Finalizado con Éxito ---")
+    timing_metrics = {
+        "phase1_ingestion_seconds": round(p1_time, 2),
+        "phase3_retrieval_seconds": round(p3_time, 2),
+        "phase4_inference_seconds": round(p4_time, 2)
+    }
+    return output_dict_list, timing_metrics
+
+
+if __name__ == "__main__":
+    # Soporte para ejecución mediante terminal
+    if len(sys.argv) < 2:
+        print("Uso: python -m src.langchain_pipeline.main_pipeline <ruta_al_pdf>")
+        sys.exit(1)
+        
+    target_pdf = sys.argv[1]
+    
+    if not os.path.exists(target_pdf):
+        print(f"Error: El archivo '{target_pdf}' no existe o no es accesible.")
+        sys.exit(1)
+        
+    start_time = time.time()
+    
+    # run_cti_extraction ahora devuelve una lista de diccionarios y métricas de tiempo
+    resultados_lista, timing_metrics = run_cti_extraction(target_pdf)
+    
+    end_time = time.time()
+    execution_time = end_time - start_time
+    
+    # Crear el JSON final incluyendo métricas
+    output_data = {
+        "source_file": target_pdf,
+        "total_execution_time_seconds": round(execution_time, 2),
+        "total_execution_time_minutes": round(execution_time / 60, 2),
+        "timing_breakdown": timing_metrics,
+        "extracted_ttps": resultados_lista
+    }
+    
+    resultados_json = json.dumps(output_data, indent=4, ensure_ascii=False)
+    
+    # Asegurar que existe el directorio de salida
+    output_dir = os.path.join(os.path.dirname(__file__), '../../data/output')
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Generar nombre de archivo basado en el PDF original
+    base_name = os.path.basename(target_pdf)
+    file_name_without_ext = os.path.splitext(base_name)[0]
+    output_file_path = os.path.join(output_dir, f"{file_name_without_ext}_results.json")
+    
+    with open(output_file_path, "w", encoding="utf-8") as f:
+        f.write(resultados_json)
+    
+    print("\n" + "="*60)
+    print("🎯 RESULTADOS FINALES: TTPs EXTRAÍDOS")
+    print("="*60)
+    print(f"Tiempo de ejecución: {round(execution_time / 60, 2)} minutos")
+    print(f"Resultados guardados exitosamente en: {output_file_path}")
+    print("="*60)
+
+
+
+================================================
+FILE: src/langchain_pipeline/phase1_ingestion.py
+================================================
+import os
+import re
+from typing import List
+
+from langchain_community.document_loaders import UnstructuredPDFLoader
+from langchain_core.documents import Document
+from langchain_text_splitters import RecursiveCharacterTextSplitter, MarkdownHeaderTextSplitter
+
+from src.core.ioc_masker import IoCMasker
+
+
+class ReportIngestor:
+    """
+    Handles Phase 1 of the LangChain pipeline: Ingestion.
+    Responsible for loading PDF reports, filtering noise (headers, footers, boilerplate),
+    reconstructing structural Markdown, masking IoCs, and chunking semantically.
+    """
+
+    def __init__(self, chunk_size: int = 750, chunk_overlap: int = 150) -> None:
+        """
+        Initializes the ReportIngestor with chunking parameters and IoC masker.
+        
+        Args:
+            chunk_size (int): The maximum character size for each chunk.
+            chunk_overlap (int): Overlap in characters to maintain context.
+        """
+        self.chunk_size = chunk_size
+        self.chunk_overlap = chunk_overlap
+        self.ioc_masker = IoCMasker()
+        
+        self.headers_to_split_on = [
+            ("#", "Header 1"),
+            ("##", "Header 2"),
+            ("###", "Header 3"),
+        ]
+        self.md_splitter = MarkdownHeaderTextSplitter(headers_to_split_on=self.headers_to_split_on, strip_headers=False)
+        
+        self.fallback_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=self.chunk_size,
+            chunk_overlap=self.chunk_overlap,
+            separators=["\n\n", "\n", ".", " ", ""]
+        )
+        
+        self.boilerplate_keywords = [
+            "subscribe", "share on", "copyright ©", "copyright c",
+            "all rights reserved", "manage cookies"
+        ]
+
+    def load_pdf(self, file_path: str) -> List[Document]:
+        """
+        Loads a PDF file and extracts its elements using Unstructured.
+        Uses hi_res strategy for OCR and table extraction.
+        """
+        if not os.path.exists(file_path):
+            raise FileNotFoundError(f"The file {file_path} does not exist.")
+            
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        # Optional: fast page check using PyMuPDF to validate extraction later
+        try:
+            import fitz
+            pdf_doc = fitz.open(file_path)
+            num_pages = len(pdf_doc)
+            pdf_doc.close()
+        except Exception:
+            num_pages = 1
+            
+        logger.info(f"Loading PDF '{file_path}' using Unstructured hi_res strategy (Pages detected: {num_pages})...")
+            
+        # Using mode='elements', hi_res strategy for OCR, and inferring tables
+        loader = UnstructuredPDFLoader(
+            file_path, 
+            mode="elements", 
+            strategy="hi_res",
+            pdf_infer_table_structure=True
+        )
+        elements = loader.load()
+        
+        # Validation Logic: Suspiciously short extraction
+        total_text_len = sum(len(el.page_content) for el in elements)
+        if num_pages >= 3 and total_text_len < (num_pages * 50):
+            logger.warning(
+                f"🚨 ALERT: Extracted text is suspiciously short ({total_text_len} chars across {num_pages} pages). "
+                "The PDF might be a pure scanned image requiring forced full-page OCR or it's heavily obfuscated."
+            )
+            
+        return elements
+
+    def process_report(self, file_path: str) -> List[Document]:
+        """
+        Main method to process a CTI report:
+        1. Loads the PDF via unstructured elements.
+        2. Filters out noise and boilerplate.
+        3. Constructs a Markdown representation.
+        4. Masks IoCs.
+        5. Splits the text logically using Markdown headers & Recursive fallback.
+        """
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        raw_elements = self.load_pdf(file_path)
+        
+        logger.info("[FASE 1] Limpiando ruido y reconstruyendo estructura Markdown...")
+        md_lines = []
+        for el in raw_elements:
+            cat = el.metadata.get("category", "NarrativeText")
+            text = el.page_content.strip()
+            page_num = el.metadata.get("page_number", "?")
+            
+            if not text:
+                continue
+                
+            # Filter Headers and Footers
+            if cat in ["Header", "Footer"]:
+                continue
+                
+            # Filter Boilerplate and short NarrativeText
+            if cat == "NarrativeText":
+                lower_text = text.lower()
+                if any(bp in lower_text for bp in self.boilerplate_keywords):
+                    continue
+                if len(text.split()) < 5:
+                    continue
+                    
+            # Handle Tables
+            if cat == "Table":
+                text = el.metadata.get("text_as_html", text)
+                
+            # Format as Markdown and inject hidden page tracker
+            if cat == "Title":
+                md_lines.append(f"\n## {text} <!-- Page {page_num} -->\n")
+            elif cat == "ListItem":
+                md_lines.append(f"- {text} <!-- Page {page_num} -->")
+            else:
+                md_lines.append(f"{text} <!-- Page {page_num} -->\n")
+                
+        full_md = "\n".join(md_lines)
+        
+        logger.info("[FASE 1] Enmascarando Indicadores de Compromiso (IoCs) volátiles...")
+        # Mask IoCs on the combined text
+        sanitized_md = self.ioc_masker.mask_text(full_md)
+        
+        logger.info("[FASE 1] Aplicando chunking semántico por cabeceras y tamaño...")
+        # Split by Markdown Headers
+        md_docs = self.md_splitter.split_text(sanitized_md)
+        
+        # Fallback split for huge sections
+        final_docs = self.fallback_splitter.split_documents(md_docs)
+        
+        # Add metadata for traceability
+        for i, doc in enumerate(final_docs):
+            doc.metadata['chunk_index'] = i
+            # Extract the first page number found in the chunk
+            match = re.search(r'<!-- Page (\d+) -->', doc.page_content)
+            if match:
+                doc.metadata['page_number'] = match.group(1)
+            else:
+                doc.metadata['page_number'] = "Unknown"
+                
+            # Clean up the HTML comments so the LLM isn't distracted
+            doc.page_content = re.sub(r' <!-- Page \d+ -->', '', doc.page_content)
+            
+        return final_docs
+
+
+
+================================================
+FILE: src/langchain_pipeline/phase2_indexer.py
+================================================
+import json
+import logging
+from typing import List, Dict, Any, Optional
+
+import torch
+from langchain_core.documents import Document
+from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_qdrant import QdrantVectorStore, FastEmbedSparse, RetrievalMode
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from qdrant_client import QdrantClient
+from qdrant_client.http.exceptions import UnexpectedResponse
+
+logger = logging.getLogger(__name__)
+
+class MitreIndexer:
+    """
+    Handles Phase 2 of the LangChain pipeline: MITRE ATT&CK Indexing.
+    Loads MITRE Enterprise JSON data, semantically enriches the descriptions,
+    and indexes them into a Qdrant vector database using HuggingFace embeddings.
+    """
+
+    def __init__(self, qdrant_url: str = "http://localhost:6333", collection_name: str = "mitre_attack") -> None:
+        """
+        Initializes the indexer with Qdrant connection details.
+        
+        Args:
+            qdrant_url (str): The URL of the Qdrant instance.
+            collection_name (str): The name of the Qdrant collection to store vectors.
+        """
+        self.qdrant_url = qdrant_url
+        self.collection_name = collection_name
+        
+        # Automatically select the best available device
+        if torch.cuda.is_available():
+            self.device = "cuda"
+        elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            self.device = "mps"
+        else:
+            self.device = "cpu"
+            
+        # BAAI/bge-m3 is a state-of-the-art multilingual model great for retrieval
+        self.embeddings = HuggingFaceEmbeddings(
+            model_name="BAAI/bge-m3",
+            model_kwargs={'device': self.device},
+            encode_kwargs={'normalize_embeddings': True}
+        )
+
+    def load_mitre_data(self, file_path: str) -> List[Dict[str, Any]]:
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+        except Exception as e:
+            logger.error(f"Failed to load MITRE data from {file_path}: {e}")
+            raise
+            
+        objects = data.get("objects", []) if isinstance(data, dict) else data
+        if not isinstance(objects, list):
+            logger.warning("Unexpected JSON structure. Expected a list or a STIX bundle with 'objects'.")
+            return []
+            
+        # 1. Extraer nombres de herramientas y malware
+        entity_names = {}
+        for obj in objects:
+            if obj.get("type") in ["malware", "tool", "intrusion-set"]:
+                entity_names[obj.get("id")] = obj.get("name")
+                
+        # 2. Resolver las relaciones "uses" (Herramienta -> usa -> Técnica)
+        technique_examples = {}
+        for obj in objects:
+            if obj.get("type") == "relationship" and obj.get("relationship_type") == "uses":
+                source_id = obj.get("source_ref")
+                target_id = obj.get("target_ref")
+                
+                if target_id and target_id.startswith("attack-pattern--") and source_id in entity_names:
+                    if target_id not in technique_examples:
+                        technique_examples[target_id] = []
+                    tool_name = entity_names[source_id]
+                    if tool_name not in technique_examples[target_id]:
+                        technique_examples[target_id].append(tool_name)
+
+        # 3. Construir las técnicas enriquecidas
+        techniques = []
+        for obj in objects:
+            if obj.get("type") != "attack-pattern":
+                continue
+                
+            if obj.get("revoked", False) or obj.get("x_mitre_deprecated", False):
+                continue
+                
+            external_refs = obj.get("external_references", [])
+            technique_id = "Unknown"
+            for ref in external_refs:
+                if ref.get("source_name") == "mitre-attack":
+                    technique_id = ref.get("external_id", "Unknown")
+                    break
+                    
+            if not technique_id.startswith("T"):
+                continue  
+                
+            tactics = [
+                phase.get("phase_name", "") 
+                for phase in obj.get("kill_chain_phases", []) 
+                if phase.get("kill_chain_name") == "mitre-attack"
+            ]
+            
+            # Recuperar las herramientas asociadas a esta técnica
+            stix_id = obj.get("id")
+            examples = technique_examples.get(stix_id, [])
+            
+            technique_dict = {
+                "technique_id": technique_id,
+                "name": obj.get("name", "Unknown"),
+                "description": obj.get("description", ""),
+                "tactics": tactics,
+                "platforms": obj.get("x_mitre_platforms", []),
+                "procedure_examples": examples
+            }
+            techniques.append(technique_dict)
+            
+        logger.info(f"Loaded {len(techniques)} techniques from {file_path}.")
+        return techniques
+
+    def _enrich_description(self, technique: Dict[str, Any]) -> str:
+        """
+        Enriches the technique's description with tactical keywords and procedure examples.
+        This concatenation improves the semantic vector density, increasing the Recall of RAG.
+        
+        Args:
+            technique (Dict[str, Any]): The extracted technique dictionary.
+            
+        Returns:
+            str: The enriched text ready for vectorization.
+        """
+        base_desc = technique.get("description", "").strip()
+        
+        keywords = []
+        tactics = technique.get("tactics", [])
+        if tactics:
+            keywords.append(f"Tactics: {', '.join(tactics)}")
+            
+        platforms = technique.get("platforms", [])
+        if platforms:
+            keywords.append(f"Platforms: {', '.join(platforms)}")
+            
+        examples = technique.get("procedure_examples", [])
+        if examples:
+            if isinstance(examples, list):
+                examples_text = " | ".join(str(e) for e in examples)
+            else:
+                examples_text = str(examples)
+            keywords.append(f"Procedure Examples: {examples_text}")
+            
+        # Combine base description with semantic keywords
+        if keywords:
+            enriched_text = f"{base_desc}\n\nTechnical Keywords & Examples: {'; '.join(keywords)}"
+        else:
+            enriched_text = base_desc
+            
+        return enriched_text
+
+    def build_vector_store(self, file_path: str) -> Optional[QdrantVectorStore]:
+        """
+        End-to-end method to load the JSON, enrich descriptions, create Document objects,
+        and index them into Qdrant.
+        
+        Args:
+            file_path (str): Path to the MITRE JSON file.
+            
+        Returns:
+            Optional[QdrantVectorStore]: The initialized Qdrant vector store, or None if failed.
+        """
+        techniques = self.load_mitre_data(file_path)
+        if not techniques:
+            logger.error("No techniques extracted. Aborting vectorization.")
+            return None
+            
+        splitter = RecursiveCharacterTextSplitter(chunk_size=800, chunk_overlap=150)
+            
+        documents = []
+        for tech in techniques:
+            enriched_content = self._enrich_description(tech)
+            
+            # Metadata must be flat and use simple types for Qdrant compatibility
+            metadata = {
+                "technique_id": tech.get("technique_id"),
+                "name": tech.get("name"),
+                "tactics": ", ".join(tech.get("tactics", [])),
+                "platforms": ", ".join(tech.get("platforms", [])),
+                "full_description": tech.get("description", "").strip() # PRESERVE FULL TEXT FOR LLM
+            }
+            
+            # Chunk the enriched content for fast Cross-Encoder evaluation
+            chunks = splitter.split_text(enriched_content)
+            for chunk in chunks:
+                documents.append(Document(page_content=chunk, metadata=metadata))
+            
+        logger.info(f"Prepared {len(documents)} Document objects for vectorization.")
+        
+        try:
+            # Initialize Qdrant Client explicitly to test connection
+            client = QdrantClient(url=self.qdrant_url)
+            # A lightweight query to verify the connection
+            client.get_collections()
+            
+            sparse_embeddings = FastEmbedSparse(model_name="Qdrant/bm25")
+            
+            # Use LangChain's QdrantVectorStore to create the collection and embed documents
+            logger.info(f"Indexing documents into Qdrant using device: {self.device}...")
+            vector_store = QdrantVectorStore.from_documents(
+                documents=documents,
+                embedding=self.embeddings,
+                sparse_embedding=sparse_embeddings,
+                retrieval_mode=RetrievalMode.HYBRID,
+                url=self.qdrant_url,
+                collection_name=self.collection_name,
+                force_recreate=True,
+            )
+            logger.info("Successfully built and indexed the MITRE ATT&CK vector store.")
+            return vector_store
+            
+        except Exception as e:
+            # Catching general Exception handles both ConnectionError and UnexpectedResponse
+            logger.error(f"Qdrant Connection or Indexing Error: {e}. Ensure Qdrant is running.")
+            return None
+
+def setup_mitre_index(qdrant_url: str = "http://localhost:6333", collection_name: str = "mitre_attack"):
+    """
+    Helper function to automatically download the MITRE ATT&CK dataset
+    and populate the Qdrant vector database if it hasn't been set up yet.
+    """
+    import os
+    import urllib.request
+    
+    mitre_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../data/mitre_data'))
+    mitre_file = os.path.join(mitre_dir, 'enterprise-attack.json')
+    
+    os.makedirs(mitre_dir, exist_ok=True)
+    
+    if not os.path.exists(mitre_file):
+        url = "https://raw.githubusercontent.com/mitre-attack/attack-stix-data/master/enterprise-attack/enterprise-attack.json"
+        logger.info(f"Descargando datos oficiales de MITRE ATT&CK desde {url}...")
+        print(f"Descargando datos oficiales de MITRE ATT&CK desde {url}...")
+        urllib.request.urlretrieve(url, mitre_file)
+        logger.info("Descarga completada.")
+        print("Descarga completada.")
+        
+    logger.info("Iniciando Fase 2: Construcción de la Base Vectorial (Qdrant)...")
+    print("Iniciando Fase 2: Construcción de la Base Vectorial (Qdrant)...")
+    indexer = MitreIndexer(qdrant_url=qdrant_url, collection_name=collection_name)
+    store = indexer.build_vector_store(mitre_file)
+    if not store:
+        raise Exception("Fallo al construir el índice de MITRE en Qdrant.")
+    return store
+
+if __name__ == "__main__":
+    import os
+    import sys
+    
+    # Add project root to sys.path
+    sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
+    
+    try:
+        setup_mitre_index()
+        print("¡Indexación finalizada con éxito! Ya puedes ejecutar main_pipeline.py")
+    except Exception as e:
+        print(f"Hubo un error durante la indexación: {e}")
+
+
+
+================================================
+FILE: src/langchain_pipeline/phase3_retriever.py
+================================================
+import logging
+from typing import List, Dict, Any
+
+import torch
+from langchain_core.documents import Document
+from langchain_qdrant import QdrantVectorStore
+from sentence_transformers import CrossEncoder
+
+logger = logging.getLogger(__name__)
+
+class CandidateRetriever:
+    """
+    Handles Phase 3 of the LangChain pipeline: Hybrid Retrieval and Cross-Encoder Reranking.
+    Acts as a high-precision funnel using the 'Retrieve-then-Rerank' pattern to reduce
+    the load and hallucinations in the subsequent LLM inference phase.
+    """
+
+    def __init__(self, vector_store: QdrantVectorStore, device: str = None) -> None:
+        """
+        Initializes the retriever with a vector database and a Cross-Encoder model.
+        
+        Args:
+            vector_store (QdrantVectorStore): The initialized Qdrant vector database from Phase 2.
+            device (str, optional): The device to run the Cross-Encoder on ('cuda', 'mps', 'cpu').
+                                    Auto-detects if None is provided.
+        """
+        self.vector_store = vector_store
+        
+        if device is None:
+            # Auto-detect the optimal device
+            if torch.cuda.is_available():
+                self.device = "cuda"
+            elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+                self.device = "mps"
+            else:
+                self.device = "cpu"
+        else:
+            self.device = device
+            
+        logger.info(f"Loading Cross-Encoder model (BAAI/bge-reranker-base) on {self.device}...")
+        self.reranker = CrossEncoder('BAAI/bge-reranker-base', device=self.device)
+
+    def _get_initial_candidates(self, chunk: Document, top_k: int = 35) -> List[Document]:
+        """
+        Retrieves the initial set of candidate MITRE techniques from Qdrant.
+        
+        Args:
+            chunk (Document): A chunk of text from the parsed CTI report.
+            top_k (int): The number of candidates to retrieve.
+            
+        Returns:
+            List[Document]: The top K MITRE techniques retrieved via semantic search.
+        """
+        # Execute the vector similarity search
+        candidates = self.vector_store.similarity_search(chunk.page_content, k=top_k)
+        return candidates
+
+    def get_filtered_mitre_candidates(self, report_chunks: List[Document], threshold: float = 0.30) -> Dict[str, Dict[str, Any]]:
+        """
+        Main orchestrator for the retrieval phase. Retrieves candidates for all chunks,
+        reranks them in a single optimized batch, and aggregates the results.
+        
+        Args:
+            report_chunks (List[Document]): Chunked documents from Phase 1.
+            threshold (float): Minimum score for the Cross-Encoder.
+            
+        Returns:
+            Dict[str, Dict[str, Any]]: Aggregated mapping of MITRE techniques to supporting chunks.
+        """
+        grouped_results: Dict[str, Dict[str, Any]] = {}
+        logger.info(f"Starting retrieval and reranking for {len(report_chunks)} chunks...")
+        
+        all_initial_candidates = []
+        all_pairs = []
+        
+        # Step 1: Fast Vector Search (High Recall) for all chunks
+        for chunk in report_chunks:
+            chunk_text = chunk.page_content
+            candidates = self._get_initial_candidates(chunk, top_k=35)
+            all_initial_candidates.append((chunk, candidates))
+            
+            for doc in candidates:
+                all_pairs.append([chunk_text, doc.page_content])
+                
+        # Step 2: Accurate Reranking in Batch (High Precision)
+        logger.info(f"Reranking {len(all_pairs)} pairs in batch mode...")
+        scores = self.reranker.predict(all_pairs, batch_size=32, activation_fn=torch.nn.Sigmoid()) if all_pairs else []
+        
+        # Re-associate scores with chunks and apply filtering
+        score_idx = 0
+        for chunk, candidates in all_initial_candidates:
+            chunk_text = chunk.page_content
+            
+            # Extract page number based on loader metadata (PyMuPDF uses 'page', Unstructured uses 'page_number')
+            page_val = chunk.metadata.get("page")
+            if page_val is not None:
+                page_num = int(page_val) + 1  # PyMuPDF is 0-indexed
+            else:
+                page_num = chunk.metadata.get("page_number", "Unknown")
+                
+            chunk_idx = chunk.metadata.get("chunk_index", "Unknown")
+            
+            for doc in candidates:
+                score = float(scores[score_idx])
+                score_idx += 1
+                
+                if score >= threshold:
+                    tech_id = doc.metadata.get("technique_id", "Unknown")
+                    tech_name = doc.metadata.get("name", "Unknown")
+                    tactics_str = doc.metadata.get("tactics", "")
+                    
+                    if tech_id not in grouped_results:
+                        grouped_results[tech_id] = {
+                            "name": tech_name,
+                            "tactics": [t.strip() for t in tactics_str.split(",") if t.strip()],
+                            "description": doc.metadata.get("full_description", ""), # EXTRACT FULL DESCRIPTION
+                            "score": score,
+                            "supporting_chunks": []
+                        }
+                    else:
+                        if score > grouped_results[tech_id]["score"]:
+                            grouped_results[tech_id]["score"] = score
+                            
+                    is_unique = all(c["text"] != chunk_text for c in grouped_results[tech_id]["supporting_chunks"])
+                    if is_unique:
+                        grouped_results[tech_id]["supporting_chunks"].append({
+                            "text": chunk_text,
+                            "location": f"Page {page_num}, Chunk {chunk_idx}",
+                            "score": round(score, 4)
+                        })
+                        
+        for tech_id in grouped_results:
+            chunks = grouped_results[tech_id]["supporting_chunks"]
+            chunks.sort(key=lambda x: x["score"], reverse=True)
+            grouped_results[tech_id]["supporting_chunks"] = chunks
+            
+        logger.info(f"Retrieval complete. Found {len(grouped_results)} unique techniques across all chunks.")
+        return grouped_results
+
+
+
+================================================
+FILE: src/langchain_pipeline/phase4_inference.py
+================================================
+import os
+import logging
+from typing import Dict, List, Any
+
+from dotenv import load_dotenv
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.language_models.chat_models import BaseChatModel
+
+from src.core.schemas import TTPDetection
+
+logger = logging.getLogger(__name__)
+
+# Cargar variables de entorno (ej. USE_PROMPT_REPETITION, ENVIRONMENT_PROFILE)
+load_dotenv()
+
+class TTPAnalyzer:
+    """
+    Handles Phase 4: LLM Inference and Mapping.
+    Uses LangChain Expression Language (LCEL) to prompt the model and enforce a structured output.
+    Adapts execution to sequential or batched depending on the environment profile (LOCAL vs AWS).
+    """
+
+    def __init__(self, llm: BaseChatModel) -> None:
+        """
+        Initializes the TTP Analyzer.
+        
+        Args:
+            llm: A configured LangChain ChatModel (e.g., ChatOllama).
+        """
+        self.llm = llm
+        
+        # Determine environment settings
+        self.use_prompt_repetition = os.getenv("USE_PROMPT_REPETITION", "False").lower() in ("true", "1", "yes")
+        self.execution_profile = os.getenv("EXECUTION_PROFILE", os.getenv("ENVIRONMENT_PROFILE", "LOCAL")).upper()
+        
+        logger.info(f"TTPAnalyzer started. Profile: {self.execution_profile}, Prompt Repetition: {self.use_prompt_repetition}")
+
+    def _build_prompt_template(self) -> ChatPromptTemplate:
+        """
+        Builds the prompt template dynamically.
+        Injects 'Prompt Repetition' if enabled to reinforce instructions for smaller models.
+        """
+        system_instruction = (
+            "You are a CTI expert. Verify if the provided report excerpts "
+            "prove the use of the specified MITRE ATT&CK technique.\n"
+            "Rules:\n"
+            "1. Analyze all evidence blocks carefully.\n"
+            "2. If ANY block confirms the technique, set `is_present` to true and add each confirming block to the `occurrences` list.\n"
+            "3. If NO blocks confirm it, set `is_present` to false and leave `occurrences` empty.\n"
+            "4. Use the exact `location` and `Score` provided in the evidence tags.\n"
+            "5. Contextualize masked tags: If an action involves a masked tag (e.g., a payload dropped from an <IoC_URL>), deduce the tactical intent.\n"
+            "6. GENERALIZATION RULE (OBSERVABLE ACTIONS ONLY): You MUST strictly differentiate between 'Intrusion Activity' (what the malware/attacker technically executed) and 'Threat Intel Context' (analyst theories, victimology, motivations, historical attribution).\n"
+            "7. DO NOT extract techniques based on the victim's industry, business relationships, geopolitical background, or theoretical capabilities. Extract ONLY materialized, technical actions performed against the target environment."
+        )
+        
+        # Apply the 'Prompt Repetition' pattern by repeating the system instructions
+        if self.use_prompt_repetition:
+            system_instruction = f"{system_instruction}\n\n{system_instruction}"
+        
+        user_message = (
+            "### MITRE CONTEXT\n"
+            "Technique: {mitre_technique_id} - {mitre_technique_name}\n"
+            "Tactics: {mitre_tactics}\n"
+            "Description: {mitre_description}\n\n"
+            "### REPORT EVIDENCE\n"
+            "{supporting_chunks}\n\n"
+            "Based EXCLUSIVELY on the provided evidence, "
+            "is the use of the {mitre_technique_id} technique confirmed? Return the structured JSON."
+        )
+        
+        if self.use_prompt_repetition:
+            user_message = f"{user_message}\n\n{user_message}"
+            
+        return ChatPromptTemplate.from_messages([
+            ("system", system_instruction),
+            ("user", user_message)
+        ])
+
+    def analyze_candidates(self, candidates_dict: Dict[str, Dict[str, Any]]) -> List[TTPDetection]:
+        """
+        Runs the LLM chain to analyze the retrieved MITRE candidates.
+        Uses batching in AWS or sequential execution locally to avoid Out-Of-Memory (OOM) issues.
+        """
+        if not candidates_dict:
+            logger.warning("No candidates to analyze.")
+            return []
+
+        prompt = self._build_prompt_template()
+        
+        # Build the LCEL chain with forced structured output
+        chain = prompt | self.llm.with_structured_output(TTPDetection)
+        
+        inputs = []
+        for tech_id, data in candidates_dict.items():
+            # Keep only the top 5 highest scored chunks to avoid LLM context limits
+            top_chunks = sorted(data.get("supporting_chunks", []), key=lambda x: x.get("score", 0.0), reverse=True)[:5]
+            
+            formatted_chunks = []
+            for idx, chunk_data in enumerate(top_chunks, 1):
+                loc = chunk_data.get("location", "Unknown")
+                score = chunk_data.get("score", 0.0)
+                txt = chunk_data.get("text", "")
+                formatted_chunks.append(f"[Evidence {idx} | Location: {loc} | Score: {score}]\n{txt}\n")
+                
+            joined_chunks = "\n---\n".join(formatted_chunks)
+            
+            inputs.append({
+                "mitre_technique_id": tech_id,
+                "mitre_technique_name": data.get("name", "Unknown"),
+                "mitre_tactics": ", ".join(data.get("tactics", [])),
+                "mitre_description": data.get("description", "No description available."),
+                "supporting_chunks": joined_chunks,
+                "_meta_tactics": data.get("tactics", [])
+            })
+            
+        logger.info(f"Prepared {len(inputs)} candidates for LLM inference.")
+        
+        results: List[TTPDetection] = []
+        
+        if self.execution_profile == "AWS":
+            logger.info("AWS Profile detected: Running chain in parallel (Batching)...")
+            try:
+                batch_responses = chain.batch(inputs)
+                
+                # Filter out nulls (failed parsing) and populate metadata
+                for inp, res in zip(inputs, batch_responses):
+                    if res is not None:
+                        res.tactic = inp["_meta_tactics"]
+                        res.technique_name = inp["mitre_technique_name"]
+                        results.append(res)
+            except Exception as e:
+                logger.error(f"Error during AWS batching: {e}")
+                
+        else:
+            logger.info("LOCAL Profile detected: Running chain sequentially...")
+            import time
+            is_gemini = "google" in str(type(self.llm)).lower()
+
+            for i, inp in enumerate(inputs, 1):
+                try:
+                    logger.info(f"[{i}/{len(inputs)}] Querying LLM for technique: {inp['mitre_technique_id']}...")
+                    response = chain.invoke(inp)
+                    if response:
+                        response.tactic = inp["_meta_tactics"]
+                        response.technique_name = inp["mitre_technique_name"]
+                        results.append(response)
+                        
+                        status = "CONFIRMED" if response.is_present else "DISCARDED"
+                        logger.info(f" -> Technique {inp['mitre_technique_id']} {status}.")
+                        
+                    # Rate limit estricto para el Free Tier de Gemini (15 peticiones/minuto)
+                    # 60s / 15 = 4s. Usamos 4.5s para tener margen de seguridad.
+                    if is_gemini and i < len(inputs):
+                        time.sleep(4.5)
+                        
+                except Exception as e:
+                    logger.error(f"Error processing technique {inp['mitre_technique_id']}: {e}")
+                    
+        # Filter and return ONLY confirmed detections
+        confirmed_ttps = [res for res in results if res.is_present]
+        
+        logger.info(f"Inference complete. {len(confirmed_ttps)} techniques confirmed.")
+        return confirmed_ttps
+
+
+
+================================================
+FILE: src/langgraph_agents/graph_builder.py
+================================================
+from typing import List, Dict, Any
+from langgraph.graph import StateGraph, START, END
+
+from .state import ChunkState, GlobalState
+from .nodes import triage_node, extractor_node, validator_node
+
+# ==============================================================================
+# ROUTING FUNCTIONS (CONDITIONAL EDGES)
+# ==============================================================================
+
+def triage_router(state: ChunkState) -> str:
+    """
+    Routes the chunk after the triage node.
+    If it's irrelevant, stop processing this chunk. Otherwise, proceed to extraction.
+    """
+    if not state.get("is_relevant", True):
+        return "end"
+    return "extractor_node"
+
+def extractor_router(state: ChunkState) -> str:
+    """
+    Routes the chunk after the extractor node.
+    If the extractor returned 0 drafts, it means all TTPs are exhausted. We are done.
+    """
+    if len(state.get("draft_ttps", [])) == 0:
+        return "end"
+    return "validator_node"
+
+def validator_router(state: ChunkState) -> str:
+    """
+    ALWAYS loop back to the extractor to find more TTPs, 
+    unless we hit the safety loop limit (e.g., 4 loops max).
+    """
+    loop_count = state.get("loop_count", 0)
+    if loop_count >= 4:
+        return "end"
+    return "extractor_node"
+
+
+# ==============================================================================
+# BUILD THE SUB-GRAPH (THE "MAP" PROCESS)
+# ==============================================================================
+
+def build_chunk_graph():
+    """
+    Builds and compiles the per-chunk sub-graph.
+    This graph processes a single chunk of text to extract and validate TTPs.
+    """
+    # Initialize the state graph
+    builder = StateGraph(ChunkState)
+    
+    # Add the nodes
+    builder.add_node("triage_node", triage_node)
+    builder.add_node("extractor_node", extractor_node)
+    builder.add_node("validator_node", validator_node)
+    
+    # Add normal edge from START
+    builder.add_edge(START, "triage_node")
+    
+    # Add conditional edge from triage node
+    builder.add_conditional_edges(
+        "triage_node",
+        triage_router,
+        {
+            "end": END,
+            "extractor_node": "extractor_node"
+        }
+    )
+    
+    # Add conditional edge from extractor to validator
+    builder.add_conditional_edges(
+        "extractor_node",
+        extractor_router,
+        {
+            "end": END,
+            "validator_node": "validator_node"
+        }
+    )
+    
+    # Add conditional edge from validator node (the feedback loop)
+    builder.add_conditional_edges(
+        "validator_node",
+        validator_router,
+        {
+            "end": END,
+            "extractor_node": "extractor_node"
+        }
+    )
+    
+    # Compile and return the graph
+    return builder.compile()
+
+
+# ==============================================================================
+# THE CONSOLIDATOR NODE (THE "REDUCE" PROCESS)
+# ==============================================================================
+
+def consolidator_node(state: GlobalState) -> dict:
+    """
+    Goal: Merge the outputs of all chunks into a final, clean JSON report.
+    Deduplicates entries by technique_id and merges their procedure descriptions.
+    """
+    all_ttps = state.get("all_approved_ttps", [])
+    deduplicated: Dict[str, Dict[str, Any]] = {}
+    
+    for ttp in all_ttps:
+        tech_id = ttp.get("technique_id")
+        if not tech_id: continue
+        tech_id_upper = tech_id.upper()
+        
+        if tech_id_upper not in deduplicated:
+            deduplicated[tech_id_upper] = {
+                "technique_id": tech_id_upper,
+                "name": ttp.get("name", "Unknown"),
+                "occurrences": []
+            }
+        
+        proc_text = ttp.get("procedure", "").strip()
+        loc_text = ttp.get("location", "Unknown")
+        
+        is_duplicate = any(o["procedure"] == proc_text for o in deduplicated[tech_id_upper]["occurrences"])
+        if proc_text and not is_duplicate:
+            deduplicated[tech_id_upper]["occurrences"].append({
+                "location": loc_text,
+                "procedure": proc_text
+            })
+            
+    final_ttps = []
+    for tech_id, data in deduplicated.items():
+        final_ttps.append({
+            "technique_id": tech_id,
+            "name": data["name"],
+            "occurrences": data["occurrences"]
+        })
+            
+    formatted_output = {
+        "source_file": state.get("source_file", "Unknown"),
+        "global_context": state.get("global_context", ""),
+        "total_chunks_processed": len(state.get("chunks", [])),
+        "extracted_ttps": final_ttps
+    }
+    
+    return {"final_json": formatted_output}
+
+
+# ==============================================================================
+# THE MAIN ORCHESTRATOR (MAP-REDUCE EXECUTION)
+# ==============================================================================
+
+def process_full_report(source_file: str, global_context: str, sanitized_chunks: List[Dict[str, Any]]) -> dict:
+    """
+    Main orchestrator that executes the Map-Reduce flow.
+    Currently runs sequentially for local PoC testing, but can be parallelized in AWS.
+    """
+    print(f"[*] Starting LangGraph Map-Reduce execution for: {source_file}")
+    
+    # Initialize the compiled chunk graph (Map Phase)
+    chunk_graph = build_chunk_graph()
+    
+    # Master list to gather all approved TTPs (Reducer list)
+    master_ttp_list = []
+    
+    # 1. MAP: Loop over sanitized_chunks sequentially
+    for i, chunk_data in enumerate(sanitized_chunks):
+        print(f"  -> Processing chunk {i+1}/{len(sanitized_chunks)}...")
+        
+        # In this PoC, chunk_data could be a dict or string depending on upstream, 
+        # assume dict with "text" and "metadata"
+        chunk_text = chunk_data.get("text", str(chunk_data))
+        chunk_metadata = chunk_data.get("metadata", {})
+        
+        # Initialize ChunkState
+        initial_chunk_state: ChunkState = {
+            "chunk_text": chunk_text,
+            "chunk_metadata": chunk_metadata,
+            "global_context": global_context,
+            "is_relevant": True,  # Will be assessed by triage
+            "draft_ttps": [],
+            "approved_ttps": [],
+            "validation_feedback": "",
+            "loop_count": 0
+        }
+        
+        try:
+            # Invoke the graph for this single chunk
+            chunk_result = chunk_graph.invoke(initial_chunk_state)
+            approved = chunk_result.get("approved_ttps", [])
+            
+            if approved:
+                print(f"     [+] Found {len(approved)} valid TTP(s) in chunk {i+1}")
+                # Append to master list
+                master_ttp_list.extend(approved)
+            else:
+                print(f"     [-] No valid TTPs found in chunk {i+1}")
+                
+        except Exception as e:
+            print(f"     [!] Error processing chunk {i+1}: {str(e)}")
+            
+    print(f"[*] Map phase complete. Consolidating {len(master_ttp_list)} total TTP(s)...")
+    
+    # 2. REDUCE: Instantiate GlobalState and run consolidator
+    global_state: GlobalState = {
+        "source_file": source_file,
+        "global_context": global_context,
+        "chunks": sanitized_chunks,
+        "all_approved_ttps": master_ttp_list,
+        "final_json": {}
+    }
+    
+    # Execute the consolidator node directly
+    final_state_update = consolidator_node(global_state)
+    
+    print("[*] Reduce phase complete. Report ready.")
+    
+    # Return the final formatted JSON
+    return final_state_update.get("final_json", {})
+
+
+
+================================================
+FILE: src/langgraph_agents/main_langgraph.py
+================================================
+import os
+import sys
+import time
+import json
+from typing import List, Dict, Any
+
+# Add project root to sys.path so we can run this as a standalone script
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
+
+import subprocess
+
+def bootstrap_environment():
+    """Instala dependencias e inicia los servicios requeridos (Ollama y Qdrant)."""
+    print("🚀 [BOOTSTRAP] Configurando el entorno de ejecución...")
+    
+    # 1. Instalar dependencias
+    print("📦 [BOOTSTRAP] Instalando dependencias de requirements.txt...")
+    try:
+        subprocess.run([sys.executable, "-m", "pip", "install", "-r", "requirements.txt"], check=True)
+    except Exception as e:
+        print(f"⚠️ [BOOTSTRAP] Error instalando dependencias: {e}")
+
+    llm_provider = os.environ.get("LLM_PROVIDER", "ollama").lower()
+    
+    if llm_provider == "ollama":
+        # 2. Iniciar Ollama en segundo plano
+        print("🦙 [BOOTSTRAP] Iniciando servicio Ollama...")
+        try:
+            subprocess.Popen(["ollama", "serve"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except FileNotFoundError:
+            print("⚠️ [BOOTSTRAP] 'ollama' no está instalado o no se encuentra en el PATH.")
+
+    print("⏳ [BOOTSTRAP] Esperando 5 segundos para que los servicios estén listos...\n")
+    time.sleep(5)
+
+# Ejecutamos el bootstrap ANTES de importar librerías de terceros
+# para evitar el error ModuleNotFoundError
+bootstrap_environment()
+
+from dotenv import load_dotenv
+load_dotenv(override=True)
+
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_core.prompts import ChatPromptTemplate
+
+from src.langchain_pipeline.phase1_ingestion import ReportIngestor
+from src.langgraph_agents.graph_builder import process_full_report
+
+def generate_global_context(chunks: List[Any], llm: ChatGoogleGenerativeAI) -> str:
+    """
+    Generates a high-level summary of the report to serve as global context.
+    This helps the extractor agents resolve pronouns and understand the broader scope.
+    Takes the first 4 chunks to extract Threat Actor, Malware, and Target.
+    """
+    # Extract text from the first 4 chunks
+    # Phase1_ingestion chunks are LangChain Document objects
+    intro_texts = []
+    for chunk in chunks[:4]:
+        if hasattr(chunk, 'page_content'):
+            intro_texts.append(chunk.page_content)
+        elif isinstance(chunk, dict) and "text" in chunk:
+            intro_texts.append(chunk["text"])
+        else:
+            intro_texts.append(str(chunk))
+            
+    combined_intro = "\n\n".join(intro_texts)
+    
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", "You are an expert Cyber Threat Intelligence analyst."),
+        ("human", "Read the following introductory sections of a CTI report.\n"
+                  "Write a 3-sentence summary identifying the Threat Actor, the primary Malware, and the Target industry/country. "
+                  "If unknown, state it explicitly.\n\n"
+                  "Text:\n{text}")
+    ])
+    
+    chain = prompt | llm
+    print("[*] Generating Global Context...")
+    try:
+        response = chain.invoke({"text": combined_intro})
+        context = response.content
+        print(f"[+] Global Context Generated:\n{context}\n")
+        return context
+    except Exception as e:
+        print(f"[!] Error generating global context: {e}")
+        return "Global context could not be generated."
+
+if __name__ == "__main__":
+    if len(sys.argv) < 2:
+        print("Usage: python -m src.langgraph_agents.main_langgraph <path_to_pdf>")
+        sys.exit(1)
+        
+    pdf_path = sys.argv[1]
+    
+    if not os.path.exists(pdf_path):
+        print(f"Error: The file '{pdf_path}' does not exist.")
+        sys.exit(1)
+        
+    print(f"\n{'='*60}")
+    print(f"🤖 LANGGRAPH MULTI-AGENT CTI EXTRACTION PIPELINE")
+    print(f"{'='*60}\n")
+    
+    # 1. Ingestion Phase
+    print(f"[*] [FASE 1] Ingesting PDF: {pdf_path}")
+    ingestor = ReportIngestor(chunk_size=1500, chunk_overlap=300)
+    raw_chunks = ingestor.process_report(pdf_path)
+    print(f"[+] [FASE 1] Extracted {len(raw_chunks)} chunks.\n")
+    
+    # Ensure chunks are dictionaries for our Map-Reduce graph
+    sanitized_chunks = []
+    for c in raw_chunks:
+        if hasattr(c, 'page_content'):
+            sanitized_chunks.append({"text": c.page_content, "metadata": c.metadata})
+        elif isinstance(c, dict) and "text" in c:
+            sanitized_chunks.append(c)
+        else:
+            sanitized_chunks.append({"text": str(c), "metadata": {}})
+    
+    if not sanitized_chunks:
+        print("[-] No text could be extracted from the PDF. Exiting.")
+        sys.exit(1)
+    
+    # 2. Global Context Generation
+    print("[*] [FASE 2] Setting up Global Context model (Gemini)...")
+    # We will use Gemini (flash tier) since it's cheap and fast for summarization
+    gemini_model = os.getenv("GEMINI_MODEL", "gemini-flash-lite-latest")
+    llm = ChatGoogleGenerativeAI(model=gemini_model, temperature=0.0)
+    
+    global_context = generate_global_context(sanitized_chunks, llm)
+    
+    # 3. Execution (Map-Reduce)
+    print("\n[*] [FASE 3] Starting Graph Execution (Map-Reduce)...")
+    start_time = time.time()
+    
+    # This will invoke the local graph builder orchestrator
+    print(f"[*] Invoking LangGraph 'process_full_report' with {len(sanitized_chunks)} chunks...")
+    final_json = process_full_report(pdf_path, global_context, sanitized_chunks)
+    
+    print("[+] [FASE 3] Graph Execution Completed.")
+    end_time = time.time()
+    execution_time_sec = end_time - start_time
+    
+    # 4. Inject Execution Metrics
+    final_json["execution_metrics"] = {
+        "execution_time_seconds": round(execution_time_sec, 2),
+        "execution_time_minutes": round(execution_time_sec / 60.0, 2)
+    }
+    
+    # 5. Save Output
+    output_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../data/output'))
+    os.makedirs(output_dir, exist_ok=True)
+    
+    base_name = os.path.basename(pdf_path)
+    file_name_without_ext = os.path.splitext(base_name)[0]
+    output_file_path = os.path.join(output_dir, f"{file_name_without_ext}_langgraph_result.json")
+    
+    try:
+        with open(output_file_path, "w", encoding="utf-8") as f:
+            json.dump(final_json, f, indent=4, ensure_ascii=False)
+            
+        print(f"\n{'='*60}")
+        print(f"🎯 EXTRACTION SUCCESSFUL")
+        print(f"Time Taken: {round(execution_time_sec / 60.0, 2)} minutes")
+        print(f"Results saved to: {output_file_path}")
+        print(f"{'='*60}")
+    except Exception as e:
+        print(f"[!] Error saving output file: {e}")
+
+
+
+================================================
+FILE: src/langgraph_agents/nodes.py
+================================================
+from typing import List, Any
+from pydantic import BaseModel, Field
+
+import os
+import json
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.output_parsers import StrOutputParser
+
+from .state import ChunkState
+from .tools import mitre_oracle
+
+# ==============================================================================
+# LLM FACTORY
+# ==============================================================================
+
+def get_llm(tier="pro", temperature=0.0):
+    from langchain_google_genai import ChatGoogleGenerativeAI
+    model_name = os.getenv("GEMINI_MODEL", "gemini-flash-lite-latest")
+    return ChatGoogleGenerativeAI(model=model_name, temperature=temperature, max_retries=3)
+
+# ==============================================================================
+# PYDANTIC SCHEMAS
+# ==============================================================================
+
+class TriageDecision(BaseModel):
+    is_relevant: bool = Field(
+        description="True if the text contains any cyber threat intelligence, attacker behavior, or technical indicators. False otherwise."
+    )
+
+class DraftTTP(BaseModel):
+    technique_id: str = Field(description="The MITRE ATT&CK Technique ID (e.g., T1059.001)")
+    name: str = Field(description="The name of the MITRE ATT&CK Technique")
+    procedure: str = Field(description="The specific procedure or behavior observed in the text")
+    mitre_description: str = Field(default="", description="The official MITRE ATT&CK description for this technique provided in the candidates")
+    confidence_score: float = Field(description="The numeric score provided in the Candidate Techniques list.")
+    location: str = Field(default="Unknown", description="The document page and chunk location of the evidence.")
+
+class DraftTTPList(BaseModel):
+    ttps: List[DraftTTP] = Field(description="A list of drafted TTPs from the text.")
+
+class ValidationResult(BaseModel):
+    valid_ttps: List[DraftTTP] = Field(
+        description="A list of approved TTPs that strictly match the text."
+    )
+    feedback_notes: List[str] = Field(
+        description="A list of feedback notes explaining what was hallucinated or missing."
+    )
+
+# ==============================================================================
+# NODE FUNCTIONS
+# ==============================================================================
+
+def safe_invoke(callable_chain, input_data):
+    """Safely invokes a chain or agent, returning None on failure."""
+    try:
+        return callable_chain.invoke(input_data)
+    except Exception as e:
+        print(f"[!] Model Invocation Error: {e}")
+        return None
+
+def triage_node(state: ChunkState) -> dict:
+    """
+    Goal: Act as a cheap, fast filter to drop irrelevant chunks 
+    (e.g., legal disclaimers, marketing noise).
+    """
+    llm = get_llm(tier="lite")
+    structured_llm = llm.with_structured_output(TriageDecision)
+    
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", "You are a cyber threat intelligence triage analyst. Your job is to determine if a given text chunk contains any valuable CTI, attacker behavior, or technical indicators."),
+        ("human", "Does this text contain any cyber threat intelligence, attacker behavior, or technical indicators? Answer True or False.\n\nText: {chunk_text}")
+    ])
+    
+    chain = prompt | structured_llm
+    
+    result = safe_invoke(chain, {"chunk_text": state["chunk_text"]})
+    
+    if result is None:
+        is_relevant = True
+    else:
+        is_relevant = result.is_relevant
+        
+    print(f"[DEBUG - Triage] Chunk relevant: {is_relevant}")
+    return {"is_relevant": is_relevant}
+
+def extractor_node(state: ChunkState) -> dict:
+    """
+    Goal: Translate text to a Dense Tactical Summary, use Mechanical Retrieval, and draft TTPs.
+    """
+    chunk_text = state["chunk_text"]
+    val_feedback = state.get("validation_feedback", "")
+    approved_ttps = state.get("approved_ttps", [])
+    approved_ids = [t.get("technique_id") for t in approved_ttps]
+    
+    # 1. QUERY TRANSFORMATION: Abstract Keywords Only
+    translator_llm = get_llm(tier="lite")
+    translator_prompt = ChatPromptTemplate.from_messages([
+        ("system", "You are a CTI conceptual translator. Read the raw text and output ONLY a comma-separated list of abstract cybersecurity behaviors, tactics, and mechanisms present. "
+                   "Translate specific tools into their tactical purpose (e.g., 'Ngrok' -> 'Protocol Tunneling'). "
+                   "If you see fake identities or spoofing, output 'Impersonation'. "
+                   "Output ONLY the keywords, no other text."),
+        ("human", "Raw Text:\n{chunk_text}")
+    ])
+    
+    translation_chain = translator_prompt | translator_llm | StrOutputParser()
+    try:
+        abstract_keywords = translation_chain.invoke({"chunk_text": chunk_text})
+    except Exception as e:
+        print(f"[!] Translation Error: {e}")
+        abstract_keywords = ""
+        
+    print(f"[DEBUG - Extractor] Abstract Keywords: {abstract_keywords}")
+    
+    # 2. DYNAMIC MECHANICAL RETRIEVAL
+    # Pass the RAW TEXT plus the keywords to the Oracle so no context is lost.
+    search_query = f"Raw Text: {chunk_text}\nKeywords: {abstract_keywords}"
+    if val_feedback:
+        search_query += f"\nPast Rejections & Feedback: {val_feedback}"
+        
+    candidates_str = mitre_oracle.invoke(search_query)
+    
+    if "No matching MITRE techniques found" in candidates_str or "Error" in candidates_str or "No highly confident MITRE techniques" in candidates_str:
+        print("[DEBUG - Extractor] No candidates found via Mechanical Retrieval. Returning empty drafts.")
+        return {"draft_ttps": [], "loop_count": state.get("loop_count", 0) + 1}
+    
+    # 3. EXTRACTION (BRAINSTORMER)
+    llm = get_llm(tier="pro")
+    structured_llm = llm.with_structured_output(DraftTTPList)
+    
+    prompt_text = f"Global Context: {state.get('global_context', '')}\n\n"
+    
+    if approved_ids:
+        prompt_text += f"ALREADY APPROVED TTPs FOR THIS CHUNK: {approved_ids}\n"
+        prompt_text += "Do NOT propose these exact technique IDs again. Search the text for OTHER distinct malicious behaviors.\n"
+        prompt_text += "If you cannot find any NEW behaviors, you MUST return an empty list.\n\n"
+        
+    if val_feedback:
+        prompt_text += f"PAST VALIDATOR REJECTIONS (CRITICAL: DO NOT PROPOSE THESE REJECTED TTPs AGAIN):\n{val_feedback}\n\n"
+        
+    prompt_text += f"Candidate MITRE Techniques:\n{candidates_str}\n\n"
+    prompt_text += f"Source Text:\n{chunk_text}"
+    
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", "You are a CTI Brainstormer Extractor. Draft candidate TTPs from the Candidate Techniques list.\n"
+                   "Extract ALL applicable NEW TTPs. Do not artificially limit your output.\n"
+                   "CRITICAL: If you see ALREADY APPROVED TTPs or PREVIOUSLY REJECTED TTPs, you MUST ignore them.\n"
+                   "RULE - FOCUS ON OBSERVABLE ACTIONS: Your primary goal is to map technical execution. Focus on what the attacker or malware actually DID (e.g., executing commands, dropping files, establishing tunnels, sending phishing emails). "
+                   "Do not map the analyst's background theories (e.g., geopolitics, victim industry, historical motives) to MITRE techniques.\n"
+                   "Convert your brainstormed analysis into the strict DraftTTPList JSON schema. Do not hallucinate IDs."),
+        ("human", "{prompt_text}")
+    ])
+    
+    parsed_result = safe_invoke(prompt | structured_llm, {"prompt_text": prompt_text})
+    
+    if parsed_result is None:
+        drafts = []
+    else:
+        drafts = []
+        loc = f"Page {state.get('chunk_metadata', {}).get('page_number', '?')}, Chunk {state.get('chunk_metadata', {}).get('chunk_index', '?')}"
+        for ttp in parsed_result.ttps:
+            draft = ttp.model_dump()
+            draft["location"] = loc
+            drafts.append(draft)
+        
+    draft_ids = [d.get("technique_id", "Unknown") for d in drafts]
+    print(f"[DEBUG - Extractor] Draft TTPs found: {len(drafts)} {draft_ids}")
+    return {"draft_ttps": drafts, "loop_count": state.get("loop_count", 0) + 1}
+
+def validator_node(state: ChunkState) -> dict:
+    """
+    Goal: Perform a 'Line-Item Veto'. Strict verification of drafted TTPs against the source text.
+    """
+    draft_ttps_list = state.get("draft_ttps", [])
+    if not draft_ttps_list:
+        print("[DEBUG - Validator] No drafts to validate. Skipping LLM call.")
+        return {"approved_ttps": [], "validation_feedback": "", "draft_ttps": []}
+
+    llm = get_llm(tier="pro", temperature=0.2)
+    structured_llm = llm.with_structured_output(ValidationResult)
+    
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", "You are a CTI Semantic Auditor. Your job is to independently verify drafted MITRE ATT&CK TTPs against the source text.\n"
+                   "Read the source text and the official MITRE description for each drafted TTP. "
+                   "Approve the TTP if the text contains concrete evidence of the attacker or malware performing the technical action described.\n"
+                   "Reject the TTP if it is based solely on theoretical motives, target demographics (like business relationships), or if the text implies the action didn't actually happen.\n"
+                   "If you reject a TTP, provide specific feedback explaining why so the Extractor can learn.\n"
+                   "Validate each technique on its own merits."),
+        ("human", "Global Context:\n{global_context}\n\nSource Text:\n{chunk_text}\n\nDrafted TTPs (including official descriptions):\n{draft_ttps}\n\nValidate these TTPs and provide the approved valid list and any feedback notes.")
+    ])
+    
+    chain = prompt | structured_llm
+    
+    result = safe_invoke(chain, {
+        "global_context": state.get("global_context", "None provided."),
+        "chunk_text": state["chunk_text"],
+        "draft_ttps": json.dumps(draft_ttps_list, indent=2)
+    })
+    
+    if result is None:
+        print("[DEBUG - Validator] Validation failed gracefully.")
+        return {"approved_ttps": [], "validation_feedback": "", "draft_ttps": []}
+        
+    valid_ttps = [ttp.model_dump() for ttp in result.valid_ttps] if result and result.valid_ttps else []
+    
+    # Accumulate approved TTPs with deduplication
+    current_approved = state.get("approved_ttps", [])
+    existing_ids = {t.get("technique_id") for t in current_approved}
+    
+    for ttp in valid_ttps:
+        if ttp.get("technique_id") not in existing_ids:
+            current_approved.append(ttp)
+            
+    # Set feedback to current loop's rejections only
+    if len(valid_ttps) == len(draft_ttps_list):
+        feedback = ""
+    else:
+        feedback = "\n".join(result.feedback_notes) if result and result.feedback_notes else ""
+        
+    valid_ids = [v.get("technique_id", "Unknown") for v in current_approved]
+    print(f"[DEBUG - Validator] Total Approved TTPs so far: {len(current_approved)} {valid_ids}")
+    if feedback:
+        print(f"[DEBUG - Validator] Rejection Feedback:\n{feedback}")
+    
+    return {
+        "approved_ttps": current_approved,
+        "validation_feedback": feedback,
+        "draft_ttps": []
+    }
+
+
+
+================================================
+FILE: src/langgraph_agents/state.py
+================================================
+import operator
+from typing import TypedDict, Annotated, List, Dict, Any
+
+class GlobalState(TypedDict):
+    source_file: str
+    global_context: str
+    chunks: List[Dict[str, Any]]
+    all_approved_ttps: Annotated[List[Any], operator.add]
+    final_json: Dict[str, Any]
+
+class ChunkState(TypedDict):
+    chunk_text: str
+    chunk_metadata: Dict[str, Any]
+    global_context: str
+    is_relevant: bool
+    draft_ttps: List[Any]
+    approved_ttps: List[Any]
+    validation_feedback: str
+    loop_count: int
+
+
+
+================================================
+FILE: src/langgraph_agents/tools.py
+================================================
+import os
+import json
+from functools import lru_cache
+from langchain_core.tools import tool
+
+from langchain_qdrant import QdrantVectorStore, FastEmbedSparse, RetrievalMode
+from langchain_huggingface import HuggingFaceEmbeddings
+from qdrant_client import QdrantClient
+from src.langchain_pipeline.phase3_retriever import CandidateRetriever
+
+# ==============================================================================
+# GLOBALS & CACHING
+# ==============================================================================
+
+@lru_cache(maxsize=1)
+def get_retriever() -> CandidateRetriever:
+    """
+    Initializes and caches the Qdrant VectorStore and the CrossEncoder Retriever.
+    This prevents reloading models and creating new DB connections on every tool call.
+    """
+    try:
+        qdrant_host = os.getenv("QDRANT_HOST", "localhost")
+        qdrant_port = os.getenv("QDRANT_PORT", "6333")
+        qdrant_url = f"http://{qdrant_host}:{qdrant_port}"
+        collection_name = "mitre_attack"
+        
+        # Connect to Qdrant
+        client = QdrantClient(url=qdrant_url)
+        # Validate connection
+        client.get_collections()
+        
+        # Initialize Embeddings
+        embeddings = HuggingFaceEmbeddings(model_name="BAAI/bge-m3")
+        sparse_embeddings = FastEmbedSparse(model_name="Qdrant/bm25")
+        
+        # Create LangChain VectorStore
+        vector_store = QdrantVectorStore(
+            client=client,
+            collection_name=collection_name,
+            embedding=embeddings,
+            sparse_embedding=sparse_embeddings,
+            retrieval_mode=RetrievalMode.HYBRID
+        )
+        
+        # Instantiate and return the CandidateRetriever from phase 3
+        return CandidateRetriever(vector_store=vector_store)
+        
+    except Exception as e:
+        print(f"[!] Tool Initialization Error (Qdrant): {e}")
+        return None
+
+@lru_cache(maxsize=1)
+def load_mitre_json() -> dict:
+    """
+    Loads the raw MITRE STIX JSON file and builds a dictionary mapping 
+    Technique IDs (e.g., 'T1059.001') to their official descriptions, 
+    enriched with known tools/malware that use the technique.
+    """
+    mitre_file = os.path.abspath(os.path.join(
+        os.path.dirname(__file__), 
+        '../../data/mitre_data/enterprise-attack.json'
+    ))
+    
+    if not os.path.exists(mitre_file):
+        print(f"[!] Tool Initialization Error: MITRE JSON not found at {mitre_file}")
+        return {}
+        
+    try:
+        with open(mitre_file, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+            
+        objects = data.get("objects", []) if isinstance(data, dict) else data
+        if not isinstance(objects, list):
+            return {}
+            
+        # 1. Extraer entidades (herramientas, malware)
+        entity_names = {}
+        for obj in objects:
+            if obj.get("type") in ["malware", "tool", "intrusion-set"]:
+                entity_names[obj.get("id")] = obj.get("name")
+                
+        # 2. Extraer relaciones (quién usa qué técnica)
+        technique_tools = {}
+        for obj in objects:
+            if obj.get("type") == "relationship" and obj.get("relationship_type") == "uses":
+                source_id = obj.get("source_ref")
+                target_id = obj.get("target_ref")
+                
+                if target_id and target_id.startswith("attack-pattern--") and source_id in entity_names:
+                    if target_id not in technique_tools:
+                        technique_tools[target_id] = []
+                    tool_name = entity_names[source_id]
+                    if tool_name not in technique_tools[target_id]:
+                        technique_tools[target_id].append(tool_name)
+            
+        # 3. Mapear ID -> Descripción enriquecida
+        lookup_dict = {}
+        for obj in objects:
+            if obj.get("type") != "attack-pattern":
+                continue
+                
+            external_refs = obj.get("external_references", [])
+            tech_id = None
+            for ref in external_refs:
+                if ref.get("source_name") == "mitre-attack":
+                    tech_id = ref.get("external_id")
+                    break
+                    
+            if tech_id:
+                base_desc = obj.get("description", "No description available.")
+                stix_id = obj.get("id")
+                tools_used = technique_tools.get(stix_id, [])
+                
+                if tools_used:
+                    enriched_desc = f"{base_desc}\n\nKNOWN ASSOCIATED TOOLS/MALWARE: {', '.join(tools_used)}"
+                else:
+                    enriched_desc = base_desc
+                    
+                lookup_dict[tech_id.upper()] = enriched_desc
+                
+        return lookup_dict
+    except Exception as e:
+        print(f"[!] Tool Initialization Error (JSON): {e}")
+        return {}
+
+# ==============================================================================
+# LANGCHAIN TOOLS
+# ==============================================================================
+
+@tool("MITRE_Oracle")
+def mitre_oracle(query: str) -> str:
+    """Use this tool to search the MITRE ATT&CK database using semantic search."""
+    retriever = get_retriever()
+    if not retriever:
+        return "Error: Could not connect to Qdrant."
+        
+    try:
+        import torch
+        
+        # 1. Hybrid Search
+        candidates = retriever.vector_store.similarity_search(query, k=30)
+        if not candidates:
+            return "No matching MITRE techniques found."
+            
+        # 2. Rerank
+        pairs = [[query, doc.page_content] for doc in candidates]
+        scores = retriever.reranker.predict(pairs, batch_size=32, activation_fn=torch.nn.Sigmoid()) if pairs else []
+        
+        # 3. Filter (Threshold = 0.20)
+        results = []
+        for doc, score in zip(candidates, scores):
+            if float(score) >= 0.20:
+                tech_id = doc.metadata.get("technique_id", "Unknown")
+                name = doc.metadata.get("name", "Unknown")
+                desc = doc.metadata.get("full_description", "No description available.")[:500]
+                results.append((float(score), f"- {tech_id}: {name}\n  Description: {desc}..."))
+                
+        results.sort(key=lambda x: x[0], reverse=True)
+        top_results = [res[1] for res in results[:6]]
+        
+        if not top_results:
+            return "No highly confident MITRE techniques found after reranking."
+            
+        return "CANDIDATE TECHNIQUES:\n" + "\n\n".join(top_results)
+        
+    except Exception as e:
+        return f"Error during search: {str(e)}"
+
+
+@tool("MITRE_ID_Lookup")
+def mitre_id_lookup(technique_id: str) -> str:
+    """
+    Use this tool ONLY if you already know the exact MITRE Technique ID (e.g., 'T1059.001')
+    and need its official description to confirm a match. Do not use this for semantic searches.
+    """
+    lookup_dict = load_mitre_json()
+    if not lookup_dict:
+        return "Error: Local MITRE knowledge base could not be loaded."
+        
+    tech_id_upper = technique_id.strip().upper()
+    
+    if tech_id_upper in lookup_dict:
+        # Return the official description
+        return lookup_dict[tech_id_upper]
+    else:
+        return "Technique ID not found. The LLM must not use this ID."
+
+
+
+================================================
+FILE: .antigravity/rules.md
+================================================
+# CTI to MITRE ATT&CK Mapper - AI Assistant Rules
+
+## 1. Project Context
+You are an expert Cybersecurity AI Engineer. We are building a system that parses unstructured Cyber Threat Intelligence (CTI) reports (PDFs, blogs) and maps them to MITRE ATT&CK TTPs (Tactics, Techniques, and Procedures). 
+The system avoids hallucinations and data leakage by using an Advanced RAG architecture with structural chunking, Typed Regex masking for IoCs, Hybrid Search (Qdrant), Cross-Encoder Re-ranking, and strict structured LLM outputs.
+
+## 2. Implementation Strategy (Dual Approach)
+The repository is split into two distinct orchestration paradigms to compare their efficacy:
+- **LangChain Pipeline:** An Advanced RAG sequential/batch pipeline.
+- **LangGraph Multi-Agent:** An agentic workflow (Extractor Agent, Validator Agent, Reporter Agent).
+
+**Dual Environment Support:** All code must support seamless switching between two hardware profiles via configuration (`.env` or Config class):
+- **Local (PoC):** Ollama (Qwen2.5/Llama3.1-8B), CPU/Local GPU, sequential execution, small batch sizes.
+- **Prod (AWS GPU):** High-end LLMs (70B+), GPU-accelerated embeddings, asynchronous (`asyncio`) and parallel batch processing (`.abatch()`).
+
+## 3. Technology Stack & Coding Standards
+- **Python Version:** 3.11+
+- **Core Libraries:** `langchain`, `langchain-core`, `langgraph`, `qdrant-client`, `pydantic` (v2 strictly), `unstructured` (or `docling` for PDFs), `sentence-transformers`.
+- **Typing & Linting:** Strictly use Python type hints (`-> list[str]`, `Dict`, etc.). Write clean, modular, and PEP 8 compliant code.
+- **LLM Outputs:** ALWAYS use Pydantic schemas combined with `.with_structured_output()` when expecting JSON/structured data from the LLM. Do not rely on raw JSON parsing.
+
+## 4. Cybersecurity Best Practices
+- Never embed raw IoCs (IPs, Hashes) into vector spaces if avoidable; use Typed Masks (e.g., `<IoC_IPv4>`).
+- Keep MITRE definitions strict. Do not allow the LLM to hallucinate technique IDs that are not present in the official MITRE Enterprise matrix.
+

@@ -1,0 +1,177 @@
+import os
+import sys
+import time
+import json
+from typing import List, Dict, Any
+
+# Add project root to sys.path so we can run this as a standalone script
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
+
+import subprocess
+
+def bootstrap_environment():
+    """Instala dependencias e inicia los servicios requeridos (Ollama y Qdrant)."""
+    print("🚀 [BOOTSTRAP] Configurando el entorno de ejecución...")
+    
+    # 1. Instalar dependencias
+    print("📦 [BOOTSTRAP] Instalando dependencias de requirements.txt...")
+    try:
+        subprocess.run([sys.executable, "-m", "pip", "install", "-r", "requirements.txt"], check=True)
+    except Exception as e:
+        print(f"⚠️ [BOOTSTRAP] Error instalando dependencias: {e}")
+
+    llm_provider = os.environ.get("LLM_PROVIDER", "ollama").lower()
+    
+    if llm_provider == "ollama":
+        # 2. Iniciar Ollama en segundo plano
+        print("🦙 [BOOTSTRAP] Iniciando servicio Ollama...")
+        try:
+            subprocess.Popen(["ollama", "serve"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except FileNotFoundError:
+            print("⚠️ [BOOTSTRAP] 'ollama' no está instalado o no se encuentra en el PATH.")
+
+    print("⏳ [BOOTSTRAP] Esperando 5 segundos para que los servicios estén listos...\n")
+    time.sleep(5)
+
+# Ejecutamos el bootstrap ANTES de importar librerías de terceros
+# para evitar el error ModuleNotFoundError
+bootstrap_environment()
+
+from dotenv import load_dotenv
+load_dotenv(override=True)
+
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_core.prompts import ChatPromptTemplate
+
+from src.langchain_pipeline.phase1_ingestion import ReportIngestor
+from src.langgraph_agents.graph_builder import process_full_report
+
+def generate_global_context(chunks: List[Any], llm: ChatGoogleGenerativeAI) -> str:
+    """
+    Generates a high-level summary of the report to serve as global context.
+    This helps the extractor agents resolve pronouns and understand the broader scope.
+    Takes the first 4 chunks to extract Threat Actor, Malware, and Target.
+    """
+    # Extract text from the first 4 chunks
+    # Phase1_ingestion chunks are LangChain Document objects
+    intro_texts = []
+    for chunk in chunks[:4]:
+        if hasattr(chunk, 'page_content'):
+            intro_texts.append(chunk.page_content)
+        elif isinstance(chunk, dict) and "text" in chunk:
+            intro_texts.append(chunk["text"])
+        else:
+            intro_texts.append(str(chunk))
+            
+    combined_intro = "\n\n".join(intro_texts)
+    
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", "You are an expert Cyber Threat Intelligence analyst."),
+        ("human", "Read the following introductory sections of a CTI report.\n"
+                  "Write a 3-sentence summary identifying the Threat Actor, the primary Malware, and the Target industry/country. "
+                  "If unknown, state it explicitly.\n\n"
+                  "Text:\n{text}")
+    ])
+    
+    chain = prompt | llm
+    print("[*] Generating Global Context...")
+    try:
+        response = chain.invoke({"text": combined_intro})
+        context = response.content
+        print(f"[+] Global Context Generated:\n{context}\n")
+        return context
+    except Exception as e:
+        print(f"[!] Error generating global context: {e}")
+        return "Global context could not be generated."
+
+if __name__ == "__main__":
+    if len(sys.argv) < 2:
+        print("Usage: python -m src.langgraph_agents.main_langgraph <path_to_pdf>")
+        sys.exit(1)
+        
+    pdf_path = sys.argv[1]
+    
+    if not os.path.exists(pdf_path):
+        print(f"Error: The file '{pdf_path}' does not exist.")
+        sys.exit(1)
+        
+    print(f"\n{'='*60}")
+    print(f"🤖 LANGGRAPH MULTI-AGENT CTI EXTRACTION PIPELINE")
+    print(f"{'='*60}\n")
+    
+    total_start_time = time.time()
+    
+    # 1. Ingestion Phase
+    print(f"[*] [FASE 1] Ingesting PDF: {pdf_path}")
+    t0 = time.time()
+    
+    # Selector de Ingesta (Pruebas A/B TFM)
+    use_vlm_env = os.getenv("USE_VLM_EXTRACTION", "False").lower() in ("true", "1", "yes")
+    ingestor = ReportIngestor(chunk_size=1500, chunk_overlap=300, use_vlm=use_vlm_env)
+    
+    raw_chunks = ingestor.process_report(pdf_path)
+    p1_time = time.time() - t0
+    print(f"[+] [FASE 1] Extracted {len(raw_chunks)} chunks.\n")
+    
+    sanitized_chunks = []
+    for c in raw_chunks:
+        if hasattr(c, 'page_content'):
+            sanitized_chunks.append({"text": c.page_content, "metadata": c.metadata})
+        elif isinstance(c, dict) and "text" in c:
+            sanitized_chunks.append(c)
+        else:
+            sanitized_chunks.append({"text": str(c), "metadata": {}})
+    
+    if not sanitized_chunks:
+        print("[-] No text could be extracted from the PDF. Exiting.")
+        sys.exit(1)
+    
+    # 2. Global Context Generation Phase
+    print("[*] [FASE 2] Generating Global Context...")
+    t1 = time.time()
+    gemini_model = os.getenv("GEMINI_MODEL", "gemini-flash-lite-latest")
+    llm = ChatGoogleGenerativeAI(model=gemini_model, temperature=0.0)
+    global_context = generate_global_context(sanitized_chunks, llm)
+    p2_time = time.time() - t1
+    
+    # 3. Execution Phase (Map-Reduce)
+    print("\n[*] [FASE 3] Starting Graph Execution (Map-Reduce)...")
+    t2 = time.time()
+    extracted_ttps = process_full_report(pdf_path, global_context, sanitized_chunks)
+    p3_time = time.time() - t2
+    print("[+] [FASE 3] Graph Execution Completed.")
+    
+    # 4. Construct Final JSON matching LangChain standard
+    total_execution_time = time.time() - total_start_time
+    
+    output_data = {
+        "source_file": pdf_path,
+        "total_execution_time_seconds": round(total_execution_time, 2),
+        "total_execution_time_minutes": round(total_execution_time / 60.0, 2),
+        "timing_breakdown": {
+            "phase1_ingestion_seconds": round(p1_time, 2),
+            "phase2_context_seconds": round(p2_time, 2),
+            "phase3_extraction_seconds": round(p3_time, 2)
+        },
+        "extracted_ttps": extracted_ttps
+    }
+    
+    # 5. Save Output
+    output_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../data/output'))
+    os.makedirs(output_dir, exist_ok=True)
+    
+    base_name = os.path.basename(pdf_path)
+    file_name_without_ext = os.path.splitext(base_name)[0]
+    output_file_path = os.path.join(output_dir, f"{file_name_without_ext}_langgraph_results.json")
+    
+    try:
+        with open(output_file_path, "w", encoding="utf-8") as f:
+            json.dump(output_data, f, indent=4, ensure_ascii=False)
+            
+        print(f"\n{'='*60}")
+        print(f"🎯 EXTRACTION SUCCESSFUL")
+        print(f"Time Taken: {round(total_execution_time / 60.0, 2)} minutes")
+        print(f"Results saved to: {output_file_path}")
+        print(f"{'='*60}")
+    except Exception as e:
+        print(f"[!] Error saving output file: {e}")

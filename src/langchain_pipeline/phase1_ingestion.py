@@ -1,9 +1,13 @@
 import os
 import re
+import fitz  # PyMuPDF
+import base64
 from typing import List
 
 from langchain_community.document_loaders import UnstructuredPDFLoader
 from langchain_core.documents import Document
+from langchain_core.messages import HumanMessage
+from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_text_splitters import RecursiveCharacterTextSplitter, MarkdownHeaderTextSplitter
 
 from src.core.ioc_masker import IoCMasker
@@ -16,16 +20,18 @@ class ReportIngestor:
     reconstructing structural Markdown, masking IoCs, and chunking semantically.
     """
 
-    def __init__(self, chunk_size: int = 750, chunk_overlap: int = 150) -> None:
+    def __init__(self, chunk_size: int = 750, chunk_overlap: int = 150, use_vlm: bool = False) -> None:
         """
-        Initializes the ReportIngestor with chunking parameters and IoC masker.
+        Initializes the ReportIngestor with chunking parameters, IoC masker, and extraction mode.
         
         Args:
             chunk_size (int): The maximum character size for each chunk.
             chunk_overlap (int): Overlap in characters to maintain context.
+            use_vlm (bool): If True, uses Gemini Flash VLM for extraction instead of traditional OCR.
         """
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
+        self.use_vlm = use_vlm
         self.ioc_masker = IoCMasker()
         
         self.headers_to_split_on = [
@@ -45,6 +51,64 @@ class ReportIngestor:
             "subscribe", "share on", "copyright ©", "copyright c",
             "all rights reserved", "manage cookies"
         ]
+
+    def _load_pdf_vlm(self, file_path: str) -> List[Document]:
+        """
+        Loads a PDF file by converting each page to an image and using a Vision-Language Model 
+        (Gemini 1.5 Flash) to transcribe it. This solves the issue of traditional OCR failing 
+        on dark terminal screenshots and code blocks.
+        """
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        if not os.path.exists(file_path):
+            raise FileNotFoundError(f"The file {file_path} does not exist.")
+            
+        logger.info(f"Loading PDF '{file_path}' using Multimodal VLM extraction (Gemini Flash)...")
+        
+        gemini_model = os.getenv("GEMINI_MODEL", "gemini-1.5-flash") # 1.5-flash es multimodal por defecto
+        llm = ChatGoogleGenerativeAI(model=gemini_model, temperature=0.0, max_retries=3)
+        
+        doc = fitz.open(file_path)
+        documents = []
+        
+        for page_num in range(len(doc)):
+            logger.info(f"[VLM] Processing page {page_num + 1}/{len(doc)}...")
+            page = doc.load_page(page_num)
+            # Render page to image at 150 DPI (good balance of quality/size)
+            pix = page.get_pixmap(dpi=150)
+            img_data = pix.tobytes("png")
+            img_base64 = base64.b64encode(img_data).decode("utf-8")
+            
+            prompt_text = (
+                "You are an expert CTI analyst and OCR specialist. Transcribe ALL text from this page of a cyber threat report.\n"
+                "CRITICAL INSTRUCTION: Pay special attention to images, dark terminal screenshots, and code snippets. "
+                "If you see any commands, URLs, or code inside an image, transcribe it exactly as it appears and wrap it in a markdown code block.\n"
+                "Do NOT summarize the page. Just provide the exact transcription."
+            )
+            
+            message = HumanMessage(
+                content=[
+                    {"type": "text", "text": prompt_text},
+                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_base64}"}}
+                ]
+            )
+            
+            try:
+                response = llm.invoke([message])
+                page_text = response.content
+            except Exception as e:
+                logger.error(f"[VLM] Error processing page {page_num + 1}: {e}. Falling back to basic text extraction.")
+                page_text = page.get_text()
+                
+            # Simulate the Unstructured format so the rest of the pipeline works seamlessly
+            documents.append(Document(
+                page_content=page_text,
+                metadata={"page_number": page_num + 1, "category": "NarrativeText"}
+            ))
+            
+        doc.close()
+        return documents
 
     def load_pdf(self, file_path: str) -> List[Document]:
         """
@@ -99,7 +163,11 @@ class ReportIngestor:
         import logging
         logger = logging.getLogger(__name__)
         
-        raw_elements = self.load_pdf(file_path)
+        # SELECTOR: VLM vs Traditional OCR
+        if self.use_vlm:
+            raw_elements = self._load_pdf_vlm(file_path)
+        else:
+            raw_elements = self.load_pdf(file_path)
         
         logger.info("[FASE 1] Limpiando ruido y reconstruyendo estructura Markdown...")
         md_lines = []

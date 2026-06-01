@@ -80,7 +80,11 @@ def run_cti_extraction(pdf_path: str) -> str:
     # ------------------------------------------------------------------
     logger.info("[FASE 1] Ingestando y sanitizando el reporte...")
     t0 = time.time()
-    ingestor = ReportIngestor(chunk_size=1500, chunk_overlap=300)
+    
+    # Selector de Ingesta (Pruebas A/B TFM)
+    use_vlm_env = os.getenv("USE_VLM_EXTRACTION", "False").lower() in ("true", "1", "yes")
+    ingestor = ReportIngestor(chunk_size=1500, chunk_overlap=300, use_vlm=use_vlm_env)
+    
     report_chunks = ingestor.process_report(pdf_path)
     p1_time = time.time() - t0
     logger.info(f"[FASE 1] Se generaron {len(report_chunks)} chunks enmascarados.")
@@ -155,7 +159,7 @@ def run_cti_extraction(pdf_path: str) -> str:
         logger.info("[FASE 4] Configurando Google Gemini para inferencia (más rápido)...")
         from langchain_google_genai import ChatGoogleGenerativeAI
         # Usamos gemini-3.5-flash por defecto (1.5 está deprecado)
-        gemini_model = os.getenv("GEMINI_MODEL", "gemini-3.5-flash")
+        gemini_model = os.getenv("GEMINI_MODEL", "gemini-flash-lite-latest")
         
         if not os.getenv("GOOGLE_API_KEY") or os.getenv("GOOGLE_API_KEY") == "your_api_key_here":
             logger.error("⚠️ [FASE 4] Falta la GOOGLE_API_KEY en el entorno para usar Gemini.")

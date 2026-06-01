@@ -47,10 +47,10 @@ class TTPAnalyzer:
             "1. Analyze all evidence blocks carefully.\n"
             "2. If ANY block confirms the technique, set `is_present` to true and add each confirming block to the `occurrences` list.\n"
             "3. If NO blocks confirm it, set `is_present` to false and leave `occurrences` empty.\n"
-            "4. Use the exact `location` and `Score` provided in the evidence tags. You may infer the technique if the evidence strongly implies it, even if the exact MITRE keyword isn't verbatim in the text.\n"
-            "5. Contextualize masked tags: If an action involves a masked tag (e.g., a payload dropped from an <IoC_URL> or communication to an <IoC_DOMAIN>), deduce the tactical intent (e.g., Initial Access, Command and Control).\n"
-            "6. Utilize your inherent cybersecurity knowledge: When specific software, malware, living-off-the-land binaries (LOLBins), or command-line utilities are mentioned, autonomously deduce their primary function (e.g., credential dumping, network tunneling, process injection) to evaluate if they satisfy the MITRE technique.\n"
-            "7. Handle missing context gracefully: Because you are analyzing isolated chunks, if the text says 'the tool', 'the script', or 'it' performed an action that perfectly matches the technique, assume the subject refers implicitly to the malicious actor's tooling."
+            "4. Use the exact `location` and `Score` provided in the evidence tags.\n"
+            "5. Contextualize masked tags: If an action involves a masked tag (e.g., a payload dropped from an <IoC_URL>), deduce the tactical intent.\n"
+            "6. GENERALIZATION RULE (OBSERVABLE ACTIONS ONLY): You MUST strictly differentiate between 'Intrusion Activity' (what the malware/attacker technically executed) and 'Threat Intel Context' (analyst theories, victimology, motivations, historical attribution).\n"
+            "7. DO NOT extract techniques based on the victim's industry, business relationships, geopolitical background, or theoretical capabilities. Extract ONLY materialized, technical actions performed against the target environment."
         )
         
         # Apply the 'Prompt Repetition' pattern by repeating the system instructions
@@ -133,11 +133,9 @@ class TTPAnalyzer:
                 
         else:
             logger.info("LOCAL Profile detected: Running chain sequentially...")
-            # Import for rate limiting
             import time
             is_gemini = "google" in str(type(self.llm)).lower()
 
-            # Run sequentially to prevent OOM errors on local hardware
             for i, inp in enumerate(inputs, 1):
                 try:
                     logger.info(f"[{i}/{len(inputs)}] Querying LLM for technique: {inp['mitre_technique_id']}...")
@@ -150,10 +148,10 @@ class TTPAnalyzer:
                         status = "CONFIRMED" if response.is_present else "DISCARDED"
                         logger.info(f" -> Technique {inp['mitre_technique_id']} {status}.")
                         
-                    # Prevenir el error 429 de Rate Limit (ej. 5 req/min en Free Tier)
+                    # Rate limit estricto para el Free Tier de Gemini (15 peticiones/minuto)
+                    # 60s / 15 = 4s. Usamos 4.5s para tener margen de seguridad.
                     if is_gemini and i < len(inputs):
-                        logger.info("Esperando 12s para respetar la cuota gratuita de la API de Gemini...")
-                        time.sleep(12)
+                        time.sleep(4.5)
                         
                 except Exception as e:
                     logger.error(f"Error processing technique {inp['mitre_technique_id']}: {e}")

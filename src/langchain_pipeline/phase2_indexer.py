@@ -46,16 +46,6 @@ class MitreIndexer:
         )
 
     def load_mitre_data(self, file_path: str) -> List[Dict[str, Any]]:
-        """
-        Loads and parses a MITRE ATT&CK Enterprise JSON file (typically STIX 2.1 format).
-        Extracts technique_id, name, description, tactics, and platforms.
-        
-        Args:
-            file_path (str): Path to the MITRE JSON file.
-            
-        Returns:
-            List[Dict[str, Any]]: A list of dictionaries, each representing a technique.
-        """
         try:
             with open(file_path, 'r', encoding='utf-8') as f:
                 data = json.load(f)
@@ -63,21 +53,40 @@ class MitreIndexer:
             logger.error(f"Failed to load MITRE data from {file_path}: {e}")
             raise
             
-        techniques = []
-        
-        # MITRE ATT&CK data is typically wrapped in a STIX bundle with an "objects" array.
         objects = data.get("objects", []) if isinstance(data, dict) else data
-        
         if not isinstance(objects, list):
             logger.warning("Unexpected JSON structure. Expected a list or a STIX bundle with 'objects'.")
-            return techniques
+            return []
             
+        # 1. Extraer nombres de herramientas y malware
+        entity_names = {}
         for obj in objects:
-            # We are only interested in attack techniques
+            if obj.get("type") in ["malware", "tool", "intrusion-set"]:
+                entity_names[obj.get("id")] = obj.get("name")
+                
+        # 2. Resolver las relaciones "uses" (Herramienta -> usa -> Técnica)
+        technique_examples = {}
+        for obj in objects:
+            if obj.get("type") == "relationship" and obj.get("relationship_type") == "uses":
+                source_id = obj.get("source_ref")
+                target_id = obj.get("target_ref")
+                
+                if target_id and target_id.startswith("attack-pattern--") and source_id in entity_names:
+                    if target_id not in technique_examples:
+                        technique_examples[target_id] = []
+                    tool_name = entity_names[source_id]
+                    if tool_name not in technique_examples[target_id]:
+                        technique_examples[target_id].append(tool_name)
+
+        # 3. Construir las técnicas enriquecidas
+        techniques = []
+        for obj in objects:
             if obj.get("type") != "attack-pattern":
                 continue
                 
-            # Extract technique ID (e.g., T1059) from STIX external_references
+            if obj.get("revoked", False) or obj.get("x_mitre_deprecated", False):
+                continue
+                
             external_refs = obj.get("external_references", [])
             technique_id = "Unknown"
             for ref in external_refs:
@@ -86,14 +95,17 @@ class MitreIndexer:
                     break
                     
             if not technique_id.startswith("T"):
-                continue  # Skip non-standard techniques or sub-objects without proper IDs
+                continue  
                 
-            # Extract tactics from STIX kill_chain_phases
             tactics = [
                 phase.get("phase_name", "") 
                 for phase in obj.get("kill_chain_phases", []) 
                 if phase.get("kill_chain_name") == "mitre-attack"
             ]
+            
+            # Recuperar las herramientas asociadas a esta técnica
+            stix_id = obj.get("id")
+            examples = technique_examples.get(stix_id, [])
             
             technique_dict = {
                 "technique_id": technique_id,
@@ -101,8 +113,7 @@ class MitreIndexer:
                 "description": obj.get("description", ""),
                 "tactics": tactics,
                 "platforms": obj.get("x_mitre_platforms", []),
-                # Storing potential examples if present in this object or custom schema
-                "procedure_examples": obj.get("procedure_examples", [])
+                "procedure_examples": examples
             }
             techniques.append(technique_dict)
             
