@@ -11,30 +11,26 @@ import subprocess
 
 def bootstrap_environment():
     """Instala dependencias e inicia los servicios requeridos (Ollama y Qdrant)."""
-    print("🚀 [BOOTSTRAP] Configurando el entorno de ejecución...")
+    print("[INFO] Configuring execution environment...")
     
-    # 1. Instalar dependencias
-    print("📦 [BOOTSTRAP] Instalando dependencias de requirements.txt...")
+    print("[INFO] Installing dependencies from requirements.txt...")
     try:
         subprocess.run([sys.executable, "-m", "pip", "install", "-r", "requirements.txt"], check=True)
     except Exception as e:
-        print(f"⚠️ [BOOTSTRAP] Error instalando dependencias: {e}")
+        print(f"[ERROR] Error installing dependencies: {e}")
 
     llm_provider = os.environ.get("LLM_PROVIDER", "ollama").lower()
     
     if llm_provider == "ollama":
-        # 2. Iniciar Ollama en segundo plano
-        print("🦙 [BOOTSTRAP] Iniciando servicio Ollama...")
+        print("[INFO] Initializing Ollama service...")
         try:
             subprocess.Popen(["ollama", "serve"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except FileNotFoundError:
-            print("⚠️ [BOOTSTRAP] 'ollama' no está instalado o no se encuentra en el PATH.")
+            print("[WARNING] 'ollama' is not installed or not in PATH.")
 
-    print("⏳ [BOOTSTRAP] Esperando 5 segundos para que los servicios estén listos...\n")
+    print("[INFO] Waiting 5 seconds for services to be ready...\n")
     time.sleep(5)
 
-# Ejecutamos el bootstrap ANTES de importar librerías de terceros
-# para evitar el error ModuleNotFoundError
 bootstrap_environment()
 
 from dotenv import load_dotenv
@@ -77,11 +73,25 @@ def generate_global_context(chunks: List[Any], llm: ChatGoogleGenerativeAI) -> s
     print("[*] Generating Global Context...")
     try:
         response = chain.invoke({"text": combined_intro})
-        context = response.content
-        print(f"[+] Global Context Generated:\n{context}\n")
+        
+        # Extracción robusta del contenido
+        if isinstance(response.content, str):
+            context = response.content
+        elif isinstance(response.content, list):
+            text_parts = []
+            for item in response.content:
+                if isinstance(item, str):
+                    text_parts.append(item)
+                elif isinstance(item, dict) and "text" in item:
+                    text_parts.append(item["text"])
+            context = " ".join(text_parts)
+        else:
+            context = str(response.content)
+            
+        print(f"[INFO] Global Context Generated:\n{context}\n")
         return context
     except Exception as e:
-        print(f"[!] Error generating global context: {e}")
+        print(f"[ERROR] Generating global context: {e}")
         return "Global context could not be generated."
 
 if __name__ == "__main__":
@@ -96,22 +106,20 @@ if __name__ == "__main__":
         sys.exit(1)
         
     print(f"\n{'='*60}")
-    print(f"🤖 LANGGRAPH MULTI-AGENT CTI EXTRACTION PIPELINE")
+    print(f"LANGGRAPH MULTI-AGENT CTI EXTRACTION PIPELINE")
     print(f"{'='*60}\n")
     
     total_start_time = time.time()
     
-    # 1. Ingestion Phase
-    print(f"[*] [FASE 1] Ingesting PDF: {pdf_path}")
+    print(f"[*] [INFO] Phase 1: Ingesting PDF: {pdf_path}")
     t0 = time.time()
     
-    # Selector de Ingesta (Pruebas A/B TFM)
     use_vlm_env = os.getenv("USE_VLM_EXTRACTION", "False").lower() in ("true", "1", "yes")
     ingestor = ReportIngestor(chunk_size=1500, chunk_overlap=300, use_vlm=use_vlm_env)
     
     raw_chunks = ingestor.process_report(pdf_path)
     p1_time = time.time() - t0
-    print(f"[+] [FASE 1] Extracted {len(raw_chunks)} chunks.\n")
+    print(f"[+] [INFO] Phase 1: Extracted {len(raw_chunks)} chunks.\n")
     
     sanitized_chunks = []
     for c in raw_chunks:
@@ -127,7 +135,7 @@ if __name__ == "__main__":
         sys.exit(1)
     
     # 2. Global Context Generation Phase
-    print("[*] [FASE 2] Generating Global Context...")
+    print("[*] [INFO] Phase 2: Generating Global Context...")
     t1 = time.time()
     gemini_model = os.getenv("GEMINI_MODEL", "gemini-flash-lite-latest")
     llm = ChatGoogleGenerativeAI(model=gemini_model, temperature=0.0)
@@ -135,11 +143,11 @@ if __name__ == "__main__":
     p2_time = time.time() - t1
     
     # 3. Execution Phase (Map-Reduce)
-    print("\n[*] [FASE 3] Starting Graph Execution (Map-Reduce)...")
+    print("\n[*] [INFO] Phase 3: Starting Graph Execution (Map-Reduce)...")
     t2 = time.time()
     extracted_ttps = process_full_report(pdf_path, global_context, sanitized_chunks)
     p3_time = time.time() - t2
-    print("[+] [FASE 3] Graph Execution Completed.")
+    print("[+] [INFO] Phase 3: Graph Execution Completed.")
     
     # 4. Construct Final JSON matching LangChain standard
     total_execution_time = time.time() - total_start_time
@@ -169,7 +177,7 @@ if __name__ == "__main__":
             json.dump(output_data, f, indent=4, ensure_ascii=False)
             
         print(f"\n{'='*60}")
-        print(f"🎯 EXTRACTION SUCCESSFUL")
+        print(f"EXTRACTION SUCCESSFUL")
         print(f"Time Taken: {round(total_execution_time / 60.0, 2)} minutes")
         print(f"Results saved to: {output_file_path}")
         print(f"{'='*60}")

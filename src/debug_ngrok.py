@@ -52,8 +52,8 @@ In this nefarious tactic, they utilize Ngrok's services by utilizing free static
             t1572_found_in_qdrant = True
 
     if not t1572_found_in_qdrant:
-        print("\n[!] ALERTA CRÍTICA: T1572 (Protocol Tunneling) NO FUE RECUPERADA POR QDRANT EN EL TOP 15.")
-        print("[!] Esto significa que el fallo está en la indexación de Qdrant o que el texto de la query 'diluye' a BM25.")
+        print("\n[ERROR] T1572 (Protocol Tunneling) was not retrieved by Qdrant in the TOP 15.")
+        print("[ERROR] This indicates an indexing failure in Qdrant or that the query text dilutes BM25.")
         
     print("\n" + "="*50)
     print("2. EVALUACIÓN DEL CROSS-ENCODER (RERANKER)")

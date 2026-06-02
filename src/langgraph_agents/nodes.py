@@ -57,7 +57,7 @@ def safe_invoke(callable_chain, input_data):
     try:
         return callable_chain.invoke(input_data)
     except Exception as e:
-        print(f"[!] Model Invocation Error: {e}")
+        print(f"[ERROR] Model Invocation Error: {e}")
         return None
 
 def triage_node(state: ChunkState) -> dict:
@@ -69,8 +69,10 @@ def triage_node(state: ChunkState) -> dict:
     structured_llm = llm.with_structured_output(TriageDecision)
     
     prompt = ChatPromptTemplate.from_messages([
-        ("system", "You are a cyber threat intelligence triage analyst. Your job is to determine if a given text chunk contains any valuable CTI, attacker behavior, or technical indicators."),
-        ("human", "Does this text contain any cyber threat intelligence, attacker behavior, or technical indicators? Answer True or False.\n\nText: {chunk_text}")
+        ("system", "Role: Cyber Threat Intelligence Analyst.\n"
+                   "Task: Perform a binary classification on text chunks.\n"
+                   "Condition: Return True if the text contains cybersecurity threat intelligence, attacker behavior, or technical indicators. Return False otherwise."),
+        ("human", "<text>\n{chunk_text}\n</text>")
     ])
     
     chain = prompt | structured_llm
@@ -82,7 +84,7 @@ def triage_node(state: ChunkState) -> dict:
     else:
         is_relevant = result.is_relevant
         
-    print(f"[DEBUG - Triage] Chunk relevant: {is_relevant}")
+    print(f"[DEBUG] Triage - Chunk relevant: {is_relevant}")
     return {"is_relevant": is_relevant}
 
 def extractor_node(state: ChunkState) -> dict:
@@ -97,21 +99,20 @@ def extractor_node(state: ChunkState) -> dict:
     # 1. QUERY TRANSFORMATION: Abstract Keywords Only
     translator_llm = get_llm(tier="lite")
     translator_prompt = ChatPromptTemplate.from_messages([
-        ("system", "You are a CTI conceptual translator. Read the raw text and output ONLY a comma-separated list of abstract cybersecurity behaviors, tactics, and mechanisms present. "
-                   "Translate specific tools into their tactical purpose (e.g., 'Ngrok' -> 'Protocol Tunneling'). "
-                   "If you see fake identities or spoofing, output 'Impersonation'. "
-                   "Output ONLY the keywords, no other text."),
-        ("human", "Raw Text:\n{chunk_text}")
+        ("system", "Role: Cyber Threat Intelligence Analyst.\n"
+                   "Task: Extract a comma-separated list of abstract cybersecurity behaviors, tactics, and mechanisms from the text.\n"
+                   "Instructions: Translate specific tools into their tactical purpose (e.g., 'Ngrok' -> 'Protocol Tunneling'). Output only the keywords."),
+        ("human", "<text>\n{chunk_text}\n</text>")
     ])
     
     translation_chain = translator_prompt | translator_llm | StrOutputParser()
     try:
         abstract_keywords = translation_chain.invoke({"chunk_text": chunk_text})
     except Exception as e:
-        print(f"[!] Translation Error: {e}")
+        print(f"[ERROR] Translation Error: {e}")
         abstract_keywords = ""
         
-    print(f"[DEBUG - Extractor] Abstract Keywords: {abstract_keywords}")
+    print(f"[DEBUG] Extractor - Abstract Keywords: {abstract_keywords}")
     
     # 2. DYNAMIC MECHANICAL RETRIEVAL
     # Pass the RAW TEXT plus the keywords to the Oracle so no context is lost.
@@ -122,7 +123,7 @@ def extractor_node(state: ChunkState) -> dict:
     candidates_str = mitre_oracle.invoke(search_query)
     
     if "No matching MITRE techniques found" in candidates_str or "Error" in candidates_str or "No highly confident MITRE techniques" in candidates_str:
-        print("[DEBUG - Extractor] No candidates found via Mechanical Retrieval. Returning empty drafts.")
+        print("[DEBUG] Extractor - No candidates found via Mechanical Retrieval. Returning empty drafts.")
         return {"draft_ttps": [], "loop_count": state.get("loop_count", 0) + 1}
     
     # 3. EXTRACTION (BRAINSTORMER)
@@ -145,16 +146,17 @@ def extractor_node(state: ChunkState) -> dict:
     use_prompt_repetition = os.getenv("USE_PROMPT_REPETITION", "False").lower() in ("true", "1", "yes")
     
     sys_prompt = (
-        "You are a CTI Brainstormer Extractor. Draft candidate TTPs from the Candidate Techniques list.\n"
-        "Extract ALL applicable NEW TTPs. Do not artificially limit your output.\n"
-        "CRITICAL: If you see ALREADY APPROVED TTPs or PREVIOUSLY REJECTED TTPs, you MUST ignore them.\n"
-        "RULE - FOCUS ON OBSERVABLE ACTIONS: Your primary goal is to map technical execution. Focus on what the attacker or malware actually DID (e.g., executing commands, dropping files, establishing tunnels, sending phishing emails). "
-        "Do not map the analyst's background theories (e.g., geopolitics, victim industry, historical motives) to MITRE techniques.\n"
-        "Convert your brainstormed analysis into the strict DraftTTPList JSON schema. Do not hallucinate IDs."
+        "Role: Cyber Threat Intelligence Analyst.\n"
+        "Task: Extract applicable MITRE ATT&CK techniques from the provided candidate list based on the source text.\n\n"
+        "Rules:\n"
+        "1. Extract all applicable new techniques. Do not artificially limit the output.\n"
+        "2. Ignore previously approved or rejected techniques.\n"
+        "3. Focus exclusively on observable actions (e.g., executing commands, dropping files, establishing tunnels). Do not map analytical context (geopolitics, victimology, motives) to techniques.\n"
+        "4. Output strictly according to the requested JSON schema."
     )
     
     if use_prompt_repetition:
-        sys_prompt = f"{sys_prompt}\n\nCRITICAL REMINDER OF RULES:\n{sys_prompt}"
+        sys_prompt = f"{sys_prompt}\n\nReminder of Rules:\n{sys_prompt}"
         
     prompt = ChatPromptTemplate.from_messages([
         ("system", sys_prompt),
@@ -174,7 +176,7 @@ def extractor_node(state: ChunkState) -> dict:
             drafts.append(draft)
         
     draft_ids = [d.get("technique_id", "Unknown") for d in drafts]
-    print(f"[DEBUG - Extractor] Draft TTPs found: {len(drafts)} {draft_ids}")
+    print(f"[DEBUG] Extractor - Draft TTPs found: {len(drafts)} {draft_ids}")
     return {"draft_ttps": drafts, "loop_count": state.get("loop_count", 0) + 1}
 
 def validator_node(state: ChunkState) -> dict:
@@ -183,7 +185,7 @@ def validator_node(state: ChunkState) -> dict:
     """
     draft_ttps_list = state.get("draft_ttps", [])
     if not draft_ttps_list:
-        print("[DEBUG - Validator] No drafts to validate. Skipping LLM call.")
+        print("[DEBUG] Validator - No drafts to validate. Skipping LLM call.")
         return {"approved_ttps": [], "validation_feedback": "", "draft_ttps": []}
 
     llm = get_llm(tier="pro", temperature=0.2)
@@ -192,20 +194,22 @@ def validator_node(state: ChunkState) -> dict:
     use_prompt_repetition = os.getenv("USE_PROMPT_REPETITION", "False").lower() in ("true", "1", "yes")
     
     sys_prompt = (
-        "You are a CTI Semantic Auditor. Your job is to independently verify drafted MITRE ATT&CK TTPs against the source text.\n"
-        "Read the source text and the official MITRE description for each drafted TTP. "
-        "Approve the TTP if the text contains concrete evidence of the attacker or malware performing the technical action described.\n"
-        "Reject the TTP if it is based solely on theoretical motives, target demographics (like business relationships), or if the text implies the action didn't actually happen.\n"
-        "If you reject a TTP, provide specific feedback explaining why so the Extractor can learn.\n"
-        "Validate each technique on its own merits."
+        "Role: Cyber Threat Intelligence Analyst.\n"
+        "Task: Validate drafted MITRE ATT&CK techniques against the source text.\n\n"
+        "Rules:\n"
+        "1. Read the source text and the official MITRE description for each drafted technique.\n"
+        "2. Approve the technique if the text contains concrete evidence of the technical action described.\n"
+        "3. Reject the technique if it is based solely on theoretical motives, target demographics, or implies the action did not occur.\n"
+        "4. Provide specific feedback for rejected techniques to improve extraction accuracy.\n"
+        "5. Validate each technique independently."
     )
     
     if use_prompt_repetition:
-        sys_prompt = f"{sys_prompt}\n\nCRITICAL REMINDER OF RULES:\n{sys_prompt}"
+        sys_prompt = f"{sys_prompt}\n\nReminder of Rules:\n{sys_prompt}"
         
     prompt = ChatPromptTemplate.from_messages([
         ("system", sys_prompt),
-        ("human", "Global Context:\n{global_context}\n\nSource Text:\n{chunk_text}\n\nDrafted TTPs (including official descriptions):\n{draft_ttps}\n\nValidate these TTPs and provide the approved valid list and any feedback notes.")
+        ("human", "<context>\n{global_context}\n</context>\n\n<source_text>\n{chunk_text}\n</source_text>\n\n<drafted_techniques>\n{draft_ttps}\n</drafted_techniques>\n\nValidate these techniques and provide the approved list and feedback notes.")
     ])
     
     chain = prompt | structured_llm
@@ -217,7 +221,7 @@ def validator_node(state: ChunkState) -> dict:
     })
     
     if result is None:
-        print("[DEBUG - Validator] Validation failed gracefully.")
+        print("[DEBUG] Validator - Validation failed gracefully.")
         return {"approved_ttps": [], "validation_feedback": "", "draft_ttps": []}
         
     valid_ttps = [ttp.model_dump() for ttp in result.valid_ttps] if result and result.valid_ttps else []
@@ -237,9 +241,9 @@ def validator_node(state: ChunkState) -> dict:
         feedback = "\n".join(result.feedback_notes) if result and result.feedback_notes else ""
         
     valid_ids = [v.get("technique_id", "Unknown") for v in current_approved]
-    print(f"[DEBUG - Validator] Total Approved TTPs so far: {len(current_approved)} {valid_ids}")
+    print(f"[DEBUG] Validator - Total Approved TTPs so far: {len(current_approved)} {valid_ids}")
     if feedback:
-        print(f"[DEBUG - Validator] Rejection Feedback:\n{feedback}")
+        print(f"[DEBUG] Validator - Rejection Feedback:\n{feedback}")
     
     return {
         "approved_ttps": current_approved,

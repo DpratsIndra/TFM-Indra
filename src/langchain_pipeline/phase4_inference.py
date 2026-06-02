@@ -41,31 +41,31 @@ class TTPAnalyzer:
         Injects 'Prompt Repetition' if enabled to reinforce instructions for smaller models.
         """
         system_instruction = (
-            "You are a CTI expert. Verify if the provided report excerpts "
-            "prove the use of the specified MITRE ATT&CK technique.\n"
+            "Role: Cyber Threat Intelligence (CTI) Analyst.\n"
+            "Task: Verify the presence of specific MITRE ATT&CK techniques based on provided report excerpts.\n\n"
             "Rules:\n"
-            "1. Analyze all evidence blocks carefully.\n"
-            "2. If ANY block confirms the technique, set `is_present` to true and add each confirming block to the `occurrences` list.\n"
-            "3. If NO blocks confirm it, set `is_present` to false and leave `occurrences` empty.\n"
-            "4. Use the exact `location` and `Score` provided in the evidence tags.\n"
-            "5. Contextualize masked tags: If an action involves a masked tag (e.g., a payload dropped from an <IoC_URL>), deduce the tactical intent.\n"
-            "6. GENERALIZATION RULE (OBSERVABLE ACTIONS ONLY): You MUST strictly differentiate between 'Intrusion Activity' (what the malware/attacker technically executed) and 'Threat Intel Context' (analyst theories, victimology, motivations, historical attribution).\n"
-            "7. DO NOT extract techniques based on the victim's industry, business relationships, geopolitical background, or theoretical capabilities. Extract ONLY materialized, technical actions performed against the target environment."
+            "1. Evaluate all evidence blocks objectively.\n"
+            "2. Set `is_present` to true only if the evidence technically confirms the technique. Add each confirming block to the `occurrences` list.\n"
+            "3. If no blocks confirm the technique, set `is_present` to false and leave `occurrences` empty.\n"
+            "4. Preserve the exact `location` and `Score` provided in the evidence tags.\n"
+            "5. Map contextualized masked tags (e.g., <IoC_URL>) to their tactical intent.\n"
+            "6. Exclusion Criteria: Strictly map observable, technical intrusion activity. Exclude geopolitical context, analyst attribution theories, victimology, or historical background."
         )
         
-        # Apply the 'Prompt Repetition' pattern by repeating the system instructions
         if self.use_prompt_repetition:
-            system_instruction = f"{system_instruction}\n\n{system_instruction}"
-        
+            system_instruction = f"{system_instruction}\n\nReminder of Rules:\n{system_instruction}"
+            
         user_message = (
-            "### MITRE CONTEXT\n"
-            "Technique: {mitre_technique_id} - {mitre_technique_name}\n"
+            "<mitre_context>\n"
+            "ID: {mitre_technique_id}\n"
+            "Name: {mitre_technique_name}\n"
             "Tactics: {mitre_tactics}\n"
-            "Description: {mitre_description}\n\n"
-            "### REPORT EVIDENCE\n"
-            "{supporting_chunks}\n\n"
-            "Based EXCLUSIVELY on the provided evidence, "
-            "is the use of the {mitre_technique_id} technique confirmed? Return the structured JSON."
+            "Description: {mitre_description}\n"
+            "</mitre_context>\n\n"
+            "<evidence>\n"
+            "{supporting_chunks}\n"
+            "</evidence>\n\n"
+            "Based exclusively on the provided evidence, return the structured JSON confirming or discarding the technique."
         )
         
         if self.use_prompt_repetition:

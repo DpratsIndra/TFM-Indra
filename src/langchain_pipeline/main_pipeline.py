@@ -8,30 +8,26 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../.
 
 def bootstrap_environment():
     """Instala dependencias e inicia los servicios requeridos (Ollama y Qdrant)."""
-    print("🚀 [BOOTSTRAP] Configurando el entorno de ejecución...")
+    print("[INFO] Configuring execution environment...")
     
-    # 1. Instalar dependencias
-    print("📦 [BOOTSTRAP] Instalando dependencias de requirements.txt...")
+    print("[INFO] Installing dependencies from requirements.txt...")
     try:
         subprocess.run([sys.executable, "-m", "pip", "install", "-r", "requirements.txt"], check=True)
     except Exception as e:
-        print(f"⚠️ [BOOTSTRAP] Error instalando dependencias: {e}")
+        print(f"[ERROR] Error installing dependencies: {e}")
 
     llm_provider = os.environ.get("LLM_PROVIDER", "ollama").lower()
     
     if llm_provider == "ollama":
-        # 2. Iniciar Ollama en segundo plano
-        print("🦙 [BOOTSTRAP] Iniciando servicio Ollama...")
+        print("[INFO] Initializing Ollama service...")
         try:
             subprocess.Popen(["ollama", "serve"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except FileNotFoundError:
-            print("⚠️ [BOOTSTRAP] 'ollama' no está instalado o no se encuentra en el PATH.")
+            print("[WARNING] 'ollama' is not installed or not in PATH.")
 
-    print("⏳ [BOOTSTRAP] Esperando 5 segundos para que los servicios estén listos...\n")
+    print("[INFO] Waiting 5 seconds for services to be ready...\n")
     time.sleep(5)
 
-# Ejecutamos el bootstrap ANTES de importar librerías de terceros
-# para evitar el error ModuleNotFoundError
 bootstrap_environment()
 
 import json
@@ -39,13 +35,10 @@ import logging
 from typing import List
 
 from dotenv import load_dotenv
-# Cargar variables de entorno ANTES de importar LangChain (forzando override para que actualice la API key si cambió)
 load_dotenv(override=True)
 
-# Import pipeline phases (Ingestion FIRST to prevent OpenMP/segfault conflicts with torch/onnxruntime)
 from src.langchain_pipeline.phase1_ingestion import ReportIngestor
 
-# Se importarán dinámicamente según la configuración
 from langchain_qdrant import QdrantVectorStore, FastEmbedSparse, RetrievalMode
 from langchain_huggingface import HuggingFaceEmbeddings
 from qdrant_client import QdrantClient
@@ -53,11 +46,9 @@ from qdrant_client import QdrantClient
 from src.langchain_pipeline.phase3_retriever import CandidateRetriever
 from src.langchain_pipeline.phase4_inference import TTPAnalyzer
 
-# Configuración básica de logs
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# Silenciar los molestos errores de conexión en segundo plano de LangSmith/HTTP
 logging.getLogger("langsmith.client").setLevel(logging.CRITICAL)
 logging.getLogger("urllib3.connectionpool").setLevel(logging.CRITICAL)
 logging.getLogger("httpx").setLevel(logging.CRITICAL)
@@ -73,26 +64,25 @@ def run_cti_extraction(pdf_path: str) -> str:
     Returns:
         str: Cadena JSON formateada con las detecciones TTP confirmadas.
     """
-    logger.info(f"--- Iniciando extracción CTI para: {pdf_path} ---")
+    logger.info(f"[INFO] Starting CTI extraction for: {pdf_path}")
     
     # ------------------------------------------------------------------
     # PHASE 1: Ingesta y Particionado Semántico
     # ------------------------------------------------------------------
-    logger.info("[FASE 1] Ingestando y sanitizando el reporte...")
+    logger.info("[INFO] Phase 1: Ingesting and sanitizing the report...")
     t0 = time.time()
     
-    # Selector de Ingesta (Pruebas A/B TFM)
     use_vlm_env = os.getenv("USE_VLM_EXTRACTION", "False").lower() in ("true", "1", "yes")
     ingestor = ReportIngestor(chunk_size=1500, chunk_overlap=300, use_vlm=use_vlm_env)
     
     report_chunks = ingestor.process_report(pdf_path)
     p1_time = time.time() - t0
-    logger.info(f"[FASE 1] Se generaron {len(report_chunks)} chunks enmascarados.")
+    logger.info(f"[INFO] Phase 1: Generated {len(report_chunks)} masked chunks.")
     
     # ------------------------------------------------------------------
     # PHASE 2/3 SETUP: Conexión a Base de Datos Vectorial (MITRE)
     # ------------------------------------------------------------------
-    logger.info("[SETUP] Conectando a la Base Vectorial Qdrant...")
+    logger.info("[INFO] Setup: Connecting to Qdrant Vector Database...")
     qdrant_host = os.getenv("QDRANT_HOST", "localhost")
     qdrant_port = os.getenv("QDRANT_PORT", "6333")
     qdrant_url = f"http://{qdrant_host}:{qdrant_port}"
@@ -101,14 +91,11 @@ def run_cti_extraction(pdf_path: str) -> str:
     try:
         client = QdrantClient(url=qdrant_url)
         
-        # Verificamos si la colección existe; si no, la creamos
         if not client.collection_exists(collection_name):
-            logger.info(f"[SETUP] La colección '{collection_name}' no existe. Ejecutando Indexer (Fase 2)...")
+            logger.info(f"[INFO] Setup: Collection '{collection_name}' does not exist. Running Indexer (Phase 2)...")
             from src.langchain_pipeline.phase2_indexer import setup_mitre_index
             setup_mitre_index(qdrant_url, collection_name)
-            logger.info("[SETUP] Colección MITRE ATT&CK construida exitosamente.")
-            # IMPORTANTE: Re-instanciar el cliente Qdrant. La indexación tarda mucho tiempo
-            # y el pool de conexiones HTTP original puede cerrarse por inactividad.
+            logger.info("[INFO] Setup: MITRE ATT&CK collection built successfully.")
             client = QdrantClient(url=qdrant_url)
             
         embeddings = HuggingFaceEmbeddings(model_name="BAAI/bge-m3")
@@ -121,26 +108,25 @@ def run_cti_extraction(pdf_path: str) -> str:
             retrieval_mode=RetrievalMode.HYBRID
         )
     except Exception as e:
-        logger.error(f"Fallo crítico al conectar con Qdrant o inicializar la DB. ¿Está el contenedor corriendo? Error: {e}")
+        logger.error(f"[ERROR] Critical failure connecting to Qdrant or initializing DB. Is the container running? Error: {e}")
         timing_metrics = {
             "phase1_ingestion_seconds": round(p1_time, 2),
             "phase3_retrieval_seconds": 0.0,
             "phase4_inference_seconds": 0.0
         }
-        return [{"error": "Fallo de conexión o inicialización en Qdrant", "detalle": str(e)}], timing_metrics
+        return [{"error": "Qdrant connection or initialization failure", "detail": str(e)}], timing_metrics
 
     # ------------------------------------------------------------------
     # PHASE 3: Hybrid Retrieval y Cross-Encoder Reranking
     # ------------------------------------------------------------------
-    logger.info("[FASE 3] Recuperando y re-evaluando candidatos de MITRE...")
+    logger.info("[INFO] Phase 3: Retrieving and re-evaluating MITRE candidates...")
     retriever = CandidateRetriever(vector_store=vector_store)
-    # top_k y threshold pueden ser ajustados empíricamente
     t1 = time.time()
     filtered_candidates = retriever.get_filtered_mitre_candidates(report_chunks, threshold=0.4)
     p3_time = time.time() - t1
     
     if not filtered_candidates:
-        logger.warning("[FASE 3] No se encontraron candidatos con alto grado de confianza. Fin de pipeline.")
+        logger.warning("[WARNING] Phase 3: No high-confidence candidates found. End of pipeline.")
         timing_metrics = {
             "phase1_ingestion_seconds": round(p1_time, 2),
             "phase3_retrieval_seconds": round(p3_time, 2),
@@ -151,49 +137,46 @@ def run_cti_extraction(pdf_path: str) -> str:
     # ------------------------------------------------------------------
     # PHASE 4: Inferencia LLM y Salida Estructurada
     # ------------------------------------------------------------------
-    logger.info("[FASE 4] Consultando al LLM para confirmación estructurada...")
+    logger.info("[INFO] Phase 4: Querying LLM for structured confirmation...")
     
     llm_provider = os.getenv("LLM_PROVIDER", "ollama").lower()
     
     if llm_provider == "gemini":
-        logger.info("[FASE 4] Configurando Google Gemini para inferencia (más rápido)...")
+        logger.info("[INFO] Phase 4: Configuring Google Gemini for inference...")
         from langchain_google_genai import ChatGoogleGenerativeAI
-        # Usamos gemini-3.5-flash por defecto (1.5 está deprecado)
         gemini_model = os.getenv("GEMINI_MODEL", "gemini-flash-lite-latest")
         
         if not os.getenv("GOOGLE_API_KEY") or os.getenv("GOOGLE_API_KEY") == "your_api_key_here":
-            logger.error("⚠️ [FASE 4] Falta la GOOGLE_API_KEY en el entorno para usar Gemini.")
+            logger.error("[ERROR] Phase 4: Missing GOOGLE_API_KEY in the environment for Gemini.")
             timing_metrics = {
                 "phase1_ingestion_seconds": round(p1_time, 2),
                 "phase3_retrieval_seconds": round(p3_time, 2),
                 "phase4_inference_seconds": 0.0
             }
-            return [{"error": "Falta GOOGLE_API_KEY en el .env"}], timing_metrics
+            return [{"error": "Missing GOOGLE_API_KEY in .env"}], timing_metrics
             
         llm = ChatGoogleGenerativeAI(model=gemini_model, temperature=0.0)
     else:
-        logger.info("[FASE 4] Configurando Ollama local para inferencia...")
+        logger.info("[INFO] Phase 4: Configuring local Ollama for inference...")
         model_name = os.getenv("LLM_MODEL", "llama3.1:8b")
         base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
         
         from langchain_ollama import ChatOllama
-        # Instanciamos ChatOllama forzando temperature=0 para obtener máxima determinística analítica
         llm = ChatOllama(model=model_name, base_url=base_url, temperature=0.0)
         
-        # Verificamos si el modelo está instalado consultando la CLI de Ollama directamente
         try:
-            logger.info(f"[FASE 4] Comprobando disponibilidad del modelo {model_name}...")
+            logger.info(f"[INFO] Phase 4: Checking availability of model {model_name}...")
             check_result = subprocess.run(["ollama", "show", model_name], capture_output=True)
             
             if check_result.returncode != 0:
-                logger.info(f"[FASE 4] El modelo {model_name} no está instalado. Descargando...")
+                logger.info(f"[INFO] Phase 4: Model {model_name} is not installed. Downloading...")
                 subprocess.run(["ollama", "pull", model_name], check=True)
-                logger.info(f"[FASE 4] Modelo {model_name} descargado y listo para usar.")
+                logger.info(f"[INFO] Phase 4: Model {model_name} downloaded and ready to use.")
             else:
-                logger.info(f"[FASE 4] El modelo {model_name} ya está disponible en el sistema.")
+                logger.info(f"[INFO] Phase 4: Model {model_name} is already available in the system.")
                 
         except Exception as e:
-            logger.warning(f"[FASE 4] No se pudo verificar o descargar el modelo automáticamente mediante la CLI. Error: {e}")
+            logger.warning(f"[WARNING] Phase 4: Could not automatically verify or download the model via CLI. Error: {e}")
             
     analyzer = TTPAnalyzer(llm=llm)
     t2 = time.time()
@@ -203,10 +186,9 @@ def run_cti_extraction(pdf_path: str) -> str:
     # ------------------------------------------------------------------
     # EXTRACCIÓN DE RESULTADOS
     # ------------------------------------------------------------------
-    # Convertimos los objetos de Pydantic a diccionarios excluyendo 'is_present' para limpiar el output final
     output_dict_list = [ttp.model_dump(exclude={'is_present'}) for ttp in confirmed_ttps]
     
-    logger.info("--- Pipeline Finalizado con Éxito ---")
+    logger.info("[INFO] Pipeline execution completed successfully.")
     timing_metrics = {
         "phase1_ingestion_seconds": round(p1_time, 2),
         "phase3_retrieval_seconds": round(p3_time, 2),
@@ -216,15 +198,14 @@ def run_cti_extraction(pdf_path: str) -> str:
 
 
 if __name__ == "__main__":
-    # Soporte para ejecución mediante terminal
     if len(sys.argv) < 2:
-        print("Uso: python -m src.langchain_pipeline.main_pipeline <ruta_al_pdf>")
+        print("Usage: python -m src.langchain_pipeline.main_pipeline <path_to_pdf>")
         sys.exit(1)
         
     target_pdf = sys.argv[1]
     
     if not os.path.exists(target_pdf):
-        print(f"Error: El archivo '{target_pdf}' no existe o no es accesible.")
+        print(f"Error: The file '{target_pdf}' does not exist or is not accessible.")
         sys.exit(1)
         
     start_time = time.time()
@@ -259,8 +240,8 @@ if __name__ == "__main__":
         f.write(resultados_json)
     
     print("\n" + "="*60)
-    print("🎯 RESULTADOS FINALES: TTPs EXTRAÍDOS")
+    print("FINAL RESULTS: EXTRACTED TTPs")
     print("="*60)
-    print(f"Tiempo de ejecución: {round(execution_time / 60, 2)} minutos")
-    print(f"Resultados guardados exitosamente en: {output_file_path}")
+    print(f"Execution time: {round(execution_time / 60, 2)} minutes")
+    print(f"Results successfully saved to: {output_file_path}")
     print("="*60)

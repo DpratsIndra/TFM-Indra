@@ -8,7 +8,7 @@ Directory structure:
     │   └── cti_inspector.py
     ├── data/
     │   └── output/
-    │       ├── APT29attacksEmbassiesusingCVE-2023-38831-reporten_langgraph_result.json
+    │       ├── APT29attacksEmbassiesusingCVE-2023-38831-reporten_langgraph_results.json
     │       └── APT29attacksEmbassiesusingCVE-2023-38831-reporten_results.json
     ├── infrastructure/
     │   └── docker-compose.yml
@@ -238,126 +238,191 @@ if uploaded_file is not None:
 
 
 ================================================
-FILE: data/output/APT29attacksEmbassiesusingCVE-2023-38831-reporten_langgraph_result.json
+FILE: data/output/APT29attacksEmbassiesusingCVE-2023-38831-reporten_langgraph_results.json
 ================================================
 {
     "source_file": "data/raw_reports/APT29attacksEmbassiesusingCVE-2023-38831-reporten.pdf",
-    "global_context": [
-        {
-            "type": "text",
-            "text": "The threat actor identified in this campaign is APT29, a group linked to Russia's Foreign Intelligence Service (SVR). The attackers utilized a WinRAR vulnerability (CVE-2023-38831) as their primary malware delivery mechanism to compromise target systems. The campaign specifically targeted diplomatic missions, embassies, and international organizations across several countries, including Azerbaijan, Greece, Romania, and Italy.",
-            "extras": {
-                "signature": "EjQKMgEMOdbHEF3NiMzyrNA57hazVe33zvSVZaG4z3bfTT/9ZHwQ6ow79v5U0XQO8UoT4At2"
-            }
-        }
-    ],
-    "total_chunks_processed": 14,
+    "total_execution_time_seconds": 1099.98,
+    "total_execution_time_minutes": 18.33,
+    "timing_breakdown": {
+        "phase1_ingestion_seconds": 33.9,
+        "phase2_context_seconds": 2.96,
+        "phase3_extraction_seconds": 1063.12
+    },
     "extracted_ttps": [
         {
             "technique_id": "T1204.002",
-            "name": "User Execution: Malicious File",
+            "tactic": [
+                "execution"
+            ],
+            "technique_name": "User Execution: Malicious File",
             "occurrences": [
                 {
                     "location": "Page 1, Chunk 0",
-                    "procedure": "The attackers utilized a WinRAR vulnerability (CVE-2023-38831) as their primary malware delivery mechanism to compromise target systems."
+                    "procedure": "The threat actor utilized a WinRAR vulnerability (CVE-2023-38831) as their primary malware delivery mechanism to compromise target systems.",
+                    "justification": "The exploitation of CVE-2023-38831 is a well-documented vulnerability that relies on a user opening a crafted archive file to trigger the execution of malicious payloads, which aligns with the definition of User Execution: Malicious File.",
+                    "confidence_score": 0.95
+                },
+                {
+                    "location": "Page 5, Chunk 5",
+                    "procedure": "The threat actor uses a RAR archive containing a malicious folder structure that executes arbitrary code when the user attempts to open a seemingly benign file.",
+                    "justification": "The text explicitly describes the mechanism of CVE-2023-38831, where the user's attempt to open a benign-looking file within a RAR archive triggers the execution of concealed malicious content, fitting the definition of User Execution: Malicious File.",
+                    "confidence_score": 0.95
+                },
+                {
+                    "location": "Page 7, Chunk 8",
+                    "procedure": "The attacker uses a specially crafted ZIP archive containing a benign file and a folder with the same name containing malicious executable content. When the user attempts to open the benign file, the system executes the malicious content.",
+                    "justification": "The text explicitly describes the exploitation mechanism as relying on the user's attempt to access a file within a ZIP archive, which triggers the execution of malicious code.",
+                    "confidence_score": 0.95
                 }
             ]
         },
         {
             "technique_id": "T1204",
-            "name": "User Execution",
+            "tactic": [
+                "execution"
+            ],
+            "technique_name": "User Execution",
             "occurrences": [
                 {
                     "location": "Page 2, Chunk 2",
-                    "procedure": "The attackers relied on victims opening the lure documents (BMW car sale photos) to trigger the exploitation of the WinRAR vulnerability."
+                    "procedure": "The attackers relied on victims opening the enticing BMW car sale photos and documents to trigger the WinRAR exploit.",
+                    "justification": "The text explicitly states the attackers used lure documents to compromise systems, which requires user interaction (opening the file) to trigger the exploit.",
+                    "confidence_score": 0.85
                 },
                 {
                     "location": "Page 5, Chunk 6",
-                    "procedure": "The attacker uses a lure document (a PDF featuring a BMW car for sale) to entice the user to interact with the malicious file, leading to the execution of a script."
+                    "procedure": "The attacker uses a lure document (DIPLOMATIC-CAR-FOR-SALE-BMW.pdf) to entice the user to interact with the file, which triggers the execution of a script.",
+                    "justification": "The use of a lure document to initiate a script execution chain relies on the user opening the file, which is the definition of User Execution.",
+                    "confidence_score": 0.9
                 }
             ]
         },
         {
-            "technique_id": "T1203",
-            "name": "Exploitation for Client Execution",
+            "technique_id": "T1588.006",
+            "tactic": [
+                "resource-development"
+            ],
+            "technique_name": "Vulnerabilities",
             "occurrences": [
                 {
                     "location": "Page 2, Chunk 2",
-                    "procedure": "The attackers utilized a WinRAR vulnerability (CVE-2023-38831) within lure documents to facilitate intrusion and gain access to compromised systems."
+                    "procedure": "The attackers leveraged a specific vulnerability in WinRAR (CVE-2023-38831) to facilitate their intrusion.",
+                    "justification": "The text confirms the use of a specific software vulnerability (CVE-2023-38831) to facilitate the intrusion.",
+                    "confidence_score": 0.95
                 }
             ]
         },
         {
             "technique_id": "T1566.001",
-            "name": "Spearphishing Attachment",
+            "tactic": [
+                "initial-access"
+            ],
+            "technique_name": "Spearphishing Attachment",
             "occurrences": [
                 {
-                    "location": "Page 2, Chunk 2",
-                    "procedure": "The attackers used enticing BMW car sale photos and documents as lures to deliver malicious content to diplomatic missions and embassies."
+                    "location": "Page 4, Chunk 4",
+                    "procedure": "The attackers sent phishing emails with a malicious RAR archive attachment (DIPLOMATIC- CAR-F...MW.rar) disguised as a BMW car sale announcement to target diplomatic personnel.",
+                    "justification": "The text explicitly mentions the use of phishing emails with an attachment (a .rar file) to deliver the payload, which aligns with Spearphishing Attachment.",
+                    "confidence_score": 1.0
                 },
                 {
-                    "location": "Page 4, Chunk 4",
-                    "procedure": "The attackers sent phishing emails containing a malicious WinRAR archive file (DIPLOMATIC-CAR-F...MW.rar) disguised as a diplomatic car sale announcement to target diplomatic missions and embassies."
+                    "location": "Page 5, Chunk 6",
+                    "procedure": "The attackers utilized a lure document (DIPLOMATIC-CAR-FOR-SALE-BMW.pdf) to deliver malicious content to targets.",
+                    "justification": "The text describes the use of a lure document (PDF) that, when executed, triggers the download and execution of a PowerShell script, which is a common mechanism for spearphishing attachments.",
+                    "confidence_score": 0.95
                 },
                 {
                     "location": "Page 8, Chunk 10",
-                    "procedure": "The threat actor utilized emails with lures related to the European Parliament agenda to deliver malicious files exploiting the CVE-2023-38831 WinRAR vulnerability."
+                    "procedure": "The threat actor employed emails with lures related to the European Parliament agenda to deliver malicious files exploiting the CVE-2023-38831 WinRAR vulnerability.",
+                    "justification": "The text explicitly describes the use of emails with lures (spearphishing) to deliver files that exploit a vulnerability, which is the definition of spearphishing attachment.",
+                    "confidence_score": 0.95
                 }
             ]
         },
         {
             "technique_id": "T1027.015",
-            "name": "Compression",
+            "tactic": [
+                "defense-evasion"
+            ],
+            "technique_name": "Compression",
             "occurrences": [
                 {
                     "location": "Page 5, Chunk 5",
-                    "procedure": "The threat actor utilized a RAR archive (DIPLOMATIC-CAR-FOR-SALE-BMW.rar) to exploit CVE-2023-38831, leveraging the archive's structure to conceal and execute malicious content."
+                    "procedure": "The threat actor utilized a RAR archive named DIPLOMATIC-CAR-FOR-SALE-BMW.rar to deliver malicious content by exploiting CVE-2023-38831, which involves the mishandling of archive files to execute arbitrary code.",
+                    "justification": "The actor is using a compressed archive format (RAR) to package and deliver malicious payloads, which aligns with the technique of using compression to obfuscate or facilitate the delivery of malicious files.",
+                    "confidence_score": 0.95
                 },
                 {
                     "location": "Page 7, Chunk 8",
-                    "procedure": "The attackers utilized a specially crafted ZIP archive (DIPLOMATIC-CAR-FOR-SALE-BMW.rar) to deliver malicious code by exploiting the CVE-2023-38831 vulnerability in WinRAR."
+                    "procedure": "The attackers utilized a specially crafted ZIP archive (DIPLOMATIC-CAR-FOR-SALE-BMW.rar) to deliver malware, exploiting the way WinRAR handles archives containing folders with names identical to benign files.",
+                    "justification": "The text explicitly describes the use of a RAR/ZIP archive to deliver malicious content by leveraging a vulnerability in how the archive is processed, which aligns with the use of compressed file formats for payload delivery.",
+                    "confidence_score": 0.9
                 }
             ]
         },
         {
             "technique_id": "T1566",
-            "name": "Phishing",
+            "tactic": [
+                "initial-access"
+            ],
+            "technique_name": "Phishing",
             "occurrences": [
                 {
                     "location": "Page 5, Chunk 5",
-                    "procedure": "The threat actor used a BMW car for sale theme as a lure in phishing attacks to deliver a malicious RAR archive."
-                },
-                {
-                    "location": "Page 5, Chunk 6",
-                    "procedure": "The attackers used a lure document themed as a BMW car for sale to trick targets into interacting with malicious content."
+                    "procedure": "The threat actor used a 'BMW car for sale' theme as a lure in phishing attacks to deliver a malicious RAR archive.",
+                    "justification": "The text explicitly mentions the use of a lure theme in phishing attacks to deliver the malicious archive, which constitutes a phishing delivery mechanism.",
+                    "confidence_score": 0.95
                 }
             ]
         },
         {
             "technique_id": "T1059.001",
-            "name": "PowerShell",
+            "tactic": [
+                "execution"
+            ],
+            "technique_name": "PowerShell",
             "occurrences": [
                 {
                     "location": "Page 5, Chunk 6",
-                    "procedure": "The attackers executed a PowerShell script to download and execute a next-stage payload from a remote server."
+                    "procedure": "The attacker downloads and executes a PowerShell script from a next-stage payload server to facilitate the attack.",
+                    "justification": "The text explicitly mentions the use of a PowerShell script to download and execute the next-stage payload.",
+                    "confidence_score": 1.0
                 }
             ]
         },
         {
             "technique_id": "T1071.001",
-            "name": "Web Protocols",
+            "tactic": [
+                "command-and-control"
+            ],
+            "technique_name": "Web Protocols",
             "occurrences": [
                 {
                     "location": "Page 5, Chunk 6",
-                    "procedure": "The attackers utilized a Ngrok free static domain to establish communication with their malicious server for payload delivery."
+                    "procedure": "The attackers employed a Ngrok free static domain to communicate with their malicious server and download next-stage payloads.",
+                    "justification": "The text explicitly states the attackers used a Ngrok free static domain to access their server and download a next-stage payload, which constitutes C2 communication over web protocols.",
+                    "confidence_score": 0.95
+                }
+            ]
+        },
+        {
+            "technique_id": "T1203",
+            "tactic": [
+                "execution",
+                "initial-access"
+            ],
+            "technique_name": "Exploitation for Client Execution",
+            "occurrences": [
+                {
+                    "location": "Page 8, Chunk 10",
+                    "procedure": "The threat actor exploited the CVE-2023-38831 vulnerability in WinRAR to execute malicious code upon the user opening a crafted file.",
+                    "justification": "The text explicitly states the actor exploited a known vulnerability (CVE-2023-38831) in WinRAR to facilitate the execution of their malware, which aligns with exploiting software vulnerabilities to achieve code execution.",
+                    "confidence_score": 0.95
                 }
             ]
         }
-    ],
-    "execution_metrics": {
-        "execution_time_seconds": 1349.51,
-        "execution_time_minutes": 22.49
-    }
+    ]
 }
 
 
@@ -833,7 +898,11 @@ def run_cti_extraction(pdf_path: str) -> str:
     # ------------------------------------------------------------------
     logger.info("[FASE 1] Ingestando y sanitizando el reporte...")
     t0 = time.time()
-    ingestor = ReportIngestor(chunk_size=1500, chunk_overlap=300)
+    
+    # Selector de Ingesta (Pruebas A/B TFM)
+    use_vlm_env = os.getenv("USE_VLM_EXTRACTION", "False").lower() in ("true", "1", "yes")
+    ingestor = ReportIngestor(chunk_size=1500, chunk_overlap=300, use_vlm=use_vlm_env)
+    
     report_chunks = ingestor.process_report(pdf_path)
     p1_time = time.time() - t0
     logger.info(f"[FASE 1] Se generaron {len(report_chunks)} chunks enmascarados.")
@@ -1021,10 +1090,14 @@ FILE: src/langchain_pipeline/phase1_ingestion.py
 ================================================
 import os
 import re
+import fitz  # PyMuPDF
+import base64
 from typing import List
 
 from langchain_community.document_loaders import UnstructuredPDFLoader
 from langchain_core.documents import Document
+from langchain_core.messages import HumanMessage
+from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_text_splitters import RecursiveCharacterTextSplitter, MarkdownHeaderTextSplitter
 
 from src.core.ioc_masker import IoCMasker
@@ -1037,16 +1110,18 @@ class ReportIngestor:
     reconstructing structural Markdown, masking IoCs, and chunking semantically.
     """
 
-    def __init__(self, chunk_size: int = 750, chunk_overlap: int = 150) -> None:
+    def __init__(self, chunk_size: int = 750, chunk_overlap: int = 150, use_vlm: bool = False) -> None:
         """
-        Initializes the ReportIngestor with chunking parameters and IoC masker.
+        Initializes the ReportIngestor with chunking parameters, IoC masker, and extraction mode.
         
         Args:
             chunk_size (int): The maximum character size for each chunk.
             chunk_overlap (int): Overlap in characters to maintain context.
+            use_vlm (bool): If True, uses Gemini Flash VLM for extraction instead of traditional OCR.
         """
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
+        self.use_vlm = use_vlm
         self.ioc_masker = IoCMasker()
         
         self.headers_to_split_on = [
@@ -1066,6 +1141,64 @@ class ReportIngestor:
             "subscribe", "share on", "copyright ©", "copyright c",
             "all rights reserved", "manage cookies"
         ]
+
+    def _load_pdf_vlm(self, file_path: str) -> List[Document]:
+        """
+        Loads a PDF file by converting each page to an image and using a Vision-Language Model 
+        (Gemini 1.5 Flash) to transcribe it. This solves the issue of traditional OCR failing 
+        on dark terminal screenshots and code blocks.
+        """
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        if not os.path.exists(file_path):
+            raise FileNotFoundError(f"The file {file_path} does not exist.")
+            
+        logger.info(f"Loading PDF '{file_path}' using Multimodal VLM extraction (Gemini Flash)...")
+        
+        gemini_model = os.getenv("GEMINI_MODEL", "gemini-1.5-flash") # 1.5-flash es multimodal por defecto
+        llm = ChatGoogleGenerativeAI(model=gemini_model, temperature=0.0, max_retries=3)
+        
+        doc = fitz.open(file_path)
+        documents = []
+        
+        for page_num in range(len(doc)):
+            logger.info(f"[VLM] Processing page {page_num + 1}/{len(doc)}...")
+            page = doc.load_page(page_num)
+            # Render page to image at 150 DPI (good balance of quality/size)
+            pix = page.get_pixmap(dpi=150)
+            img_data = pix.tobytes("png")
+            img_base64 = base64.b64encode(img_data).decode("utf-8")
+            
+            prompt_text = (
+                "You are an expert CTI analyst and OCR specialist. Transcribe ALL text from this page of a cyber threat report.\n"
+                "CRITICAL INSTRUCTION: Pay special attention to images, dark terminal screenshots, and code snippets. "
+                "If you see any commands, URLs, or code inside an image, transcribe it exactly as it appears and wrap it in a markdown code block.\n"
+                "Do NOT summarize the page. Just provide the exact transcription."
+            )
+            
+            message = HumanMessage(
+                content=[
+                    {"type": "text", "text": prompt_text},
+                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_base64}"}}
+                ]
+            )
+            
+            try:
+                response = llm.invoke([message])
+                page_text = response.content
+            except Exception as e:
+                logger.error(f"[VLM] Error processing page {page_num + 1}: {e}. Falling back to basic text extraction.")
+                page_text = page.get_text()
+                
+            # Simulate the Unstructured format so the rest of the pipeline works seamlessly
+            documents.append(Document(
+                page_content=page_text,
+                metadata={"page_number": page_num + 1, "category": "NarrativeText"}
+            ))
+            
+        doc.close()
+        return documents
 
     def load_pdf(self, file_path: str) -> List[Document]:
         """
@@ -1120,7 +1253,11 @@ class ReportIngestor:
         import logging
         logger = logging.getLogger(__name__)
         
-        raw_elements = self.load_pdf(file_path)
+        # SELECTOR: VLM vs Traditional OCR
+        if self.use_vlm:
+            raw_elements = self._load_pdf_vlm(file_path)
+        else:
+            raw_elements = self.load_pdf(file_path)
         
         logger.info("[FASE 1] Limpiando ruido y reconstruyendo estructura Markdown...")
         md_lines = []
@@ -1873,8 +2010,8 @@ def build_chunk_graph():
 
 def consolidator_node(state: GlobalState) -> dict:
     """
-    Goal: Merge the outputs of all chunks into a final, clean JSON report.
-    Deduplicates entries by technique_id and merges their procedure descriptions.
+    Goal: Merge the outputs of all chunks into a final, clean list of TTPs 
+    matching the standard JSON schema.
     """
     all_ttps = state.get("all_approved_ttps", [])
     deduplicated: Dict[str, Dict[str, Any]] = {}
@@ -1887,36 +2024,29 @@ def consolidator_node(state: GlobalState) -> dict:
         if tech_id_upper not in deduplicated:
             deduplicated[tech_id_upper] = {
                 "technique_id": tech_id_upper,
-                "name": ttp.get("name", "Unknown"),
+                "tactic": ttp.get("tactic", []),
+                "technique_name": ttp.get("name", "Unknown"),
                 "occurrences": []
             }
         
         proc_text = ttp.get("procedure", "").strip()
         loc_text = ttp.get("location", "Unknown")
+        justification = ttp.get("justification", "Verified by Validator Agent")
+        conf_score = ttp.get("confidence_score", 0.95)
         
         is_duplicate = any(o["procedure"] == proc_text for o in deduplicated[tech_id_upper]["occurrences"])
         if proc_text and not is_duplicate:
             deduplicated[tech_id_upper]["occurrences"].append({
                 "location": loc_text,
-                "procedure": proc_text
+                "procedure": proc_text,
+                "justification": justification,
+                "confidence_score": conf_score
             })
             
-    final_ttps = []
-    for tech_id, data in deduplicated.items():
-        final_ttps.append({
-            "technique_id": tech_id,
-            "name": data["name"],
-            "occurrences": data["occurrences"]
-        })
-            
-    formatted_output = {
-        "source_file": state.get("source_file", "Unknown"),
-        "global_context": state.get("global_context", ""),
-        "total_chunks_processed": len(state.get("chunks", [])),
-        "extracted_ttps": final_ttps
-    }
+    final_ttps = list(deduplicated.values())
     
-    return {"final_json": formatted_output}
+    # Return ONLY the list of TTPs, the main script will build the outer shell
+    return {"final_json": final_ttps}
 
 
 # ==============================================================================
@@ -2097,13 +2227,20 @@ if __name__ == "__main__":
     print(f"🤖 LANGGRAPH MULTI-AGENT CTI EXTRACTION PIPELINE")
     print(f"{'='*60}\n")
     
+    total_start_time = time.time()
+    
     # 1. Ingestion Phase
     print(f"[*] [FASE 1] Ingesting PDF: {pdf_path}")
-    ingestor = ReportIngestor(chunk_size=1500, chunk_overlap=300)
+    t0 = time.time()
+    
+    # Selector de Ingesta (Pruebas A/B TFM)
+    use_vlm_env = os.getenv("USE_VLM_EXTRACTION", "False").lower() in ("true", "1", "yes")
+    ingestor = ReportIngestor(chunk_size=1500, chunk_overlap=300, use_vlm=use_vlm_env)
+    
     raw_chunks = ingestor.process_report(pdf_path)
+    p1_time = time.time() - t0
     print(f"[+] [FASE 1] Extracted {len(raw_chunks)} chunks.\n")
     
-    # Ensure chunks are dictionaries for our Map-Reduce graph
     sanitized_chunks = []
     for c in raw_chunks:
         if hasattr(c, 'page_content'):
@@ -2117,30 +2254,34 @@ if __name__ == "__main__":
         print("[-] No text could be extracted from the PDF. Exiting.")
         sys.exit(1)
     
-    # 2. Global Context Generation
-    print("[*] [FASE 2] Setting up Global Context model (Gemini)...")
-    # We will use Gemini (flash tier) since it's cheap and fast for summarization
+    # 2. Global Context Generation Phase
+    print("[*] [FASE 2] Generating Global Context...")
+    t1 = time.time()
     gemini_model = os.getenv("GEMINI_MODEL", "gemini-flash-lite-latest")
     llm = ChatGoogleGenerativeAI(model=gemini_model, temperature=0.0)
-    
     global_context = generate_global_context(sanitized_chunks, llm)
+    p2_time = time.time() - t1
     
-    # 3. Execution (Map-Reduce)
+    # 3. Execution Phase (Map-Reduce)
     print("\n[*] [FASE 3] Starting Graph Execution (Map-Reduce)...")
-    start_time = time.time()
-    
-    # This will invoke the local graph builder orchestrator
-    print(f"[*] Invoking LangGraph 'process_full_report' with {len(sanitized_chunks)} chunks...")
-    final_json = process_full_report(pdf_path, global_context, sanitized_chunks)
-    
+    t2 = time.time()
+    extracted_ttps = process_full_report(pdf_path, global_context, sanitized_chunks)
+    p3_time = time.time() - t2
     print("[+] [FASE 3] Graph Execution Completed.")
-    end_time = time.time()
-    execution_time_sec = end_time - start_time
     
-    # 4. Inject Execution Metrics
-    final_json["execution_metrics"] = {
-        "execution_time_seconds": round(execution_time_sec, 2),
-        "execution_time_minutes": round(execution_time_sec / 60.0, 2)
+    # 4. Construct Final JSON matching LangChain standard
+    total_execution_time = time.time() - total_start_time
+    
+    output_data = {
+        "source_file": pdf_path,
+        "total_execution_time_seconds": round(total_execution_time, 2),
+        "total_execution_time_minutes": round(total_execution_time / 60.0, 2),
+        "timing_breakdown": {
+            "phase1_ingestion_seconds": round(p1_time, 2),
+            "phase2_context_seconds": round(p2_time, 2),
+            "phase3_extraction_seconds": round(p3_time, 2)
+        },
+        "extracted_ttps": extracted_ttps
     }
     
     # 5. Save Output
@@ -2149,15 +2290,15 @@ if __name__ == "__main__":
     
     base_name = os.path.basename(pdf_path)
     file_name_without_ext = os.path.splitext(base_name)[0]
-    output_file_path = os.path.join(output_dir, f"{file_name_without_ext}_langgraph_result.json")
+    output_file_path = os.path.join(output_dir, f"{file_name_without_ext}_langgraph_results.json")
     
     try:
         with open(output_file_path, "w", encoding="utf-8") as f:
-            json.dump(final_json, f, indent=4, ensure_ascii=False)
+            json.dump(output_data, f, indent=4, ensure_ascii=False)
             
         print(f"\n{'='*60}")
         print(f"🎯 EXTRACTION SUCCESSFUL")
-        print(f"Time Taken: {round(execution_time_sec / 60.0, 2)} minutes")
+        print(f"Time Taken: {round(total_execution_time / 60.0, 2)} minutes")
         print(f"Results saved to: {output_file_path}")
         print(f"{'='*60}")
     except Exception as e:
@@ -2199,8 +2340,10 @@ class TriageDecision(BaseModel):
 
 class DraftTTP(BaseModel):
     technique_id: str = Field(description="The MITRE ATT&CK Technique ID (e.g., T1059.001)")
+    tactic: List[str] = Field(default_factory=list, description="List of associated MITRE tactics (e.g. ['initial-access', 'execution'])")
     name: str = Field(description="The name of the MITRE ATT&CK Technique")
     procedure: str = Field(description="The specific procedure or behavior observed in the text")
+    justification: str = Field(default="Verified by Validator", description="Technical explanation of why this chunk demonstrates the technique.")
     mitre_description: str = Field(default="", description="The official MITRE ATT&CK description for this technique provided in the candidates")
     confidence_score: float = Field(description="The numeric score provided in the Candidate Techniques list.")
     location: str = Field(default="Unknown", description="The document page and chunk location of the evidence.")
@@ -2310,13 +2453,22 @@ def extractor_node(state: ChunkState) -> dict:
     prompt_text += f"Candidate MITRE Techniques:\n{candidates_str}\n\n"
     prompt_text += f"Source Text:\n{chunk_text}"
     
+    use_prompt_repetition = os.getenv("USE_PROMPT_REPETITION", "False").lower() in ("true", "1", "yes")
+    
+    sys_prompt = (
+        "You are a CTI Brainstormer Extractor. Draft candidate TTPs from the Candidate Techniques list.\n"
+        "Extract ALL applicable NEW TTPs. Do not artificially limit your output.\n"
+        "CRITICAL: If you see ALREADY APPROVED TTPs or PREVIOUSLY REJECTED TTPs, you MUST ignore them.\n"
+        "RULE - FOCUS ON OBSERVABLE ACTIONS: Your primary goal is to map technical execution. Focus on what the attacker or malware actually DID (e.g., executing commands, dropping files, establishing tunnels, sending phishing emails). "
+        "Do not map the analyst's background theories (e.g., geopolitics, victim industry, historical motives) to MITRE techniques.\n"
+        "Convert your brainstormed analysis into the strict DraftTTPList JSON schema. Do not hallucinate IDs."
+    )
+    
+    if use_prompt_repetition:
+        sys_prompt = f"{sys_prompt}\n\nCRITICAL REMINDER OF RULES:\n{sys_prompt}"
+        
     prompt = ChatPromptTemplate.from_messages([
-        ("system", "You are a CTI Brainstormer Extractor. Draft candidate TTPs from the Candidate Techniques list.\n"
-                   "Extract ALL applicable NEW TTPs. Do not artificially limit your output.\n"
-                   "CRITICAL: If you see ALREADY APPROVED TTPs or PREVIOUSLY REJECTED TTPs, you MUST ignore them.\n"
-                   "RULE - FOCUS ON OBSERVABLE ACTIONS: Your primary goal is to map technical execution. Focus on what the attacker or malware actually DID (e.g., executing commands, dropping files, establishing tunnels, sending phishing emails). "
-                   "Do not map the analyst's background theories (e.g., geopolitics, victim industry, historical motives) to MITRE techniques.\n"
-                   "Convert your brainstormed analysis into the strict DraftTTPList JSON schema. Do not hallucinate IDs."),
+        ("system", sys_prompt),
         ("human", "{prompt_text}")
     ])
     
@@ -2348,13 +2500,22 @@ def validator_node(state: ChunkState) -> dict:
     llm = get_llm(tier="pro", temperature=0.2)
     structured_llm = llm.with_structured_output(ValidationResult)
     
+    use_prompt_repetition = os.getenv("USE_PROMPT_REPETITION", "False").lower() in ("true", "1", "yes")
+    
+    sys_prompt = (
+        "You are a CTI Semantic Auditor. Your job is to independently verify drafted MITRE ATT&CK TTPs against the source text.\n"
+        "Read the source text and the official MITRE description for each drafted TTP. "
+        "Approve the TTP if the text contains concrete evidence of the attacker or malware performing the technical action described.\n"
+        "Reject the TTP if it is based solely on theoretical motives, target demographics (like business relationships), or if the text implies the action didn't actually happen.\n"
+        "If you reject a TTP, provide specific feedback explaining why so the Extractor can learn.\n"
+        "Validate each technique on its own merits."
+    )
+    
+    if use_prompt_repetition:
+        sys_prompt = f"{sys_prompt}\n\nCRITICAL REMINDER OF RULES:\n{sys_prompt}"
+        
     prompt = ChatPromptTemplate.from_messages([
-        ("system", "You are a CTI Semantic Auditor. Your job is to independently verify drafted MITRE ATT&CK TTPs against the source text.\n"
-                   "Read the source text and the official MITRE description for each drafted TTP. "
-                   "Approve the TTP if the text contains concrete evidence of the attacker or malware performing the technical action described.\n"
-                   "Reject the TTP if it is based solely on theoretical motives, target demographics (like business relationships), or if the text implies the action didn't actually happen.\n"
-                   "If you reject a TTP, provide specific feedback explaining why so the Extractor can learn.\n"
-                   "Validate each technique on its own merits."),
+        ("system", sys_prompt),
         ("human", "Global Context:\n{global_context}\n\nSource Text:\n{chunk_text}\n\nDrafted TTPs (including official descriptions):\n{draft_ttps}\n\nValidate these TTPs and provide the approved valid list and any feedback notes.")
     ])
     

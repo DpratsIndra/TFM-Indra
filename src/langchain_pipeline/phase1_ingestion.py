@@ -96,10 +96,28 @@ class ReportIngestor:
             
             try:
                 response = llm.invoke([message])
-                page_text = response.content
+                
+                # Extracción robusta del contenido
+                if isinstance(response.content, str):
+                    page_text = response.content
+                elif isinstance(response.content, list):
+                    text_parts = []
+                    for item in response.content:
+                        if isinstance(item, str):
+                            text_parts.append(item)
+                        elif isinstance(item, dict) and "text" in item:
+                            text_parts.append(item["text"])
+                    page_text = "\n".join(text_parts)
+                else:
+                    page_text = str(response.content)
+                    
             except Exception as e:
                 logger.error(f"[VLM] Error processing page {page_num + 1}: {e}. Falling back to basic text extraction.")
                 page_text = page.get_text()
+                
+            # Forzar cast a string por si acaso (Pydantic ValidationError protection)
+            if not isinstance(page_text, str):
+                page_text = str(page_text)
                 
             # Simulate the Unstructured format so the rest of the pipeline works seamlessly
             documents.append(Document(
@@ -145,7 +163,7 @@ class ReportIngestor:
         total_text_len = sum(len(el.page_content) for el in elements)
         if num_pages >= 3 and total_text_len < (num_pages * 50):
             logger.warning(
-                f"🚨 ALERT: Extracted text is suspiciously short ({total_text_len} chars across {num_pages} pages). "
+                f"[WARNING] Extracted text is suspiciously short ({total_text_len} chars across {num_pages} pages). "
                 "The PDF might be a pure scanned image requiring forced full-page OCR or it's heavily obfuscated."
             )
             
@@ -169,7 +187,7 @@ class ReportIngestor:
         else:
             raw_elements = self.load_pdf(file_path)
         
-        logger.info("[FASE 1] Limpiando ruido y reconstruyendo estructura Markdown...")
+        logger.info("[INFO] Phase 1: Cleaning noise and reconstructing Markdown structure...")
         md_lines = []
         for el in raw_elements:
             cat = el.metadata.get("category", "NarrativeText")
@@ -205,12 +223,10 @@ class ReportIngestor:
                 
         full_md = "\n".join(md_lines)
         
-        logger.info("[FASE 1] Enmascarando Indicadores de Compromiso (IoCs) volátiles...")
-        # Mask IoCs on the combined text
+        logger.info("[INFO] Phase 1: Masking volatile Indicators of Compromise (IoCs)...")
         sanitized_md = self.ioc_masker.mask_text(full_md)
         
-        logger.info("[FASE 1] Aplicando chunking semántico por cabeceras y tamaño...")
-        # Split by Markdown Headers
+        logger.info("[INFO] Phase 1: Applying semantic chunking by headers and size...")
         md_docs = self.md_splitter.split_text(sanitized_md)
         
         # Fallback split for huge sections

@@ -42,11 +42,10 @@ def get_retriever() -> CandidateRetriever:
             retrieval_mode=RetrievalMode.HYBRID
         )
         
-        # Instantiate and return the CandidateRetriever from phase 3
         return CandidateRetriever(vector_store=vector_store)
         
     except Exception as e:
-        print(f"[!] Tool Initialization Error (Qdrant): {e}")
+        print(f"[ERROR] Tool Initialization Error (Qdrant): {e}")
         return None
 
 @lru_cache(maxsize=1)
@@ -62,7 +61,7 @@ def load_mitre_json() -> dict:
     ))
     
     if not os.path.exists(mitre_file):
-        print(f"[!] Tool Initialization Error: MITRE JSON not found at {mitre_file}")
+        print(f"[ERROR] Tool Initialization Error: MITRE JSON not found at {mitre_file}")
         return {}
         
     try:
@@ -73,13 +72,11 @@ def load_mitre_json() -> dict:
         if not isinstance(objects, list):
             return {}
             
-        # 1. Extraer entidades (herramientas, malware)
         entity_names = {}
         for obj in objects:
             if obj.get("type") in ["malware", "tool", "intrusion-set"]:
                 entity_names[obj.get("id")] = obj.get("name")
                 
-        # 2. Extraer relaciones (quién usa qué técnica)
         technique_tools = {}
         for obj in objects:
             if obj.get("type") == "relationship" and obj.get("relationship_type") == "uses":
@@ -93,7 +90,6 @@ def load_mitre_json() -> dict:
                     if tool_name not in technique_tools[target_id]:
                         technique_tools[target_id].append(tool_name)
             
-        # 3. Mapear ID -> Descripción enriquecida
         lookup_dict = {}
         for obj in objects:
             if obj.get("type") != "attack-pattern":
@@ -120,7 +116,7 @@ def load_mitre_json() -> dict:
                 
         return lookup_dict
     except Exception as e:
-        print(f"[!] Tool Initialization Error (JSON): {e}")
+        print(f"[ERROR] Tool Initialization Error (JSON): {e}")
         return {}
 
 # ==============================================================================
@@ -170,8 +166,7 @@ def mitre_oracle(query: str) -> str:
 @tool("MITRE_ID_Lookup")
 def mitre_id_lookup(technique_id: str) -> str:
     """
-    Use this tool ONLY if you already know the exact MITRE Technique ID (e.g., 'T1059.001')
-    and need its official description to confirm a match. Do not use this for semantic searches.
+    Looks up the official MITRE ATT&CK description for a specific Technique ID (e.g., 'T1059.001').
     """
     lookup_dict = load_mitre_json()
     if not lookup_dict:
