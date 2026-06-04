@@ -186,7 +186,9 @@ class MitreIndexer:
                 "name": tech.get("name"),
                 "tactics": ", ".join(tech.get("tactics", [])),
                 "platforms": ", ".join(tech.get("platforms", [])),
-                "full_description": tech.get("description", "").strip() # PRESERVE FULL TEXT FOR LLM
+                # CRITICAL FIX: Pass the enriched content (which includes tools and malware names)
+                # to the metadata, so the LLM Validator can read the same evidence Qdrant used.
+                "full_description": enriched_content 
             }
             
             # Chunk the enriched content for fast Cross-Encoder evaluation

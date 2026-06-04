@@ -94,6 +94,48 @@ def generate_global_context(chunks: List[Any], llm: ChatGoogleGenerativeAI) -> s
         print(f"[ERROR] Generating global context: {e}")
         return "Global context could not be generated."
 
+def run_langgraph_extraction(pdf_path: str):
+    """Función de entrada limpia para invocar todo el pipeline de LangGraph desde scripts de evaluación."""
+    import time
+    t0 = time.time()
+    
+    use_vlm_env = os.getenv("USE_VLM_EXTRACTION", "False").lower() in ("true", "1", "yes")
+    ingestor = ReportIngestor(chunk_size=3500, chunk_overlap=500, use_vlm=use_vlm_env)
+    
+    raw_chunks = ingestor.process_report(pdf_path)
+    p1_time = time.time() - t0
+    
+    sanitized_chunks = []
+    for c in raw_chunks:
+        if hasattr(c, 'page_content'):
+            sanitized_chunks.append({"text": c.page_content, "metadata": c.metadata})
+        elif isinstance(c, dict) and "text" in c:
+            sanitized_chunks.append(c)
+        else:
+            sanitized_chunks.append({"text": str(c), "metadata": {}})
+            
+    if not sanitized_chunks:
+        return [], {"error": "No text extracted"}
+
+    t1 = time.time()
+    gemini_model = os.getenv("GEMINI_MODEL", "gemini-flash-lite-latest")
+    llm = ChatGoogleGenerativeAI(model=gemini_model, temperature=0.0)
+    global_context = generate_global_context(sanitized_chunks, llm)
+    p2_time = time.time() - t1
+    
+    t2 = time.time()
+    result_dict = process_full_report(pdf_path, global_context, sanitized_chunks)
+    p3_time = time.time() - t2
+    extracted_ttps = result_dict.get("extracted_ttps", [])
+    
+    timing_metrics = {
+        "phase1_ingestion_seconds": round(p1_time, 2),
+        "phase2_context_seconds": round(p2_time, 2),
+        "phase3_extraction_seconds": round(p3_time, 2)
+    }
+    
+    return extracted_ttps, timing_metrics
+
 if __name__ == "__main__":
     if len(sys.argv) < 2:
         print("Usage: python -m src.langgraph_agents.main_langgraph <path_to_pdf>")
@@ -115,7 +157,7 @@ if __name__ == "__main__":
     t0 = time.time()
     
     use_vlm_env = os.getenv("USE_VLM_EXTRACTION", "False").lower() in ("true", "1", "yes")
-    ingestor = ReportIngestor(chunk_size=1500, chunk_overlap=300, use_vlm=use_vlm_env)
+    ingestor = ReportIngestor(chunk_size=3500, chunk_overlap=500, use_vlm=use_vlm_env)
     
     raw_chunks = ingestor.process_report(pdf_path)
     p1_time = time.time() - t0
@@ -145,9 +187,15 @@ if __name__ == "__main__":
     # 3. Execution Phase (Map-Reduce)
     print("\n[*] [INFO] Phase 3: Starting Graph Execution (Map-Reduce)...")
     t2 = time.time()
-    extracted_ttps = process_full_report(pdf_path, global_context, sanitized_chunks)
+    # === CAMBIO AQUI ===
+    result_dict = process_full_report(pdf_path, global_context, sanitized_chunks)
     p3_time = time.time() - t2
     print("[+] [INFO] Phase 3: Graph Execution Completed.")
+    
+    # Extraer variables
+    extracted_ttps = result_dict.get("extracted_ttps", [])
+    p3_breakdown = result_dict.get("timing_breakdown_phase3", {})
+    # ===================
     
     # 4. Construct Final JSON matching LangChain standard
     total_execution_time = time.time() - total_start_time

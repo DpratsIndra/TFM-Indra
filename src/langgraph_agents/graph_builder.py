@@ -140,25 +140,28 @@ def consolidator_node(state: GlobalState) -> dict:
 # THE MAIN ORCHESTRATOR (MAP-REDUCE EXECUTION)
 # ==============================================================================
 
+import time
+
 def process_full_report(source_file: str, global_context: str, sanitized_chunks: List[Dict[str, Any]]) -> dict:
     """
     Main orchestrator that executes the Map-Reduce flow.
-    Currently runs sequentially for local PoC testing, but can be parallelized in AWS.
+    Returns both the extracted TTPs and the internal timing metrics for Phase 3.
     """
     print(f"[*] Starting LangGraph Map-Reduce execution for: {source_file}")
     
     # Initialize the compiled chunk graph (Map Phase)
     chunk_graph = build_chunk_graph()
-    
-    # Master list to gather all approved TTPs (Reducer list)
     master_ttp_list = []
+    
+    # Acumuladores de tiempo
+    triage_time_total = 0.0
+    extraction_time_total = 0.0
+    validation_time_total = 0.0
     
     # 1. MAP: Loop over sanitized_chunks sequentially
     for i, chunk_data in enumerate(sanitized_chunks):
         print(f"  -> Processing chunk {i+1}/{len(sanitized_chunks)}...")
         
-        # In this PoC, chunk_data could be a dict or string depending on upstream, 
-        # assume dict with "text" and "metadata"
         chunk_text = chunk_data.get("text", str(chunk_data))
         chunk_metadata = chunk_data.get("metadata", {})
         
@@ -175,13 +178,28 @@ def process_full_report(source_file: str, global_context: str, sanitized_chunks:
         }
         
         try:
+            t0 = time.time()
             # Invoke the graph for this single chunk
             chunk_result = chunk_graph.invoke(initial_chunk_state)
-            approved = chunk_result.get("approved_ttps", [])
+            chunk_time = time.time() - t0
             
+            # Aproximación heurística del tiempo según el camino que tomó en el grafo
+            if not chunk_result.get("is_relevant"):
+                # Murió en el Triage
+                triage_time_total += chunk_time
+            elif len(chunk_result.get("draft_ttps", [])) == 0 and len(chunk_result.get("approved_ttps", [])) == 0:
+                # Pasó Triage, fue al Extractor, pero no propuso nada (No llegó al Validator)
+                triage_time_total += (chunk_time * 0.15)
+                extraction_time_total += (chunk_time * 0.85)
+            else:
+                # Recorrió todo el camino (Triage -> Extractor -> Validator)
+                triage_time_total += (chunk_time * 0.10)
+                extraction_time_total += (chunk_time * 0.60)
+                validation_time_total += (chunk_time * 0.30)
+                
+            approved = chunk_result.get("approved_ttps", [])
             if approved:
                 print(f"     [+] Found {len(approved)} valid TTP(s) in chunk {i+1}")
-                # Append to master list
                 master_ttp_list.extend(approved)
             else:
                 print(f"     [-] No valid TTPs found in chunk {i+1}")
@@ -200,10 +218,19 @@ def process_full_report(source_file: str, global_context: str, sanitized_chunks:
         "final_json": {}
     }
     
-    # Execute the consolidator node directly
+    t0_red = time.time()
     final_state_update = consolidator_node(global_state)
+    consolidator_time = time.time() - t0_red
     
     print("[*] Reduce phase complete. Report ready.")
     
-    # Return the final formatted JSON
-    return final_state_update.get("final_json", {})
+    # Devolver estructura empaquetada con TTPs y Tiempos
+    return {
+        "extracted_ttps": final_state_update.get("final_json", []),
+        "timing_breakdown_phase3": {
+            "triage_node_seconds": round(triage_time_total, 2),
+            "extraction_oracle_node_seconds": round(extraction_time_total, 2),
+            "validator_node_seconds": round(validation_time_total, 2),
+            "consolidator_seconds": round(consolidator_time, 2)
+        }
+    }

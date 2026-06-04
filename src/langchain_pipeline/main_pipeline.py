@@ -73,7 +73,7 @@ def run_cti_extraction(pdf_path: str) -> str:
     t0 = time.time()
     
     use_vlm_env = os.getenv("USE_VLM_EXTRACTION", "False").lower() in ("true", "1", "yes")
-    ingestor = ReportIngestor(chunk_size=1500, chunk_overlap=300, use_vlm=use_vlm_env)
+    ingestor = ReportIngestor(chunk_size=3500, chunk_overlap=500, use_vlm=use_vlm_env)
     
     report_chunks = ingestor.process_report(pdf_path)
     p1_time = time.time() - t0
@@ -122,7 +122,7 @@ def run_cti_extraction(pdf_path: str) -> str:
     logger.info("[INFO] Phase 3: Retrieving and re-evaluating MITRE candidates...")
     retriever = CandidateRetriever(vector_store=vector_store)
     t1 = time.time()
-    filtered_candidates = retriever.get_filtered_mitre_candidates(report_chunks, threshold=0.4)
+    filtered_candidates = retriever.get_filtered_mitre_candidates(report_chunks, threshold=0.5)
     p3_time = time.time() - t1
     
     if not filtered_candidates:
@@ -180,8 +180,8 @@ def run_cti_extraction(pdf_path: str) -> str:
             
     analyzer = TTPAnalyzer(llm=llm)
     t2 = time.time()
-    confirmed_ttps = analyzer.analyze_candidates(filtered_candidates)
-    p4_time = time.time() - t2
+    confirmed_ttps, artificial_delay = analyzer.analyze_candidates(filtered_candidates)
+    p4_time = (time.time() - t2) - artificial_delay
     
     # ------------------------------------------------------------------
     # EXTRACCIÓN DE RESULTADOS

@@ -9,3 +9,7 @@ tfm_env/
 *.synctex.gz
 qdrant_data/
 .env
+digest.txt
+data/output
+data/eval_datasets/
+*.json

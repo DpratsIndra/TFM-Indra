@@ -134,7 +134,8 @@ def mitre_oracle(query: str) -> str:
         import torch
         
         # 1. Hybrid Search
-        candidates = retriever.vector_store.similarity_search(query, k=30)
+        # OPTIMIZACIÓN: Bajar de 30 a 15
+        candidates = retriever.vector_store.similarity_search(query, k=15)
         if not candidates:
             return "No matching MITRE techniques found."
             
@@ -145,7 +146,7 @@ def mitre_oracle(query: str) -> str:
         # 3. Filter (Threshold = 0.20)
         results = []
         for doc, score in zip(candidates, scores):
-            if float(score) >= 0.20:
+            if float(score) >= 0.40:
                 tech_id = doc.metadata.get("technique_id", "Unknown")
                 name = doc.metadata.get("name", "Unknown")
                 desc = doc.metadata.get("full_description", "No description available.")[:500]

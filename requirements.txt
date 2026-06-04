@@ -28,3 +28,6 @@ torch
 streamlit
 unstructured[pdf]
 python-dotenv
+pandas
+scikit-learn
+tqdm

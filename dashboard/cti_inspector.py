@@ -26,7 +26,7 @@ if uploaded_file is not None:
     st.success(f"File uploaded successfully: {uploaded_file.name}")
 
     with st.spinner("Processing and splitting the report (Phase 1)..."):
-        ingestor = ReportIngestor(chunk_size=1500, chunk_overlap=300)
+        ingestor = ReportIngestor(chunk_size=3500, chunk_overlap=500)
         masker = IoCMasker()
         
         try:

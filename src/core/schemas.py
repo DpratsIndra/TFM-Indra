@@ -43,3 +43,15 @@ class TTPDetection(BaseModel):
         default_factory=list,
         description="A list of specific occurrences/evidence blocks where the technique was confirmed."
     )
+
+class ChunkEvidence(BaseModel):
+    technique_id: str = Field(..., description="The MITRE ATT&CK technique ID (e.g. T1059)")
+    technique_name: str = Field(..., description="The name of the technique")
+    procedure: str = Field(..., description="Exact attacker action described in this chunk")
+    justification: str = Field(..., description="Why this chunk matches the technique")
+
+class ChunkExtraction(BaseModel):
+    extracted_ttps: List[ChunkEvidence] = Field(
+        default_factory=list, 
+        description="List of confirmed techniques in this chunk. Return an empty list if no candidate techniques are present."
+    )

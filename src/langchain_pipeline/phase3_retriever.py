@@ -55,84 +55,45 @@ class CandidateRetriever:
         candidates = self.vector_store.similarity_search(chunk.page_content, k=top_k)
         return candidates
 
-    def get_filtered_mitre_candidates(self, report_chunks: List[Document], threshold: float = 0.30) -> Dict[str, Dict[str, Any]]:
-        """
-        Main orchestrator for the retrieval phase. Retrieves candidates for all chunks,
-        reranks them in a single optimized batch, and aggregates the results.
-        
-        Args:
-            report_chunks (List[Document]): Chunked documents from Phase 1.
-            threshold (float): Minimum score for the Cross-Encoder.
-            
-        Returns:
-            Dict[str, Dict[str, Any]]: Aggregated mapping of MITRE techniques to supporting chunks.
-        """
-        grouped_results: Dict[str, Dict[str, Any]] = {}
+    def get_filtered_mitre_candidates(self, report_chunks: List[Document], threshold: float = 0.50) -> List[Dict[str, Any]]:
         logger.info(f"Starting retrieval and reranking for {len(report_chunks)} chunks...")
         
         all_initial_candidates = []
         all_pairs = []
         
-        # Step 1: Fast Vector Search (High Recall) for all chunks
         for chunk in report_chunks:
             chunk_text = chunk.page_content
-            candidates = self._get_initial_candidates(chunk, top_k=35)
+            candidates = self._get_initial_candidates(chunk, top_k=15)
             all_initial_candidates.append((chunk, candidates))
-            
             for doc in candidates:
                 all_pairs.append([chunk_text, doc.page_content])
                 
-        # Step 2: Accurate Reranking in Batch (High Precision)
         logger.info(f"Reranking {len(all_pairs)} pairs in batch mode...")
         scores = self.reranker.predict(all_pairs, batch_size=32, activation_fn=torch.nn.Sigmoid()) if all_pairs else []
         
-        # Re-associate scores with chunks and apply filtering
+        chunk_results = []
         score_idx = 0
         for chunk, candidates in all_initial_candidates:
-            chunk_text = chunk.page_content
-            
-            # Extract page number based on loader metadata (PyMuPDF uses 'page', Unstructured uses 'page_number')
-            page_val = chunk.metadata.get("page")
-            if page_val is not None:
-                page_num = int(page_val) + 1  # PyMuPDF is 0-indexed
-            else:
-                page_num = chunk.metadata.get("page_number", "Unknown")
-                
-            chunk_idx = chunk.metadata.get("chunk_index", "Unknown")
-            
+            valid_candidates = []
             for doc in candidates:
                 score = float(scores[score_idx])
                 score_idx += 1
-                
                 if score >= threshold:
-                    tech_id = doc.metadata.get("technique_id", "Unknown")
-                    tech_name = doc.metadata.get("name", "Unknown")
-                    tactics_str = doc.metadata.get("tactics", "")
-                    
-                    if tech_id not in grouped_results:
-                        grouped_results[tech_id] = {
-                            "name": tech_name,
-                            "tactics": [t.strip() for t in tactics_str.split(",") if t.strip()],
-                            "description": doc.metadata.get("full_description", ""), # EXTRACT FULL DESCRIPTION
-                            "score": score,
-                            "supporting_chunks": []
-                        }
-                    else:
-                        if score > grouped_results[tech_id]["score"]:
-                            grouped_results[tech_id]["score"] = score
-                            
-                    is_unique = all(c["text"] != chunk_text for c in grouped_results[tech_id]["supporting_chunks"])
-                    if is_unique:
-                        grouped_results[tech_id]["supporting_chunks"].append({
-                            "text": chunk_text,
-                            "location": f"Page {page_num}, Chunk {chunk_idx}",
-                            "score": round(score, 4)
-                        })
-                        
-        for tech_id in grouped_results:
-            chunks = grouped_results[tech_id]["supporting_chunks"]
-            chunks.sort(key=lambda x: x["score"], reverse=True)
-            grouped_results[tech_id]["supporting_chunks"] = chunks
+                    valid_candidates.append({
+                        "technique_id": doc.metadata.get("technique_id", "Unknown"),
+                        "name": doc.metadata.get("name", "Unknown"),
+                        "tactics": [t.strip() for t in doc.metadata.get("tactics", "").split(",") if t.strip()],
+                        "description": doc.metadata.get("full_description", ""),
+                        "score": round(score, 4)
+                    })
             
-        logger.info(f"Retrieval complete. Found {len(grouped_results)} unique techniques across all chunks.")
-        return grouped_results
+            if valid_candidates:
+                valid_candidates.sort(key=lambda x: x["score"], reverse=True)
+                for i in range(0, len(valid_candidates), 10):
+                    chunk_results.append({
+                        "chunk": chunk,
+                        "candidates": valid_candidates[i:i+10]
+                    })
+                
+        logger.info(f"Retrieval complete. {len(chunk_results)} chunk inference tasks prepared.")
+        return chunk_results

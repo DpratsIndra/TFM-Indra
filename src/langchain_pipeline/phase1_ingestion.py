@@ -20,7 +20,7 @@ class ReportIngestor:
     reconstructing structural Markdown, masking IoCs, and chunking semantically.
     """
 
-    def __init__(self, chunk_size: int = 750, chunk_overlap: int = 150, use_vlm: bool = False) -> None:
+    def __init__(self, chunk_size: int = 3500, chunk_overlap: int = 500, use_vlm: bool = False) -> None:
         """
         Initializes the ReportIngestor with chunking parameters, IoC masker, and extraction mode.
         
