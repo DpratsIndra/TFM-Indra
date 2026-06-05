@@ -36,13 +36,13 @@ bootstrap_environment()
 from dotenv import load_dotenv
 load_dotenv(override=True)
 
-from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.prompts import ChatPromptTemplate
 
 from src.langchain_pipeline.phase1_ingestion import ReportIngestor
 from src.langgraph_agents.graph_builder import process_full_report
 
-def generate_global_context(chunks: List[Any], llm: ChatGoogleGenerativeAI) -> str:
+def generate_global_context(chunks: List[Any], llm: BaseChatModel) -> str:
     """
     Generates a high-level summary of the report to serve as global context.
     This helps the extractor agents resolve pronouns and understand the broader scope.
@@ -118,8 +118,8 @@ def run_langgraph_extraction(pdf_path: str):
         return [], {"error": "No text extracted"}
 
     t1 = time.time()
-    gemini_model = os.getenv("GEMINI_MODEL", "gemini-flash-lite-latest")
-    llm = ChatGoogleGenerativeAI(model=gemini_model, temperature=0.0)
+    from src.core.llm_factory import get_llm
+    llm = get_llm(temperature=0.0)
     global_context = generate_global_context(sanitized_chunks, llm)
     p2_time = time.time() - t1
     
@@ -179,8 +179,8 @@ if __name__ == "__main__":
     # 2. Global Context Generation Phase
     print("[*] [INFO] Phase 2: Generating Global Context...")
     t1 = time.time()
-    gemini_model = os.getenv("GEMINI_MODEL", "gemini-flash-lite-latest")
-    llm = ChatGoogleGenerativeAI(model=gemini_model, temperature=0.0)
+    from src.core.llm_factory import get_llm
+    llm = get_llm(temperature=0.0)
     global_context = generate_global_context(sanitized_chunks, llm)
     p2_time = time.time() - t1
     

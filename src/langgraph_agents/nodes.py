@@ -14,9 +14,8 @@ from .tools import mitre_oracle
 # ==============================================================================
 
 def get_llm(tier="pro", temperature=0.0):
-    from langchain_google_genai import ChatGoogleGenerativeAI
-    model_name = os.getenv("GEMINI_MODEL", "gemini-flash-lite-latest")
-    return ChatGoogleGenerativeAI(model=model_name, temperature=temperature, max_retries=3)
+    from src.core.llm_factory import get_llm as factory_get_llm
+    return factory_get_llm(temperature=temperature)
 
 # ==============================================================================
 # PYDANTIC SCHEMAS

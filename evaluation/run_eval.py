@@ -11,7 +11,6 @@ import pandas as pd
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from langchain_core.documents import Document
-from langchain_google_genai import ChatGoogleGenerativeAI
 from qdrant_client import QdrantClient
 from langchain_qdrant import QdrantVectorStore, FastEmbedSparse, RetrievalMode
 from langchain_huggingface import HuggingFaceEmbeddings
@@ -37,7 +36,8 @@ def get_langchain_engine():
         retrieval_mode=RetrievalMode.HYBRID
     )
     retriever = CandidateRetriever(vector_store=vector_store)
-    llm = ChatGoogleGenerativeAI(model=os.getenv("GEMINI_MODEL", "gemini-flash-lite-latest"), temperature=0.0)
+    from src.core.llm_factory import get_llm
+    llm = get_llm(temperature=0.0)
     analyzer = TTPAnalyzer(llm=llm)
     
     return retriever, analyzer

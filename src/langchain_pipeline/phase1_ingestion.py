@@ -4,7 +4,7 @@ import fitz  # PyMuPDF
 import base64
 from typing import List
 
-from langchain_community.document_loaders import UnstructuredPDFLoader
+from docling.document_converter import DocumentConverter
 from langchain_core.documents import Document
 from langchain_core.messages import HumanMessage
 from langchain_google_genai import ChatGoogleGenerativeAI
@@ -130,8 +130,8 @@ class ReportIngestor:
 
     def load_pdf(self, file_path: str) -> List[Document]:
         """
-        Loads a PDF file and extracts its elements using Unstructured.
-        Uses hi_res strategy for OCR and table extraction.
+        Loads a PDF file and extracts its elements using Docling.
+        Uses Docling's advanced document layout analysis.
         """
         if not os.path.exists(file_path):
             raise FileNotFoundError(f"The file {file_path} does not exist.")
@@ -148,17 +148,60 @@ class ReportIngestor:
         except Exception:
             num_pages = 1
             
-        logger.info(f"Loading PDF '{file_path}' using Unstructured hi_res strategy (Pages detected: {num_pages})...")
-            
-        # Using mode='elements', hi_res strategy for OCR, and inferring tables
-        loader = UnstructuredPDFLoader(
-            file_path, 
-            mode="elements", 
-            strategy="hi_res",
-            pdf_infer_table_structure=True
-        )
-        elements = loader.load()
+        logger.info(f"Loading PDF '{file_path}' using Docling (Pages detected: {num_pages})...")
         
+        converter = DocumentConverter()
+        result = converter.convert(file_path)
+        doc = result.document
+        
+        elements = []
+        for item, level in doc.iterate_items():
+            text = ""
+            cat = "NarrativeText"
+            html = None
+            
+            # Extract the string representation of the enum label
+            label = getattr(item, "label", "text")
+            if hasattr(label, "name"):
+                label_str = label.name.lower()
+            elif isinstance(label, str):
+                label_str = label.lower()
+            else:
+                label_str = "text"
+                
+            # Map Docling labels to our expected categories
+            if label_str in ["title", "section_header", "page_header"]:
+                cat = "Title"
+                if label_str == "page_header":
+                    cat = "Header"
+            elif label_str in ["page_footer"]:
+                cat = "Footer"
+            elif label_str == "list_item":
+                cat = "ListItem"
+            elif label_str == "table":
+                cat = "Table"
+                if hasattr(item, "export_to_html"):
+                    html = item.export_to_html()
+                    
+            if hasattr(item, "text"):
+                text = item.text
+                
+            # Ignore empty elements or images without text/html
+            if not text and not html:
+                continue
+                
+            # Try to fetch provenance for page number
+            page_num = "?"
+            if hasattr(item, "prov") and item.prov:
+                page_num = str(item.prov[0].page_no)
+                
+            metadata = {"category": cat, "page_number": page_num}
+            if html:
+                metadata["text_as_html"] = html
+                text = html  # Use HTML representation for the chunk content
+                
+            elements.append(Document(page_content=text, metadata=metadata))
+            
         # Validation Logic: Suspiciously short extraction
         total_text_len = sum(len(el.page_content) for el in elements)
         if num_pages >= 3 and total_text_len < (num_pages * 50):

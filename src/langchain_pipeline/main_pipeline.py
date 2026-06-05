@@ -139,44 +139,9 @@ def run_cti_extraction(pdf_path: str) -> str:
     # ------------------------------------------------------------------
     logger.info("[INFO] Phase 4: Querying LLM for structured confirmation...")
     
-    llm_provider = os.getenv("LLM_PROVIDER", "ollama").lower()
-    
-    if llm_provider == "gemini":
-        logger.info("[INFO] Phase 4: Configuring Google Gemini for inference...")
-        from langchain_google_genai import ChatGoogleGenerativeAI
-        gemini_model = os.getenv("GEMINI_MODEL", "gemini-flash-lite-latest")
-        
-        if not os.getenv("GOOGLE_API_KEY") or os.getenv("GOOGLE_API_KEY") == "your_api_key_here":
-            logger.error("[ERROR] Phase 4: Missing GOOGLE_API_KEY in the environment for Gemini.")
-            timing_metrics = {
-                "phase1_ingestion_seconds": round(p1_time, 2),
-                "phase3_retrieval_seconds": round(p3_time, 2),
-                "phase4_inference_seconds": 0.0
-            }
-            return [{"error": "Missing GOOGLE_API_KEY in .env"}], timing_metrics
-            
-        llm = ChatGoogleGenerativeAI(model=gemini_model, temperature=0.0)
-    else:
-        logger.info("[INFO] Phase 4: Configuring local Ollama for inference...")
-        model_name = os.getenv("LLM_MODEL", "llama3.1:8b")
-        base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-        
-        from langchain_ollama import ChatOllama
-        llm = ChatOllama(model=model_name, base_url=base_url, temperature=0.0)
-        
-        try:
-            logger.info(f"[INFO] Phase 4: Checking availability of model {model_name}...")
-            check_result = subprocess.run(["ollama", "show", model_name], capture_output=True)
-            
-            if check_result.returncode != 0:
-                logger.info(f"[INFO] Phase 4: Model {model_name} is not installed. Downloading...")
-                subprocess.run(["ollama", "pull", model_name], check=True)
-                logger.info(f"[INFO] Phase 4: Model {model_name} downloaded and ready to use.")
-            else:
-                logger.info(f"[INFO] Phase 4: Model {model_name} is already available in the system.")
-                
-        except Exception as e:
-            logger.warning(f"[WARNING] Phase 4: Could not automatically verify or download the model via CLI. Error: {e}")
+    logger.info("[INFO] Phase 4: Configuring LLM for inference using llm_factory...")
+    from src.core.llm_factory import get_llm
+    llm = get_llm(temperature=0.0)
             
     analyzer = TTPAnalyzer(llm=llm)
     t2 = time.time()

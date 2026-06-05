@@ -6,6 +6,7 @@ langchain-core>=0.2.0
 langchain-community
 langchain-ollama
 langchain-google-genai
+langchain-openai
 langchain-qdrant
 langchain-huggingface
 langchain-text-splitters
@@ -26,7 +27,7 @@ torch
 
 # UI Dashboard
 streamlit
-unstructured[pdf]
+docling
 python-dotenv
 pandas
 scikit-learn
