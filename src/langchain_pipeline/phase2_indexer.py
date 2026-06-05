@@ -38,12 +38,8 @@ class MitreIndexer:
         else:
             self.device = "cpu"
             
-        # BAAI/bge-m3 is a state-of-the-art multilingual model great for retrieval
-        self.embeddings = HuggingFaceEmbeddings(
-            model_name="BAAI/bge-m3",
-            model_kwargs={'device': self.device},
-            encode_kwargs={'normalize_embeddings': True}
-        )
+        from src.core.embedding_factory import get_embeddings
+        self.embeddings = get_embeddings()
 
     def load_mitre_data(self, file_path: str) -> List[Dict[str, Any]]:
         try:

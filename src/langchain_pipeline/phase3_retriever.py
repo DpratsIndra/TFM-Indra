@@ -1,3 +1,5 @@
+import os
+import requests
 import logging
 from typing import List, Dict, Any
 
@@ -37,8 +39,13 @@ class CandidateRetriever:
         else:
             self.device = device
             
-        logger.info(f"Loading Cross-Encoder model (BAAI/bge-reranker-base) on {self.device}...")
-        self.reranker = CrossEncoder('BAAI/bge-reranker-base', device=self.device)
+        use_remote = os.getenv("USE_REMOTE_EMBEDDINGS", "False").lower() in ("true", "1", "yes")
+        if use_remote:
+            logger.info("Using remote reranker. Local CrossEncoder will not be loaded.")
+            self.reranker = None
+        else:
+            logger.info(f"Loading Cross-Encoder model (BAAI/bge-reranker-base) on {self.device}...")
+            self.reranker = CrossEncoder('BAAI/bge-reranker-base', device=self.device)
 
     def _get_initial_candidates(self, chunk: Document, top_k: int = 35) -> List[Document]:
         """
@@ -59,33 +66,59 @@ class CandidateRetriever:
         logger.info(f"Starting retrieval and reranking for {len(report_chunks)} chunks...")
         
         all_initial_candidates = []
-        all_pairs = []
         
         for chunk in report_chunks:
-            chunk_text = chunk.page_content
             candidates = self._get_initial_candidates(chunk, top_k=15)
             all_initial_candidates.append((chunk, candidates))
-            for doc in candidates:
-                all_pairs.append([chunk_text, doc.page_content])
-                
-        logger.info(f"Reranking {len(all_pairs)} pairs in batch mode...")
-        scores = self.reranker.predict(all_pairs, batch_size=32, activation_fn=torch.nn.Sigmoid()) if all_pairs else []
-        
+            
+        use_remote = os.getenv("USE_REMOTE_EMBEDDINGS", "False").lower() in ("true", "1", "yes")
+        reranker_url = os.getenv("RERANKER_URL", "http://10.0.152.198:8005/v1/rerank")
+        reranker_model = os.getenv("RERANKER_MODEL_NAME", "jina-reranker-v2-base-multilingual")
+
         chunk_results = []
-        score_idx = 0
         for chunk, candidates in all_initial_candidates:
             valid_candidates = []
-            for doc in candidates:
-                score = float(scores[score_idx])
-                score_idx += 1
-                if score >= threshold:
-                    valid_candidates.append({
-                        "technique_id": doc.metadata.get("technique_id", "Unknown"),
-                        "name": doc.metadata.get("name", "Unknown"),
-                        "tactics": [t.strip() for t in doc.metadata.get("tactics", "").split(",") if t.strip()],
-                        "description": doc.metadata.get("full_description", ""),
-                        "score": round(score, 4)
-                    })
+            if use_remote:
+                # Petición a la API remota (estilo OpenAI/TEI)
+                docs_text = [doc.page_content for doc in candidates]
+                payload = {
+                    "model": reranker_model,
+                    "query": chunk.page_content,
+                    "documents": docs_text
+                }
+                try:
+                    response = requests.post(reranker_url, json=payload, headers={"Authorization": "Bearer EMPTY"})
+                    if response.status_code == 200:
+                        res_data = response.json()
+                        # Jina/TEI suele devolver results: [{"index": X, "relevance_score": Y}]
+                        for item in res_data.get("results", []):
+                            idx = item["index"]
+                            score = float(item["relevance_score"])
+                            if score >= threshold:
+                                doc = candidates[idx]
+                                valid_candidates.append({
+                                    "technique_id": doc.metadata.get("technique_id", "Unknown"),
+                                    "name": doc.metadata.get("name", "Unknown"),
+                                    "tactics": [t.strip() for t in doc.metadata.get("tactics", "").split(",") if t.strip()],
+                                    "description": doc.metadata.get("full_description", ""),
+                                    "score": round(score, 4)
+                                })
+                except Exception as e:
+                    logger.error(f"Error calling remote reranker: {e}")
+            else:
+                # Fallback Local original
+                pairs = [[chunk.page_content, doc.page_content] for doc in candidates]
+                if pairs:
+                    scores = self.reranker.predict(pairs, batch_size=32, activation_fn=torch.nn.Sigmoid())
+                    for doc, score in zip(candidates, scores):
+                        if score >= threshold:
+                            valid_candidates.append({
+                                "technique_id": doc.metadata.get("technique_id", "Unknown"),
+                                "name": doc.metadata.get("name", "Unknown"),
+                                "tactics": [t.strip() for t in doc.metadata.get("tactics", "").split(",") if t.strip()],
+                                "description": doc.metadata.get("full_description", ""),
+                                "score": round(float(score), 4)
+                            })
             
             if valid_candidates:
                 valid_candidates.sort(key=lambda x: x["score"], reverse=True)

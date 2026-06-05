@@ -30,7 +30,8 @@ def get_retriever() -> CandidateRetriever:
         client.get_collections()
         
         # Initialize Embeddings
-        embeddings = HuggingFaceEmbeddings(model_name="BAAI/bge-m3")
+        from src.core.embedding_factory import get_embeddings
+        embeddings = get_embeddings()
         sparse_embeddings = FastEmbedSparse(model_name="Qdrant/bm25")
         
         # Create LangChain VectorStore
@@ -140,10 +141,36 @@ def mitre_oracle(query: str) -> str:
             return "No matching MITRE techniques found."
             
         # 2. Rerank
-        pairs = [[query, doc.page_content] for doc in candidates]
-        scores = retriever.reranker.predict(pairs, batch_size=32, activation_fn=torch.nn.Sigmoid()) if pairs else []
+        import os
+        import requests
+        use_remote = os.getenv("USE_REMOTE_EMBEDDINGS", "False").lower() in ("true", "1", "yes")
+        reranker_url = os.getenv("RERANKER_URL", "http://10.0.152.198:8005/v1/rerank")
+        reranker_model = os.getenv("RERANKER_MODEL_NAME", "jina-reranker-v2-base-multilingual")
         
-        # 3. Filter (Threshold = 0.20)
+        scores = []
+        if use_remote and candidates:
+            docs_text = [doc.page_content for doc in candidates]
+            payload = {
+                "model": reranker_model,
+                "query": query,
+                "documents": docs_text
+            }
+            try:
+                response = requests.post(reranker_url, json=payload, headers={"Authorization": "Bearer EMPTY"})
+                if response.status_code == 200:
+                    res_data = response.json()
+                    scores = [0.0] * len(candidates)
+                    for item in res_data.get("results", []):
+                        idx = item["index"]
+                        scores[idx] = float(item["relevance_score"])
+            except Exception as e:
+                print(f"Error calling remote reranker: {e}")
+                scores = [0.0] * len(candidates)
+        else:
+            pairs = [[query, doc.page_content] for doc in candidates]
+            scores = retriever.reranker.predict(pairs, batch_size=32, activation_fn=torch.nn.Sigmoid()) if pairs else []
+        
+        # 3. Filter (Threshold = 0.40)
         results = []
         for doc, score in zip(candidates, scores):
             if float(score) >= 0.40:

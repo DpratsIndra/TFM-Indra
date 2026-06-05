@@ -98,7 +98,8 @@ def run_cti_extraction(pdf_path: str) -> str:
             logger.info("[INFO] Setup: MITRE ATT&CK collection built successfully.")
             client = QdrantClient(url=qdrant_url)
             
-        embeddings = HuggingFaceEmbeddings(model_name="BAAI/bge-m3")
+        from src.core.embedding_factory import get_embeddings
+        embeddings = get_embeddings()
         sparse_embeddings = FastEmbedSparse(model_name="Qdrant/bm25")
         vector_store = QdrantVectorStore(
             client=client,
