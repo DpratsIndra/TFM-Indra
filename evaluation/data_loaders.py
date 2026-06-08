@@ -60,69 +60,137 @@ class TramDataLoader(BaseDataLoader):
 class CtiHalDataLoader(BaseDataLoader):
     """
     Carga el dataset CTI-HAL.
-    Empareja reportes PDF CRUDOS (carpeta 'reports') con sus anotaciones Markdown (.md)
-    de la carpeta 'annotations' (Ground Truth).
+    Lee el archivo dataset_mapping.csv que mapea PDFs con etiquetas.
     """
     def __init__(self, base_path: str = "data/eval_datasets/ctihal"):
         self.base_path = base_path
-        self.reports_dir = os.path.join(base_path, "reports")
-        self.annotations_dir = os.path.join(base_path, "annotations")
+        self.csv_path = os.path.join(base_path, "dataset_mapping.csv")
         
     def load(self, file_path: str = None) -> pd.DataFrame:
+        # Generate CSV if it doesn't exist
+        if not os.path.exists(self.csv_path):
+            print("[*] dataset_mapping.csv not found. Generating it now...")
+            import subprocess
+            import sys
+            script_path = os.path.join(os.path.dirname(__file__), "generate_ctihal_csv.py")
+            subprocess.run([sys.executable, script_path], check=True)
+            
+        df = pd.read_csv(self.csv_path)
+        
+        # Filter out PDFs without annotations
+        df = df.dropna(subset=['md_path', 'true_labels'])
+        
+        records = []
+        for _, row in df.iterrows():
+            labels_str = str(row['true_labels']).strip()
+            if not labels_str or labels_str == 'nan':
+                continue
+            
+            true_labels = [l.strip() for l in labels_str.split(',') if l.strip()]
+            records.append({
+                "source_file": row['pdf_path'],
+                "true_labels": true_labels
+            })
+            
+            
+        return pd.DataFrame(records)
+
+class AptReportDataLoader(BaseDataLoader):
+    """
+    Carga el dataset APT_REPORT.
+    Usa el nombre de la carpeta (nombre del grupo APT) para buscar en la base de datos STIX
+    de MITRE ATT&CK todas las técnicas históricamente atribuidas a ese grupo.
+    Estas técnicas se usarán como las 'true_labels' para los reportes de esa carpeta.
+    """
+    def __init__(self, base_path: str = "data/eval_datasets/APT_REPORT"):
+        self.base_path = base_path
+        self.mapping_file = os.path.join(base_path, "mitre_group_mapping.json")
+        
+    def load(self, file_path: str = None) -> pd.DataFrame:
+        if not os.path.exists(self.mapping_file):
+            print(f"[*] Mapping file not found at {self.mapping_file}. Generating it now...")
+            import subprocess
+            import sys
+            script_path = os.path.join(os.path.dirname(__file__), "generate_apt_mapping.py")
+            subprocess.run([sys.executable, script_path], check=True)
+            
+        with open(self.mapping_file, "r") as f:
+            group_mapping = json.load(f)
+            
         records = []
         
-        # Buscar recursivamente todos los PDFs crudos
-        pdf_pattern = os.path.join(self.reports_dir, "**", "*.pdf")
-        pdf_files = glob.glob(pdf_pattern, recursive=True)
+        # Recorrer todas las carpetas dentro de APT_REPORT
+        for item in os.listdir(self.base_path):
+            dir_path = os.path.join(self.base_path, item)
+            if not os.path.isdir(dir_path) or item.startswith("."):
+                continue
+                
+            # Normalizar el nombre de la carpeta para buscar el alias
+            alias = item.lower().strip()
+            
+            # Buscar coincidencia exacta o parcial estricta
+            matched_techniques = []
+            if alias in group_mapping:
+                matched_techniques = group_mapping[alias]
+            else:
+                # Intento de matching estricto ignorando guiones, espacios y mayúsculas
+                clean_alias = alias.replace("-", "").replace(" ", "").replace("_", "")
+                for map_alias, techs in group_mapping.items():
+                    clean_map_alias = map_alias.replace("-", "").replace(" ", "").replace("_", "")
+                    if clean_alias == clean_map_alias:
+                        matched_techniques = techs
+                        break
+                        
+            if not matched_techniques:
+                continue # Saltamos las carpetas de las que no tenemos técnicas en MITRE
+                
+            # Encontrar todos los PDFs en esta carpeta de forma robusta
+            pdf_files = []
+            for root_dir, _, files in os.walk(dir_path):
+                for f in files:
+                    if f.lower().endswith(".pdf"):
+                        pdf_files.append(os.path.join(root_dir, f))
+                        
+            for pdf in pdf_files:
+                records.append({
+                    "source_file": pdf,
+                    "true_labels": matched_techniques,
+                    "group_name": item
+                })
+                
+        df = pd.DataFrame(records)
+        print(f"[*] AptReportDataLoader loaded {len(df)} PDFs with MITRE Group mappings.")
+        return df
+
+class CtibenchDataLoader(BaseDataLoader):
+    """
+    Carga el dataset CTIBench (cti-ate.tsv) convertido a CSV.
+    A diferencia de CTI-HAL, este dataset contiene descripciones cortas (text)
+    y no ficheros PDF completos.
+    """
+    def __init__(self, base_path: str = "data/eval_datasets/ctibench"):
+        self.base_path = base_path
+        self.csv_path = os.path.join(base_path, "ctibench_mapping.csv")
         
-        for pdf_path in pdf_files:
-            rel_path = os.path.relpath(pdf_path, self.reports_dir)
-            parts = rel_path.split(os.sep)
+    def load(self, file_path: str = None) -> pd.DataFrame:
+        if not os.path.exists(self.csv_path):
+            print("[*] ctibench_mapping.csv not found. Generating it now...")
+            import subprocess
+            import sys
+            script_path = os.path.join(os.path.dirname(__file__), "generate_ctibench_csv.py")
+            subprocess.run([sys.executable, script_path], check=True)
             
-            if len(parts) < 2:
+        df = pd.read_csv(self.csv_path)
+        records = []
+        for _, row in df.iterrows():
+            labels_str = str(row['true_labels']).strip()
+            if not labels_str or labels_str == 'nan':
                 continue
                 
-            apt_name = parts[0]
-            pdf_filename = parts[1]
+            true_labels = [l.strip() for l in labels_str.split(',') if l.strip()]
+            records.append({
+                "text": row['text'],
+                "true_labels": true_labels
+            })
             
-            # Buscar el MD correspondiente en "annotator L"
-            md_dir = os.path.join(self.annotations_dir, apt_name, "annotator L")
-            if not os.path.exists(md_dir):
-                continue
-                
-            md_files = glob.glob(os.path.join(md_dir, "*.md"))
-            if not md_files:
-                continue
-                
-            # Extraer nombres base para hacer matching difuso (ignorando prefijos como apt29-)
-            pdf_base = os.path.splitext(pdf_filename)[0].lower()
-            md_bases = [os.path.splitext(os.path.basename(m))[0].lower() for m in md_files]
-            clean_md_bases = [m.replace(f"{apt_name.lower()}-", "") for m in md_bases]
-            
-            # Match difuso
-            matches = difflib.get_close_matches(pdf_base, clean_md_bases, n=1, cutoff=0.3)
-            if not matches:
-                matches = difflib.get_close_matches(pdf_base, md_bases, n=1, cutoff=0.3)
-                
-            if matches:
-                best_match = matches[0]
-                match_idx = clean_md_bases.index(best_match) if best_match in clean_md_bases else md_bases.index(best_match)
-                matched_md_path = md_files[match_idx]
-                
-                # Extraer las etiquetas verdaderas (MITRE IDs)
-                try:
-                    with open(matched_md_path, 'r', encoding='utf-8') as f:
-                        content = f.read()
-                    
-                    pattern = r'\bT\d{4}(?:\.\d{3})?\b'
-                    true_labels = list(set(re.findall(pattern, content)))
-                    
-                    if true_labels:
-                        records.append({
-                            "source_file": pdf_path,
-                            "true_labels": true_labels
-                        })
-                except Exception as e:
-                    print(f"[!] Error procesando MD {matched_md_path}: {e}")
-                    
         return pd.DataFrame(records)

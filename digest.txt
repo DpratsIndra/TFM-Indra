@@ -8,14 +8,18 @@ Directory structure:
     │   └── cti_inspector.py
     ├── evaluation/
     │   ├── data_loaders.py
+    │   ├── generate_ctihal_csv.py
     │   ├── metrics_calculator.py
-    │   └── run_eval.py
+    │   ├── run_eval.py
+    │   └── run_eval_ctihal.py
     ├── infrastructure/
     │   └── docker-compose.yml
     ├── src/
     │   ├── debug_ngrok.py
     │   ├── core/
+    │   │   ├── embedding_factory.py
     │   │   ├── ioc_masker.py
+    │   │   ├── llm_factory.py
     │   │   └── schemas.py
     │   ├── langchain_pipeline/
     │   │   ├── main_pipeline.py
@@ -97,6 +101,7 @@ langchain-core>=0.2.0
 langchain-community
 langchain-ollama
 langchain-google-genai
+langchain-openai
 langchain-qdrant
 langchain-huggingface
 langchain-text-splitters
@@ -117,7 +122,7 @@ torch
 
 # UI Dashboard
 streamlit
-unstructured[pdf]
+docling
 python-dotenv
 pandas
 scikit-learn
@@ -168,7 +173,7 @@ if uploaded_file is not None:
     st.success(f"File uploaded successfully: {uploaded_file.name}")
 
     with st.spinner("Processing and splitting the report (Phase 1)..."):
-        ingestor = ReportIngestor(chunk_size=1500, chunk_overlap=300)
+        ingestor = ReportIngestor(chunk_size=3500, chunk_overlap=500)
         masker = IoCMasker()
         
         try:
@@ -235,6 +240,10 @@ if uploaded_file is not None:
 ================================================
 FILE: evaluation/data_loaders.py
 ================================================
+import os
+import glob
+import re
+import difflib
 import json
 import pandas as pd
 from typing import List
@@ -289,6 +298,156 @@ class TramDataLoader(BaseDataLoader):
         if not df.empty and 'text' in df.columns:
             df = df.dropna(subset=['text'])
         return df
+
+class CtiHalDataLoader(BaseDataLoader):
+    """
+    Carga el dataset CTI-HAL.
+    Lee el archivo dataset_mapping.csv que mapea PDFs con etiquetas.
+    """
+    def __init__(self, base_path: str = "data/eval_datasets/ctihal"):
+        self.base_path = base_path
+        self.csv_path = os.path.join(base_path, "dataset_mapping.csv")
+        
+    def load(self, file_path: str = None) -> pd.DataFrame:
+        # Generate CSV if it doesn't exist
+        if not os.path.exists(self.csv_path):
+            print("[*] dataset_mapping.csv not found. Generating it now...")
+            import subprocess
+            import sys
+            script_path = os.path.join(os.path.dirname(__file__), "generate_ctihal_csv.py")
+            subprocess.run([sys.executable, script_path], check=True)
+            
+        df = pd.read_csv(self.csv_path)
+        
+        # Filter out PDFs without annotations
+        df = df.dropna(subset=['md_path', 'true_labels'])
+        
+        records = []
+        for _, row in df.iterrows():
+            labels_str = str(row['true_labels']).strip()
+            if not labels_str or labels_str == 'nan':
+                continue
+            
+            true_labels = [l.strip() for l in labels_str.split(',') if l.strip()]
+            records.append({
+                "source_file": row['pdf_path'],
+                "true_labels": true_labels
+            })
+            
+        return pd.DataFrame(records)
+
+
+
+================================================
+FILE: evaluation/generate_ctihal_csv.py
+================================================
+import os
+import glob
+import re
+import difflib
+import pandas as pd
+
+def generate_mapping_csv(base_path: str = "data/eval_datasets/ctihal"):
+    reports_dir = os.path.join(base_path, "reports")
+    annotations_dir = os.path.join(base_path, "annotations")
+    output_csv = os.path.join(base_path, "dataset_mapping.csv")
+    
+    # Manual overrides para los PDFs que no encajan por nombre
+    manual_overrides = {
+        "New Targeted Attack in the Middle East by APT34": "oilrig-mandiant.md",
+        "Mahalo FIN7": "fin7-fireeye-1.md"
+    }
+    
+    records = []
+    
+    # Buscar recursivamente todos los PDFs crudos
+    pdf_pattern = os.path.join(reports_dir, "**", "*.pdf")
+    pdf_files = glob.glob(pdf_pattern, recursive=True)
+    
+    for pdf_path in pdf_files:
+        rel_path = os.path.relpath(pdf_path, reports_dir)
+        parts = rel_path.split(os.sep)
+        
+        if len(parts) < 2:
+            continue
+            
+        apt_name = parts[0]
+        pdf_filename = parts[1]
+        
+        # Buscar el MD correspondiente en "annotator L"
+        md_dir = os.path.join(annotations_dir, apt_name, "annotator L")
+        if not os.path.exists(md_dir):
+            # Fallback al directorio raíz de la APT si no hay "annotator L"
+            md_dir = os.path.join(annotations_dir, apt_name)
+            if not os.path.exists(md_dir):
+                records.append({"pdf_path": pdf_path, "md_path": None, "apt_name": apt_name, "true_labels": ""})
+                continue
+            
+        md_files = glob.glob(os.path.join(md_dir, "*.md"))
+        if not md_files:
+            records.append({"pdf_path": pdf_path, "md_path": None, "apt_name": apt_name, "true_labels": ""})
+            continue
+            
+        # Extraer nombres base para hacer matching
+        pdf_base = os.path.splitext(pdf_filename)[0].lower().replace(" ", "").replace("_", "")
+        md_bases = [os.path.splitext(os.path.basename(m))[0].lower() for m in md_files]
+        clean_md_bases = [m.replace(f"{apt_name.lower()}-", "").replace("-", "") for m in md_bases]
+        
+        matched_md_path = None
+        
+        # Estrategia 0: Manual Overrides
+        for override_key, override_md in manual_overrides.items():
+            if override_key.lower().replace(" ", "") in pdf_base:
+                override_full_path = os.path.join(md_dir, override_md)
+                if os.path.exists(override_full_path):
+                    matched_md_path = override_full_path
+                break
+                
+        # Estrategia 1: Substring Matching (muy efectivo aquí)
+        if not matched_md_path:
+            sorted_indices = sorted(range(len(clean_md_bases)), key=lambda k: len(clean_md_bases[k]), reverse=True)
+            for i in sorted_indices:
+                clean_base = clean_md_bases[i]
+                if clean_base and clean_base in pdf_base:
+                    matched_md_path = md_files[i]
+                    break
+                
+        # Estrategia 2: Fallback a difflib difuso relajado si no hay match
+        if not matched_md_path:
+            matches = difflib.get_close_matches(pdf_base, clean_md_bases, n=1, cutoff=0.15)
+            if matches:
+                matched_md_path = md_files[clean_md_bases.index(matches[0])]
+
+        if matched_md_path:
+            # Extraer las etiquetas verdaderas (MITRE IDs)
+            try:
+                with open(matched_md_path, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                
+                pattern = r'\bT\d{4}(?:\.\d{3})?\b'
+                true_labels = list(set(re.findall(pattern, content)))
+                
+                records.append({
+                    "pdf_path": pdf_path,
+                    "md_path": matched_md_path,
+                    "apt_name": apt_name,
+                    "true_labels": ",".join(true_labels)
+                })
+            except Exception as e:
+                print(f"[!] Error procesando MD {matched_md_path}: {e}")
+                records.append({"pdf_path": pdf_path, "md_path": matched_md_path, "apt_name": apt_name, "true_labels": ""})
+        else:
+            records.append({"pdf_path": pdf_path, "md_path": None, "apt_name": apt_name, "true_labels": ""})
+
+    df = pd.DataFrame(records)
+    df.to_csv(output_csv, index=False)
+    print(f"[+] CTIHAL dataset mapping generated successfully at {output_csv}")
+    print(f"    Total PDFs processed: {len(pdf_files)}")
+    print(f"    Successful MD matches: {len(df[df['md_path'].notnull()])}")
+    return output_csv
+
+if __name__ == "__main__":
+    generate_mapping_csv()
 
 
 
@@ -370,12 +529,12 @@ import time
 from datetime import datetime
 from tqdm import tqdm
 import contextlib
+import pandas as pd
 
 # Add project root to sys.path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from langchain_core.documents import Document
-from langchain_google_genai import ChatGoogleGenerativeAI
 from qdrant_client import QdrantClient
 from langchain_qdrant import QdrantVectorStore, FastEmbedSparse, RetrievalMode
 from langchain_huggingface import HuggingFaceEmbeddings
@@ -401,10 +560,31 @@ def get_langchain_engine():
         retrieval_mode=RetrievalMode.HYBRID
     )
     retriever = CandidateRetriever(vector_store=vector_store)
-    llm = ChatGoogleGenerativeAI(model=os.getenv("GEMINI_MODEL", "gemini-flash-lite-latest"), temperature=0.0)
+    from src.core.llm_factory import get_llm
+    llm = get_llm(temperature=0.0)
     analyzer = TTPAnalyzer(llm=llm)
     
     return retriever, analyzer
+
+def get_academic_sample(df: pd.DataFrame, total_size: int = 1000) -> pd.DataFrame:
+    """
+    Objetivo: Balancear el dataset TRAM artificialmente. Como el 90% de las oraciones en 
+    reportes CTI no contienen TTPs, si evaluamos todo en crudo el accuracy sería engañoso.
+    Forzamos un split ~50/50 entre oraciones positivas y negativas para obtener 
+    métricas de F1-Score realistas y comparar con papers académicos.
+    """
+    df_pos = df[df['true_labels'].map(len) > 0]
+    df_neg = df[df['true_labels'].map(len) == 0]
+    
+    half = total_size // 2
+    
+    # Sample positives and negatives safely
+    sample_pos = df_pos.sample(n=min(half, len(df_pos)), random_state=42)
+    sample_neg = df_neg.sample(n=min(total_size - len(sample_pos), len(df_neg)), random_state=42)
+    
+    # Combine and shuffle
+    df_sampled = pd.concat([sample_pos, sample_neg]).sample(frac=1, random_state=42).reset_index(drop=True)
+    return df_sampled
 
 def run_tram_evaluation(file_path: str, sample_size: int = None, pipeline_type: str = "langchain"):
     print(f"\n[*] Loading TRAM dataset from: {file_path}")
@@ -415,14 +595,22 @@ def run_tram_evaluation(file_path: str, sample_size: int = None, pipeline_type: 
         print("[!] Error: DataFrame is empty. Check the JSON structure.")
         return
         
-    if sample_size and sample_size < len(df):
-        print(f"[*] Subsampling {sample_size} random records for testing...")
+    # Academic Sampling Logic
+    if sample_size and sample_size < 100:
+        print(f"[*] Subsampling {sample_size} random records for quick testing...")
         df = df.sample(n=sample_size, random_state=42).reset_index(drop=True)
+    else:
+        # Default academic evaluation size
+        target_size = sample_size if sample_size else 1000
+        print(f"[*] Generating Academic Stratified Sample (N={target_size})...")
+        df = get_academic_sample(df, total_size=target_size)
         
     total_records = len(df)
     print(f"[*] Dataset loaded: {total_records} sentences. Pipeline: {pipeline_type.upper()}\n")
     
     predicted_labels = []
+    detailed_results = []
+    hierarchy_stats = {"total_exact_matches": 0, "total_more_detailed": 0, "total_more_general": 0}
     
     if pipeline_type == "langchain":
         retriever, analyzer = get_langchain_engine()
@@ -438,16 +626,15 @@ def run_tram_evaluation(file_path: str, sample_size: int = None, pipeline_type: 
         
         if pipeline_type == "langchain":
             doc = Document(page_content=text, metadata={"chunk_index": idx, "page_number": 1})
-            candidates = retriever.get_filtered_mitre_candidates([doc], threshold=0.4)
+            candidates = retriever.get_filtered_mitre_candidates([doc], threshold=0.8)
             if candidates:
-                detections = analyzer.analyze_candidates(candidates)
+                detections, artificial_delay = analyzer.analyze_candidates(candidates)
                 predicted_ids = [d.technique_id for d in detections if d.is_present]
                 
         elif pipeline_type == "langgraph":
             sanitized_chunks = [{"text": text, "metadata": {"chunk_index": idx}}]
             global_context = "This is an isolated sentence from a CTI report."
             
-            # Suppress LangGraph internal prints to keep the terminal clean
             with open(os.devnull, 'w') as devnull:
                 with contextlib.redirect_stdout(devnull):
                     try:
@@ -461,8 +648,69 @@ def run_tram_evaluation(file_path: str, sample_size: int = None, pipeline_type: 
                     except Exception as e:
                         predicted_ids = []
 
-        predicted_ids = list(set(predicted_ids))
+        # Serializar las detecciones de LangChain (Pydantic objects a dict) si es necesario
+        extracted_payload = []
+        if pipeline_type == "langchain" and 'candidates' in locals() and candidates:
+            if 'detections' in locals():
+                extracted_payload = [d.model_dump() for d in detections if d.is_present]
+        elif pipeline_type == "langgraph" and 'extracted' in locals():
+            extracted_payload = extracted
+            
+        # Normalización y Trazabilidad Jerárquica
+        normalized_preds = []
+        traceability_summary = {"exact": 0, "more_detailed": 0, "more_general": 0}
+        
+        for result_ttp in extracted_payload:
+            pred_id = result_ttp.get("technique_id")
+            if not pred_id: continue
+                
+            matched_true = None
+            match_type = "false_positive"
+            
+            for t in true_lbls:
+                if pred_id == t:
+                    matched_true = t
+                    match_type = "exact"
+                    break
+                elif "." not in t and pred_id.startswith(t + "."):
+                    matched_true = t
+                    match_type = "more_detailed"
+                    break
+                elif "." not in pred_id and t.startswith(pred_id + "."):
+                    matched_true = t
+                    match_type = "more_general"
+                    break
+                    
+            result_ttp["hierarchy_match"] = match_type
+            if matched_true:
+                result_ttp["matched_true_label"] = matched_true
+                normalized_preds.append(matched_true)
+                traceability_summary[match_type] += 1
+                if match_type == "exact": hierarchy_stats["total_exact_matches"] += 1
+                elif match_type == "more_detailed": hierarchy_stats["total_more_detailed"] += 1
+                elif match_type == "more_general": hierarchy_stats["total_more_general"] += 1
+            else:
+                normalized_preds.append(pred_id)
+
+        predicted_ids = list(set(normalized_preds))
         predicted_labels.append(predicted_ids)
+        
+        tp = list(set(true_lbls) & set(predicted_ids))
+        fp = list(set(predicted_ids) - set(true_lbls))
+        fn = list(set(true_lbls) - set(predicted_ids))
+
+        detailed_results.append({
+            "sentence_id": idx,
+            "source_file": f"tram_sentence_{idx}", # Para estandarizar con CTIHAL
+            "text": text,
+            "true_labels": true_lbls,
+            "predicted_labels_raw": [r.get("technique_id") for r in extracted_payload if "technique_id" in r],
+            "predicted_labels_normalized": predicted_ids,
+            "metrics": {"TP": len(tp), "FP": len(fp), "FN": len(fn)},
+            "traceability_summary": traceability_summary,
+            "timing_breakdown": {}, # TRAM eval evalúa sentencias puras en memoria
+            "extracted_ttps": extracted_payload
+        })
         
         # Live Terminal Logging
         match_status = "✅ MATCH" if set(true_lbls) == set(predicted_ids) else "⚠️ DIFF"
@@ -470,10 +718,7 @@ def run_tram_evaluation(file_path: str, sample_size: int = None, pipeline_type: 
         print(f"   True: {true_lbls}")
         print(f"   Pred: {predicted_ids}")
         
-        # Optimize sleep time based on pipeline profile
-        # LangGraph has natural latency due to multiple sequential agent calls, 
-        # so it requires less artificial sleep to respect the 15 RPM Free Tier limit.
-        time_to_sleep = 4.0 if pipeline_type == "langchain" else 2.0
+        time_to_sleep = 4.5 if pipeline_type == "langchain" else 2.0
         time.sleep(time_to_sleep)
         
     df['predicted_labels'] = predicted_labels
@@ -482,7 +727,32 @@ def run_tram_evaluation(file_path: str, sample_size: int = None, pipeline_type: 
     evaluator = Evaluator(df)
     results = evaluator.evaluate()
     
-    # Configuration tags for filename
+    # Estructura JSON estandarizada para TRAM (coincide con CTIHAL)
+    final_output = {
+        "total_execution_minutes": 0.0, # Aproximado o no calculado en memoria por sentencia
+        "global_metrics": results,
+        "hierarchy_analysis": hierarchy_stats,
+        "detailed_executions": detailed_results
+    }
+    
+    # ---------------------------------------------------------
+    # Extract DIFFs for Qualitative Error Analysis (TFM)
+    # ---------------------------------------------------------
+    diffs = []
+    for idx, row in df.iterrows():
+        true_set = set(row['true_labels'])
+        pred_set = set(row['predicted_labels'])
+        
+        if true_set != pred_set:
+            diffs.append({
+                "sentence_id": idx,
+                "text": row['text'],
+                "human_ground_truth": list(true_set),
+                "llm_prediction": list(pred_set),
+                "false_negatives_missed_by_llm": list(true_set - pred_set),
+                "false_positives_hallucinated_by_llm": list(pred_set - true_set)
+            })
+    
     use_vlm = os.getenv("USE_VLM_EXTRACTION", "False").lower() in ("true", "1", "yes")
     use_rep = os.getenv("USE_PROMPT_REPETITION", "False").lower() in ("true", "1", "yes")
     
@@ -490,12 +760,19 @@ def run_tram_evaluation(file_path: str, sample_size: int = None, pipeline_type: 
     tag_vlm = "vlm_on" if use_vlm else "vlm_off"
     tag_rep = "rep_on" if use_rep else "rep_off"
     
+    # Save Main Results
     output_filename = f"tram_eval_{pipeline_type}_{tag_vlm}_{tag_rep}_{timestamp}.json"
     output_path = os.path.join("data", "output", "evaluations", output_filename)
     
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     with open(output_path, "w", encoding="utf-8") as f:
-        json.dump(results, f, indent=4)
+        json.dump(final_output, f, indent=4)
+        
+    # Save DIFFs
+    diff_filename = f"diff_analysis_{pipeline_type}_{tag_vlm}_{tag_rep}_{timestamp}.json"
+    diff_path = os.path.join("data", "output", "evaluations", diff_filename)
+    with open(diff_path, "w", encoding="utf-8") as f:
+        json.dump(diffs, f, indent=4)
         
     print("\n" + "="*50)
     print(f"🎯 EVALUATION RESULTS (MICRO) - {pipeline_type.upper()}")
@@ -504,7 +781,8 @@ def run_tram_evaluation(file_path: str, sample_size: int = None, pipeline_type: 
     print(f"Recall:    {results['micro']['recall']}")
     print(f"F1-Score:  {results['micro']['f1']}")
     print(f"F0.5-Score:{results['micro']['f0.5']}")
-    print(f"\n[+] Full detailed report saved to: {output_path}")
+    print(f"\n[+] Full report saved to: {output_path}")
+    print(f"[+] Saved {len(diffs)} conflict cases for manual review in: {diff_path}")
 
 if __name__ == "__main__":
     dataset_path = "data/eval_datasets/tram2/multi_label.json"
@@ -515,7 +793,201 @@ if __name__ == "__main__":
         
     # Elige aquí qué pipeline evaluar: "langchain" o "langgraph"
     # Cambia el sample_size para pruebas rápidas
-    run_tram_evaluation(dataset_path, sample_size=10, pipeline_type="langchain")
+    run_tram_evaluation(dataset_path, sample_size=None, pipeline_type="langchain")
+
+
+
+================================================
+FILE: evaluation/run_eval_ctihal.py
+================================================
+import os
+import sys
+import json
+import time
+import argparse
+import contextlib
+from datetime import datetime
+from tqdm import tqdm
+
+# Add project root to sys.path
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
+from evaluation.data_loaders import CtiHalDataLoader
+from evaluation.metrics_calculator import Evaluator
+from src.langchain_pipeline.main_pipeline import run_cti_extraction
+from src.langgraph_agents.main_langgraph import run_langgraph_extraction
+from dotenv import load_dotenv
+
+# Cargar variables de entorno (USE_VLM_EXTRACTION, USE_PROMPT_REPETITION, etc.)
+load_dotenv(override=True)
+
+def run_evaluation():
+    """
+    Objetivo: Ejecutar una evaluación End-to-End (E2E) sobre el dataset CTI-HAL.
+    A diferencia de TRAM (que evalúa oraciones sueltas), este script procesa PDFs enteros,
+    lanzando el pipeline completo (ingesta, vector store, inferencia) y comparando
+    las técnicas extraídas contra los ficheros markdown (ground truth) reales.
+    """
+    parser = argparse.ArgumentParser(description="Run single-config E2E evaluation on CTI-HAL dataset")
+    parser.add_argument("--dataset_path", type=str, default="data/eval_datasets/ctihal", help="Path to CTI-HAL dataset")
+    parser.add_argument("--limit", type=int, default=None, help="Max number of PDFs to evaluate (for quick testing)")
+    parser.add_argument("--pipeline", type=str, choices=["langchain", "langgraph"], default="langchain", help="Which architecture to evaluate")
+    args = parser.parse_args()
+
+    # Leer configuración desde las variables de entorno
+    vlm_mode = os.getenv("USE_VLM_EXTRACTION", "False")
+    rep_mode = os.getenv("USE_PROMPT_REPETITION", "False")
+    pipeline = args.pipeline
+
+    print("\n" + "="*80)
+    print(f"🚀 INICIANDO EVALUACIÓN CTI-HAL")
+    print(f"   Pipeline:           {pipeline.upper()}")
+    print(f"   VLM Extraction:     {vlm_mode}")
+    print(f"   Prompt Repetition:  {rep_mode}")
+    print("="*80)
+
+    print(f"\n[*] Loading CTI-HAL dataset from: {args.dataset_path}")
+    loader = CtiHalDataLoader(base_path=args.dataset_path)
+    df = loader.load()
+    
+    if df.empty:
+        print("[!] Error: No PDFs/MDs matched. Check folder structure (ensure 'reports' and 'annotations/.../annotator L' exist).")
+        sys.exit(1)
+        
+    if args.limit:
+        print(f"[*] Subsampling {args.limit} random reports for testing...")
+        df = df.sample(n=args.limit, random_state=42).reset_index(drop=True)
+        
+    print(f"[*] Successfully paired {len(df)} PDF raw reports with Ground Truth.")
+    
+    predicted_labels = []
+    detailed_results = []
+    hierarchy_stats = {"total_exact_matches": 0, "total_more_detailed": 0, "total_more_general": 0}
+    
+    # Bucle de inferencia E2E
+    for idx, row in tqdm(df.iterrows(), total=len(df), desc=f"Eval: {pipeline}"):
+        pdf_path = row['source_file']
+        true_lbls = row['true_labels']
+        predicted_ids = []
+        pdf_name = os.path.basename(pdf_path)
+        
+        try:
+            # Silenciar prints internos de las tuberías para que no rompan la barra de progreso
+            with open(os.devnull, 'w') as devnull:
+                with contextlib.redirect_stdout(devnull), contextlib.redirect_stderr(devnull):
+                    if pipeline == "langchain":
+                        results_list, timing = run_cti_extraction(pdf_path)
+                    else:
+                        results_list, timing = run_langgraph_extraction(pdf_path)
+                        
+            # Normalización y Trazabilidad Jerárquica
+            normalized_preds = []
+            traceability_summary = {"exact": 0, "more_detailed": 0, "more_general": 0}
+            
+            for result_ttp in results_list:
+                pred_id = result_ttp.get("technique_id")
+                if not pred_id:
+                    continue
+                    
+                matched_true = None
+                match_type = "false_positive"
+                
+                for t in true_lbls:
+                    if pred_id == t:
+                        matched_true = t
+                        match_type = "exact"
+                        break
+                    elif "." not in t and pred_id.startswith(t + "."):
+                        matched_true = t
+                        match_type = "more_detailed"
+                        break
+                    elif "." not in pred_id and t.startswith(pred_id + "."):
+                        matched_true = t
+                        match_type = "more_general"
+                        break
+                        
+                result_ttp["hierarchy_match"] = match_type
+                if matched_true:
+                    result_ttp["matched_true_label"] = matched_true
+                    normalized_preds.append(matched_true)
+                    traceability_summary[match_type] += 1
+                    
+                    if match_type == "exact": hierarchy_stats["total_exact_matches"] += 1
+                    elif match_type == "more_detailed": hierarchy_stats["total_more_detailed"] += 1
+                    elif match_type == "more_general": hierarchy_stats["total_more_general"] += 1
+                else:
+                    normalized_preds.append(pred_id)
+            
+            predicted_ids = list(set(normalized_preds))
+            tp = list(set(true_lbls) & set(predicted_ids))
+            fp = list(set(predicted_ids) - set(true_lbls))
+            fn = list(set(true_lbls) - set(predicted_ids))
+            
+            detailed_results.append({
+                "source_file": pdf_path,
+                "true_labels": true_lbls,
+                "predicted_labels_raw": [r.get("technique_id") for r in results_list if "technique_id" in r],
+                "predicted_labels_normalized": predicted_ids,
+                "metrics": {"TP": len(tp), "FP": len(fp), "FN": len(fn)},
+                "traceability_summary": traceability_summary,
+                "timing_breakdown": timing,
+                "extracted_ttps": results_list
+            })
+            
+            tqdm.write(f" 📄 {pdf_name} -> TP: {len(tp)} | FP: {len(fp)} | FN: {len(fn)}")
+            
+        except Exception as e:
+            tqdm.write(f" [!] ERROR crítico en {pdf_name}: {e}")
+            predicted_ids = []
+            detailed_results.append({"source_file": pdf_path, "error": str(e)})
+        
+        predicted_labels.append(predicted_ids)
+        
+        # Cuidar el Rate Limit del Free Tier entre documentos pesados
+        time.sleep(10)
+        
+    # Evaluar y exportar
+    df['predicted_labels'] = predicted_labels
+    evaluator = Evaluator(df)
+    results = evaluator.evaluate()
+    
+    # Calcular tiempo total de esta config
+    total_seconds = sum(
+        sum(v for k, v in d.get("timing_breakdown", {}).items() if isinstance(v, (int, float))) 
+        for d in detailed_results if "timing_breakdown" in d
+    )
+    
+    # Estructura JSON estandarizada
+    final_output = {
+        "total_execution_minutes": round(total_seconds / 60.0, 2),
+        "global_metrics": results,
+        "hierarchy_analysis": hierarchy_stats,
+        "detailed_executions": detailed_results
+    }
+    
+    # Nombres de archivo dinámicos basados en la config actual
+    tag_vlm = "vlm_on" if str(vlm_mode).lower() in ["true", "1", "yes"] else "vlm_off"
+    tag_rep = "rep_on" if str(rep_mode).lower() in ["true", "1", "yes"] else "rep_off"
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M")
+    
+    output_filename = f"ctihal_eval_{pipeline}_{tag_vlm}_{tag_rep}_{timestamp}.json"
+    output_path = os.path.join("data", "output", "evaluations", output_filename)
+    
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    with open(output_path, "w", encoding="utf-8") as f:
+        json.dump(final_output, f, indent=4)
+        
+    print("\n" + "="*80)
+    print(f"🎯 RESULTADOS MICRO PARA {pipeline.upper()}")
+    print("="*80)
+    print(f"F0.5-Score: {results['micro']['f0.5']}")
+    print(f"F1-Score:   {results['micro']['f1']}")
+    print(f"Precision:  {results['micro']['precision']}")
+    print(f"Recall:     {results['micro']['recall']}")
+    print(f"\n💾 Resumen completo guardado en: {output_path}")
+
+if __name__ == "__main__":
+    run_evaluation()
 
 
 
@@ -630,6 +1102,32 @@ if __name__ == "__main__":
 
 
 ================================================
+FILE: src/core/embedding_factory.py
+================================================
+import os
+from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_openai import OpenAIEmbeddings
+
+def get_embeddings():
+    """
+    Factoría para seleccionar el modelo de Embeddings.
+    - REMOTE: Endpoint TEI en el servidor de inferencia (más rápido para batches grandes).
+    - LOCAL: Ejecuta bge-m3 en local mediante HuggingFace (suficiente para pruebas y poco consumo).
+    """
+    profile = os.getenv("EXECUTION_PROFILE", "LOCAL").upper()
+    
+    if profile == "REMOTE":
+        return OpenAIEmbeddings(
+            model=os.getenv("EMBEDDINGS_MODEL_NAME", "BAAI/bge-m3"),
+            base_url=os.getenv("EMBEDDINGS_BASE_URL", "http://10.0.152.198:8002/v1"),
+            api_key="EMPTY"
+        )
+    else:
+        return HuggingFaceEmbeddings(model_name="BAAI/bge-m3")
+
+
+
+================================================
 FILE: src/core/ioc_masker.py
 ================================================
 import re
@@ -734,6 +1232,40 @@ class IoCMasker:
 
 
 ================================================
+FILE: src/core/llm_factory.py
+================================================
+import os
+from langchain_core.language_models.chat_models import BaseChatModel
+
+def get_llm(temperature: float = 0.0) -> BaseChatModel:
+    """
+    Factoría centralizada para instanciar el LLM según el entorno de ejecución.
+    - REMOTE: Apunta al cluster de GPUs (vLLM) usando la interfaz de OpenAI.
+    - LOCAL: Usa la API de Google Gemini como modelo de desarrollo rápido.
+    """
+    profile = os.getenv("EXECUTION_PROFILE", "LOCAL").upper()
+    
+    if profile == "REMOTE":
+        from langchain_openai import ChatOpenAI
+        return ChatOpenAI(
+            model=os.getenv("VLLM_MODEL_NAME", "gpt-oss-20b"),
+            base_url=os.getenv("VLLM_BASE_URL", "http://10.0.152.198:8000/v1"),
+            api_key="EMPTY",
+            temperature=temperature,
+            max_retries=3
+        )
+    else:
+        from langchain_google_genai import ChatGoogleGenerativeAI
+        model_name = os.getenv("GEMINI_MODEL", "gemini-flash-lite-latest")
+        return ChatGoogleGenerativeAI(
+            model=model_name,
+            temperature=temperature,
+            max_retries=3
+        )
+
+
+
+================================================
 FILE: src/core/schemas.py
 ================================================
 from typing import List
@@ -780,6 +1312,18 @@ class TTPDetection(BaseModel):
     occurrences: List[Evidence] = Field(
         default_factory=list,
         description="A list of specific occurrences/evidence blocks where the technique was confirmed."
+    )
+
+class ChunkEvidence(BaseModel):
+    technique_id: str = Field(..., description="The MITRE ATT&CK technique ID (e.g. T1059)")
+    technique_name: str = Field(..., description="The name of the technique")
+    procedure: str = Field(..., description="Exact attacker action described in this chunk")
+    justification: str = Field(..., description="Why this chunk matches the technique")
+
+class ChunkExtraction(BaseModel):
+    extracted_ttps: List[ChunkEvidence] = Field(
+        default_factory=list, 
+        description="List of confirmed techniques in this chunk. Return an empty list if no candidate techniques are present."
     )
 
 
@@ -844,14 +1388,10 @@ logging.getLogger("httpx").setLevel(logging.CRITICAL)
 
 def run_cti_extraction(pdf_path: str) -> str:
     """
-    Orquesta el flujo completo de 4 Fases de LangChain para extraer 
-    las tácticas y técnicas de MITRE ATT&CK desde un reporte CTI.
-    
-    Args:
-        pdf_path (str): Ruta absoluta o relativa al reporte en formato PDF.
-        
-    Returns:
-        str: Cadena JSON formateada con las detecciones TTP confirmadas.
+    Objetivo: Ejecutar el flujo original y secuencial de LangChain (Fases 1 a 4).
+    A diferencia de LangGraph, aquí la inferencia (Fase 4) se hace chunk por chunk 
+    y se vuelca directamente en JSON, sin agentes de validación intermedios.
+    Se utiliza como baseline para comparar el rendimiento con LangGraph en las evaluaciones.
     """
     logger.info(f"[INFO] Starting CTI extraction for: {pdf_path}")
     
@@ -862,7 +1402,7 @@ def run_cti_extraction(pdf_path: str) -> str:
     t0 = time.time()
     
     use_vlm_env = os.getenv("USE_VLM_EXTRACTION", "False").lower() in ("true", "1", "yes")
-    ingestor = ReportIngestor(chunk_size=1500, chunk_overlap=300, use_vlm=use_vlm_env)
+    ingestor = ReportIngestor(chunk_size=3500, chunk_overlap=500, use_vlm=use_vlm_env)
     
     report_chunks = ingestor.process_report(pdf_path)
     p1_time = time.time() - t0
@@ -887,7 +1427,8 @@ def run_cti_extraction(pdf_path: str) -> str:
             logger.info("[INFO] Setup: MITRE ATT&CK collection built successfully.")
             client = QdrantClient(url=qdrant_url)
             
-        embeddings = HuggingFaceEmbeddings(model_name="BAAI/bge-m3")
+        from src.core.embedding_factory import get_embeddings
+        embeddings = get_embeddings()
         sparse_embeddings = FastEmbedSparse(model_name="Qdrant/bm25")
         vector_store = QdrantVectorStore(
             client=client,
@@ -911,7 +1452,7 @@ def run_cti_extraction(pdf_path: str) -> str:
     logger.info("[INFO] Phase 3: Retrieving and re-evaluating MITRE candidates...")
     retriever = CandidateRetriever(vector_store=vector_store)
     t1 = time.time()
-    filtered_candidates = retriever.get_filtered_mitre_candidates(report_chunks, threshold=0.4)
+    filtered_candidates = retriever.get_filtered_mitre_candidates(report_chunks, threshold=0.5)
     p3_time = time.time() - t1
     
     if not filtered_candidates:
@@ -928,49 +1469,14 @@ def run_cti_extraction(pdf_path: str) -> str:
     # ------------------------------------------------------------------
     logger.info("[INFO] Phase 4: Querying LLM for structured confirmation...")
     
-    llm_provider = os.getenv("LLM_PROVIDER", "ollama").lower()
-    
-    if llm_provider == "gemini":
-        logger.info("[INFO] Phase 4: Configuring Google Gemini for inference...")
-        from langchain_google_genai import ChatGoogleGenerativeAI
-        gemini_model = os.getenv("GEMINI_MODEL", "gemini-flash-lite-latest")
-        
-        if not os.getenv("GOOGLE_API_KEY") or os.getenv("GOOGLE_API_KEY") == "your_api_key_here":
-            logger.error("[ERROR] Phase 4: Missing GOOGLE_API_KEY in the environment for Gemini.")
-            timing_metrics = {
-                "phase1_ingestion_seconds": round(p1_time, 2),
-                "phase3_retrieval_seconds": round(p3_time, 2),
-                "phase4_inference_seconds": 0.0
-            }
-            return [{"error": "Missing GOOGLE_API_KEY in .env"}], timing_metrics
-            
-        llm = ChatGoogleGenerativeAI(model=gemini_model, temperature=0.0)
-    else:
-        logger.info("[INFO] Phase 4: Configuring local Ollama for inference...")
-        model_name = os.getenv("LLM_MODEL", "llama3.1:8b")
-        base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-        
-        from langchain_ollama import ChatOllama
-        llm = ChatOllama(model=model_name, base_url=base_url, temperature=0.0)
-        
-        try:
-            logger.info(f"[INFO] Phase 4: Checking availability of model {model_name}...")
-            check_result = subprocess.run(["ollama", "show", model_name], capture_output=True)
-            
-            if check_result.returncode != 0:
-                logger.info(f"[INFO] Phase 4: Model {model_name} is not installed. Downloading...")
-                subprocess.run(["ollama", "pull", model_name], check=True)
-                logger.info(f"[INFO] Phase 4: Model {model_name} downloaded and ready to use.")
-            else:
-                logger.info(f"[INFO] Phase 4: Model {model_name} is already available in the system.")
-                
-        except Exception as e:
-            logger.warning(f"[WARNING] Phase 4: Could not automatically verify or download the model via CLI. Error: {e}")
+    logger.info("[INFO] Phase 4: Configuring LLM for inference using llm_factory...")
+    from src.core.llm_factory import get_llm
+    llm = get_llm(temperature=0.0)
             
     analyzer = TTPAnalyzer(llm=llm)
     t2 = time.time()
-    confirmed_ttps = analyzer.analyze_candidates(filtered_candidates)
-    p4_time = time.time() - t2
+    confirmed_ttps, artificial_delay = analyzer.analyze_candidates(filtered_candidates)
+    p4_time = (time.time() - t2) - artificial_delay
     
     # ------------------------------------------------------------------
     # EXTRACCIÓN DE RESULTADOS
@@ -1046,7 +1552,7 @@ import fitz  # PyMuPDF
 import base64
 from typing import List
 
-from langchain_community.document_loaders import UnstructuredPDFLoader
+from docling.document_converter import DocumentConverter
 from langchain_core.documents import Document
 from langchain_core.messages import HumanMessage
 from langchain_google_genai import ChatGoogleGenerativeAI
@@ -1057,12 +1563,15 @@ from src.core.ioc_masker import IoCMasker
 
 class ReportIngestor:
     """
-    Handles Phase 1 of the LangChain pipeline: Ingestion.
-    Responsible for loading PDF reports, filtering noise (headers, footers, boilerplate),
-    reconstructing structural Markdown, masking IoCs, and chunking semantically.
+    Fase 1: Ingesta y Particionado Semántico.
+    Objetivo: Transformar un PDF crudo en fragmentos de texto listos para el LLM.
+    - Modo Normal (Docling): Usa extracción tradicional para sacar texto y tablas.
+    - Modo VLM (Gemini): Convierte las páginas a imagen y le pide al LLM multimodal que transcriba
+      el texto. Muy útil para no perder info vital oculta en pantallazos negros de terminales.
+    Al final, ofusca los IoCs (IPs, hashes) para evitar sesgos y trocea el texto.
     """
 
-    def __init__(self, chunk_size: int = 750, chunk_overlap: int = 150, use_vlm: bool = False) -> None:
+    def __init__(self, chunk_size: int = 3500, chunk_overlap: int = 500, use_vlm: bool = False) -> None:
         """
         Initializes the ReportIngestor with chunking parameters, IoC masker, and extraction mode.
         
@@ -1108,7 +1617,7 @@ class ReportIngestor:
             
         logger.info(f"Loading PDF '{file_path}' using Multimodal VLM extraction (Gemini Flash)...")
         
-        gemini_model = os.getenv("GEMINI_MODEL", "gemini-1.5-flash") # 1.5-flash es multimodal por defecto
+        gemini_model = os.getenv("GEMINI_MODEL", "gemini-flash-lite-latest") # flash-lite es multimodal
         llm = ChatGoogleGenerativeAI(model=gemini_model, temperature=0.0, max_retries=3)
         
         doc = fitz.open(file_path)
@@ -1172,8 +1681,8 @@ class ReportIngestor:
 
     def load_pdf(self, file_path: str) -> List[Document]:
         """
-        Loads a PDF file and extracts its elements using Unstructured.
-        Uses hi_res strategy for OCR and table extraction.
+        Loads a PDF file and extracts its elements using Docling.
+        Uses Docling's advanced document layout analysis.
         """
         if not os.path.exists(file_path):
             raise FileNotFoundError(f"The file {file_path} does not exist.")
@@ -1190,17 +1699,60 @@ class ReportIngestor:
         except Exception:
             num_pages = 1
             
-        logger.info(f"Loading PDF '{file_path}' using Unstructured hi_res strategy (Pages detected: {num_pages})...")
-            
-        # Using mode='elements', hi_res strategy for OCR, and inferring tables
-        loader = UnstructuredPDFLoader(
-            file_path, 
-            mode="elements", 
-            strategy="hi_res",
-            pdf_infer_table_structure=True
-        )
-        elements = loader.load()
+        logger.info(f"Loading PDF '{file_path}' using Docling (Pages detected: {num_pages})...")
         
+        converter = DocumentConverter()
+        result = converter.convert(file_path)
+        doc = result.document
+        
+        elements = []
+        for item, level in doc.iterate_items():
+            text = ""
+            cat = "NarrativeText"
+            html = None
+            
+            # Extract the string representation of the enum label
+            label = getattr(item, "label", "text")
+            if hasattr(label, "name"):
+                label_str = label.name.lower()
+            elif isinstance(label, str):
+                label_str = label.lower()
+            else:
+                label_str = "text"
+                
+            # Map Docling labels to our expected categories
+            if label_str in ["title", "section_header", "page_header"]:
+                cat = "Title"
+                if label_str == "page_header":
+                    cat = "Header"
+            elif label_str in ["page_footer"]:
+                cat = "Footer"
+            elif label_str == "list_item":
+                cat = "ListItem"
+            elif label_str == "table":
+                cat = "Table"
+                if hasattr(item, "export_to_html"):
+                    html = item.export_to_html()
+                    
+            if hasattr(item, "text"):
+                text = item.text
+                
+            # Ignore empty elements or images without text/html
+            if not text and not html:
+                continue
+                
+            # Try to fetch provenance for page number
+            page_num = "?"
+            if hasattr(item, "prov") and item.prov:
+                page_num = str(item.prov[0].page_no)
+                
+            metadata = {"category": cat, "page_number": page_num}
+            if html:
+                metadata["text_as_html"] = html
+                text = html  # Use HTML representation for the chunk content
+                
+            elements.append(Document(page_content=text, metadata=metadata))
+            
         # Validation Logic: Suspiciously short extraction
         total_text_len = sum(len(el.page_content) for el in elements)
         if num_pages >= 3 and total_text_len < (num_pages * 50):
@@ -1334,12 +1886,8 @@ class MitreIndexer:
         else:
             self.device = "cpu"
             
-        # BAAI/bge-m3 is a state-of-the-art multilingual model great for retrieval
-        self.embeddings = HuggingFaceEmbeddings(
-            model_name="BAAI/bge-m3",
-            model_kwargs={'device': self.device},
-            encode_kwargs={'normalize_embeddings': True}
-        )
+        from src.core.embedding_factory import get_embeddings
+        self.embeddings = get_embeddings()
 
     def load_mitre_data(self, file_path: str) -> List[Dict[str, Any]]:
         try:
@@ -1482,7 +2030,9 @@ class MitreIndexer:
                 "name": tech.get("name"),
                 "tactics": ", ".join(tech.get("tactics", [])),
                 "platforms": ", ".join(tech.get("platforms", [])),
-                "full_description": tech.get("description", "").strip() # PRESERVE FULL TEXT FOR LLM
+                # CRITICAL FIX: Pass the enriched content (which includes tools and malware names)
+                # to the metadata, so the LLM Validator can read the same evidence Qdrant used.
+                "full_description": enriched_content 
             }
             
             # Chunk the enriched content for fast Cross-Encoder evaluation
@@ -1566,6 +2116,8 @@ if __name__ == "__main__":
 ================================================
 FILE: src/langchain_pipeline/phase3_retriever.py
 ================================================
+import os
+import requests
 import logging
 from typing import List, Dict, Any
 
@@ -1605,8 +2157,13 @@ class CandidateRetriever:
         else:
             self.device = device
             
-        logger.info(f"Loading Cross-Encoder model (BAAI/bge-reranker-base) on {self.device}...")
-        self.reranker = CrossEncoder('BAAI/bge-reranker-base', device=self.device)
+        use_remote = os.getenv("USE_REMOTE_EMBEDDINGS", "False").lower() in ("true", "1", "yes")
+        if use_remote:
+            logger.info("Using remote reranker. Local CrossEncoder will not be loaded.")
+            self.reranker = None
+        else:
+            logger.info(f"Loading Cross-Encoder model (BAAI/bge-reranker-base) on {self.device}...")
+            self.reranker = CrossEncoder('BAAI/bge-reranker-base', device=self.device)
 
     def _get_initial_candidates(self, chunk: Document, top_k: int = 35) -> List[Document]:
         """
@@ -1623,87 +2180,80 @@ class CandidateRetriever:
         candidates = self.vector_store.similarity_search(chunk.page_content, k=top_k)
         return candidates
 
-    def get_filtered_mitre_candidates(self, report_chunks: List[Document], threshold: float = 0.30) -> Dict[str, Dict[str, Any]]:
-        """
-        Main orchestrator for the retrieval phase. Retrieves candidates for all chunks,
-        reranks them in a single optimized batch, and aggregates the results.
-        
-        Args:
-            report_chunks (List[Document]): Chunked documents from Phase 1.
-            threshold (float): Minimum score for the Cross-Encoder.
-            
-        Returns:
-            Dict[str, Dict[str, Any]]: Aggregated mapping of MITRE techniques to supporting chunks.
-        """
-        grouped_results: Dict[str, Dict[str, Any]] = {}
+    def get_filtered_mitre_candidates(self, report_chunks: List[Document], threshold: float = 0.50) -> List[Dict[str, Any]]:
         logger.info(f"Starting retrieval and reranking for {len(report_chunks)} chunks...")
         
         all_initial_candidates = []
-        all_pairs = []
         
-        # Step 1: Fast Vector Search (High Recall) for all chunks
         for chunk in report_chunks:
-            chunk_text = chunk.page_content
-            candidates = self._get_initial_candidates(chunk, top_k=35)
+            candidates = self._get_initial_candidates(chunk, top_k=15)
             all_initial_candidates.append((chunk, candidates))
             
-            for doc in candidates:
-                all_pairs.append([chunk_text, doc.page_content])
-                
-        # Step 2: Accurate Reranking in Batch (High Precision)
-        logger.info(f"Reranking {len(all_pairs)} pairs in batch mode...")
-        scores = self.reranker.predict(all_pairs, batch_size=32, activation_fn=torch.nn.Sigmoid()) if all_pairs else []
-        
-        # Re-associate scores with chunks and apply filtering
-        score_idx = 0
+        use_remote = os.getenv("EXECUTION_PROFILE", "LOCAL").upper() == "REMOTE"
+        reranker_url = os.getenv("RERANKER_URL", "http://10.0.152.198:8005/v1/rerank")
+        reranker_model = os.getenv("RERANKER_MODEL_NAME", "jina-reranker-v2-base-multilingual")
+
+        chunk_results = []
         for chunk, candidates in all_initial_candidates:
-            chunk_text = chunk.page_content
-            
-            # Extract page number based on loader metadata (PyMuPDF uses 'page', Unstructured uses 'page_number')
-            page_val = chunk.metadata.get("page")
-            if page_val is not None:
-                page_num = int(page_val) + 1  # PyMuPDF is 0-indexed
+            valid_candidates = []
+            if use_remote:
+                # Le mandamos los candidatos en texto crudo a TEI/Jina para que haga un
+                # cross-encoding real contra la query y nos devuelva un score ajustado.
+                docs_text = [doc.page_content for doc in candidates]
+                payload = {
+                    "model": reranker_model,
+                    "query": chunk.page_content,
+                    "documents": docs_text
+                }
+                try:
+                    response = requests.post(reranker_url, json=payload, headers={"Authorization": "Bearer EMPTY"})
+                    if response.status_code == 200:
+                        res_data = response.json()
+                        # Jina/TEI suele devolver results: [{"index": X, "relevance_score": Y}]
+                        import math
+                        for item in res_data.get("results", []):
+                            idx = item["index"]
+                            raw_score = float(item["relevance_score"])
+                            # El endpoint TEI/Jina nos devuelve los logits en bruto (pueden ser negativos o > 1).
+                            # Le metemos una sigmoide para forzarlos a rango [0, 1] y mantener compatibilidad
+                            # con el comportamiento del modelo local y el threshold posterior.
+                            score = 1 / (1 + math.exp(-raw_score))
+                            if score >= threshold:
+                                doc = candidates[idx]
+                                valid_candidates.append({
+                                    "technique_id": doc.metadata.get("technique_id", "Unknown"),
+                                    "name": doc.metadata.get("name", "Unknown"),
+                                    "tactics": [t.strip() for t in doc.metadata.get("tactics", "").split(",") if t.strip()],
+                                    "description": doc.metadata.get("full_description", ""),
+                                    "score": round(score, 4)
+                                })
+                except Exception as e:
+                    logger.error(f"Error calling remote reranker: {e}")
             else:
-                page_num = chunk.metadata.get("page_number", "Unknown")
-                
-            chunk_idx = chunk.metadata.get("chunk_index", "Unknown")
+                # Fallback Local original
+                pairs = [[chunk.page_content, doc.page_content] for doc in candidates]
+                if pairs:
+                    scores = self.reranker.predict(pairs, batch_size=32, activation_fn=torch.nn.Sigmoid())
+                    for doc, score in zip(candidates, scores):
+                        if score >= threshold:
+                            valid_candidates.append({
+                                "technique_id": doc.metadata.get("technique_id", "Unknown"),
+                                "name": doc.metadata.get("name", "Unknown"),
+                                "tactics": [t.strip() for t in doc.metadata.get("tactics", "").split(",") if t.strip()],
+                                "description": doc.metadata.get("full_description", ""),
+                                "score": round(float(score), 4)
+                            })
             
-            for doc in candidates:
-                score = float(scores[score_idx])
-                score_idx += 1
+            if valid_candidates:
+                valid_candidates.sort(key=lambda x: x["score"], reverse=True)
+                for i in range(0, len(valid_candidates), 10):
+                    chunk_results.append({
+                        "chunk": chunk,
+                        "candidates": valid_candidates[i:i+10]
+                    })
                 
-                if score >= threshold:
-                    tech_id = doc.metadata.get("technique_id", "Unknown")
-                    tech_name = doc.metadata.get("name", "Unknown")
-                    tactics_str = doc.metadata.get("tactics", "")
-                    
-                    if tech_id not in grouped_results:
-                        grouped_results[tech_id] = {
-                            "name": tech_name,
-                            "tactics": [t.strip() for t in tactics_str.split(",") if t.strip()],
-                            "description": doc.metadata.get("full_description", ""), # EXTRACT FULL DESCRIPTION
-                            "score": score,
-                            "supporting_chunks": []
-                        }
-                    else:
-                        if score > grouped_results[tech_id]["score"]:
-                            grouped_results[tech_id]["score"] = score
-                            
-                    is_unique = all(c["text"] != chunk_text for c in grouped_results[tech_id]["supporting_chunks"])
-                    if is_unique:
-                        grouped_results[tech_id]["supporting_chunks"].append({
-                            "text": chunk_text,
-                            "location": f"Page {page_num}, Chunk {chunk_idx}",
-                            "score": round(score, 4)
-                        })
-                        
-        for tech_id in grouped_results:
-            chunks = grouped_results[tech_id]["supporting_chunks"]
-            chunks.sort(key=lambda x: x["score"], reverse=True)
-            grouped_results[tech_id]["supporting_chunks"] = chunks
-            
-        logger.info(f"Retrieval complete. Found {len(grouped_results)} unique techniques across all chunks.")
-        return grouped_results
+        logger.info(f"Retrieval complete. {len(chunk_results)} chunk inference tasks prepared.")
+        return chunk_results
 
 
 
@@ -1748,13 +2298,9 @@ class TTPAnalyzer:
         logger.info(f"TTPAnalyzer started. Profile: {self.execution_profile}, Prompt Repetition: {self.use_prompt_repetition}")
 
     def _build_prompt_template(self) -> ChatPromptTemplate:
-        """
-        Builds the prompt template dynamically.
-        Injects 'Prompt Repetition' if enabled to reinforce instructions for smaller models.
-        """
         system_instruction = (
             "Role: Cyber Threat Intelligence (CTI) Analyst.\n"
-            "Task: Verify the presence of specific MITRE ATT&CK techniques based on provided report excerpts.\n\n"
+            "Task: Extract confirmed MITRE ATT&CK techniques from a report chunk based ONLY on the provided candidate techniques.\n\n"
             "Rules:\n"
             "1. Evaluate all evidence blocks objectively.\n"
             "2. Set `is_present` to true only if the evidence technically confirms the technique. Add each confirming block to the `occurrences` list.\n"
@@ -1763,116 +2309,108 @@ class TTPAnalyzer:
             "5. Map contextualized masked tags (e.g., <IoC_URL>) to their tactical intent.\n"
             "6. Exclusion Criteria: Strictly map observable, technical intrusion activity. Exclude geopolitical context, analyst attribution theories, victimology, or historical background."
         )
-        
         if self.use_prompt_repetition:
             system_instruction = f"{system_instruction}\n\nReminder of Rules:\n{system_instruction}"
             
         user_message = (
-            "<mitre_context>\n"
-            "ID: {mitre_technique_id}\n"
-            "Name: {mitre_technique_name}\n"
-            "Tactics: {mitre_tactics}\n"
-            "Description: {mitre_description}\n"
-            "</mitre_context>\n\n"
-            "<evidence>\n"
-            "{supporting_chunks}\n"
-            "</evidence>\n\n"
-            "Based exclusively on the provided evidence, return the structured JSON confirming or discarding the technique."
+            "<candidate_techniques>\n{candidates_str}\n</candidate_techniques>\n\n"
+            "<chunk_text>\n{chunk_text}\n</chunk_text>\n\n"
+            "Based exclusively on the chunk text, extract the techniques from the candidates that are confirmed."
         )
-        
         if self.use_prompt_repetition:
             user_message = f"{user_message}\n\n{user_message}"
             
-        return ChatPromptTemplate.from_messages([
-            ("system", system_instruction),
-            ("user", user_message)
-        ])
+        return ChatPromptTemplate.from_messages([("system", system_instruction), ("user", user_message)])
 
-    def analyze_candidates(self, candidates_dict: Dict[str, Dict[str, Any]]) -> List[TTPDetection]:
-        """
-        Runs the LLM chain to analyze the retrieved MITRE candidates.
-        Uses batching in AWS or sequential execution locally to avoid Out-Of-Memory (OOM) issues.
-        """
-        if not candidates_dict:
+    def analyze_candidates(self, chunk_results: List[Dict[str, Any]]):
+        if not chunk_results:
             logger.warning("No candidates to analyze.")
-            return []
+            return [], 0.0
 
         prompt = self._build_prompt_template()
-        
-        # Build the LCEL chain with forced structured output
-        chain = prompt | self.llm.with_structured_output(TTPDetection)
+        from src.core.schemas import ChunkExtraction, TTPDetection, Evidence
+        chain = prompt | self.llm.with_structured_output(ChunkExtraction)
         
         inputs = []
-        for tech_id, data in candidates_dict.items():
-            # Keep only the top 5 highest scored chunks to avoid LLM context limits
-            top_chunks = sorted(data.get("supporting_chunks", []), key=lambda x: x.get("score", 0.0), reverse=True)[:5]
+        for data in chunk_results:
+            chunk = data["chunk"]
+            candidates = data["candidates"]
             
-            formatted_chunks = []
-            for idx, chunk_data in enumerate(top_chunks, 1):
-                loc = chunk_data.get("location", "Unknown")
-                score = chunk_data.get("score", 0.0)
-                txt = chunk_data.get("text", "")
-                formatted_chunks.append(f"[Evidence {idx} | Location: {loc} | Score: {score}]\n{txt}\n")
+            cand_strings = []
+            tech_metadata_map = {}
+            for c in candidates:
+                tech_id = c["technique_id"]
+                cand_strings.append(f"ID: {tech_id} | Name: {c['name']} | Tactics: {', '.join(c['tactics'])}\nDescription: {c['description']}")
+                tech_metadata_map[tech_id] = {"tactics": c["tactics"], "score": c["score"]}
                 
-            joined_chunks = "\n---\n".join(formatted_chunks)
+            page_val = chunk.metadata.get("page")
+            page_num = int(page_val) + 1 if page_val is not None else chunk.metadata.get("page_number", "Unknown")
+            chunk_idx = chunk.metadata.get("chunk_index", "Unknown")
             
             inputs.append({
-                "mitre_technique_id": tech_id,
-                "mitre_technique_name": data.get("name", "Unknown"),
-                "mitre_tactics": ", ".join(data.get("tactics", [])),
-                "mitre_description": data.get("description", "No description available."),
-                "supporting_chunks": joined_chunks,
-                "_meta_tactics": data.get("tactics", [])
+                "chunk_text": chunk.page_content,
+                "candidates_str": "\n\n".join(cand_strings),
+                "_location": f"Page {page_num}, Chunk {chunk_idx}",
+                "_meta_map": tech_metadata_map
             })
             
-        logger.info(f"Prepared {len(inputs)} candidates for LLM inference.")
-        
-        results: List[TTPDetection] = []
+        logger.info(f"Prepared {len(inputs)} chunks for LLM inference (Chunk-by-Chunk).")
+        batch_responses = []
+        artificial_delay = 0.0
         
         if self.execution_profile == "AWS":
             logger.info("AWS Profile detected: Running chain in parallel (Batching)...")
             try:
                 batch_responses = chain.batch(inputs)
-                
-                # Filter out nulls (failed parsing) and populate metadata
-                for inp, res in zip(inputs, batch_responses):
-                    if res is not None:
-                        res.tactic = inp["_meta_tactics"]
-                        res.technique_name = inp["mitre_technique_name"]
-                        results.append(res)
             except Exception as e:
                 logger.error(f"Error during AWS batching: {e}")
-                
         else:
             logger.info("LOCAL Profile detected: Running chain sequentially...")
             import time
             is_gemini = "google" in str(type(self.llm)).lower()
-
             for i, inp in enumerate(inputs, 1):
                 try:
-                    logger.info(f"[{i}/{len(inputs)}] Querying LLM for technique: {inp['mitre_technique_id']}...")
-                    response = chain.invoke(inp)
-                    if response:
-                        response.tactic = inp["_meta_tactics"]
-                        response.technique_name = inp["mitre_technique_name"]
-                        results.append(response)
-                        
-                        status = "CONFIRMED" if response.is_present else "DISCARDED"
-                        logger.info(f" -> Technique {inp['mitre_technique_id']} {status}.")
-                        
-                    # Rate limit estricto para el Free Tier de Gemini (15 peticiones/minuto)
-                    # 60s / 15 = 4s. Usamos 4.5s para tener margen de seguridad.
-                    if is_gemini and i < len(inputs):
-                        time.sleep(4.5)
-                        
-                except Exception as e:
-                    logger.error(f"Error processing technique {inp['mitre_technique_id']}: {e}")
+                    logger.info(f"[{i}/{len(inputs)}] Querying LLM for Chunk {inp['_location']}...")
+                    res = chain.invoke(inp)
+                    batch_responses.append(res)
                     
-        # Filter and return ONLY confirmed detections
-        confirmed_ttps = [res for res in results if res.is_present]
-        
-        logger.info(f"Inference complete. {len(confirmed_ttps)} techniques confirmed.")
-        return confirmed_ttps
+                    if is_gemini and i < len(inputs):
+                        sleep_time = 4.5
+                        time.sleep(sleep_time)
+                        artificial_delay += sleep_time
+                except Exception as e:
+                    logger.error(f"Error processing chunk {inp['_location']}: {e}")
+                    batch_responses.append(None)
+                    
+        # Reducer: Consolidar ChunkExtraction de vuelta a List[TTPDetection]
+        global_ttps = {}
+        for inp, res in zip(inputs, batch_responses):
+            if not res or not hasattr(res, 'extracted_ttps') or not res.extracted_ttps:
+                continue
+                
+            for ext in res.extracted_ttps:
+                tech_id = ext.technique_id
+                meta = inp["_meta_map"].get(tech_id, {"tactics": [], "score": 0.99})
+                
+                if tech_id not in global_ttps:
+                    global_ttps[tech_id] = TTPDetection(
+                        technique_id=tech_id,
+                        tactic=meta["tactics"],
+                        technique_name=ext.technique_name,
+                        is_present=True,
+                        occurrences=[]
+                    )
+                    
+                global_ttps[tech_id].occurrences.append(Evidence(
+                    location=inp["_location"],
+                    procedure=ext.procedure,
+                    justification=ext.justification,
+                    confidence_score=meta["score"]
+                ))
+                
+        final_ttps = list(global_ttps.values())
+        logger.info(f"Inference complete. {len(final_ttps)} global techniques confirmed.")
+        return final_ttps, artificial_delay
 
 
 
@@ -1891,8 +2429,9 @@ from .nodes import triage_node, extractor_node, validator_node
 
 def triage_router(state: ChunkState) -> str:
     """
-    Routes the chunk after the triage node.
-    If it's irrelevant, stop processing this chunk. Otherwise, proceed to extraction.
+    Router: Decide el siguiente paso tras el Triage.
+    Si el chunk es basura (is_relevant=False), matamos el proceso (END). 
+    Si hay contexto útil, pasamos al nodo Extractor.
     """
     if not state.get("is_relevant", True):
         return "end"
@@ -1900,8 +2439,8 @@ def triage_router(state: ChunkState) -> str:
 
 def extractor_router(state: ChunkState) -> str:
     """
-    Routes the chunk after the extractor node.
-    If the extractor returned 0 drafts, it means all TTPs are exhausted. We are done.
+    Router: Si el extractor devuelve 0 borradores, significa que ya hemos "agotado"
+    todos los TTPs posibles de este texto. Fin del procesamiento.
     """
     if len(state.get("draft_ttps", [])) == 0:
         return "end"
@@ -1978,7 +2517,10 @@ def build_chunk_graph():
 
 def consolidator_node(state: GlobalState) -> dict:
     """
-    Goal: Merge the outputs of all chunks into a final, clean list of TTPs 
+    Objetivo: Fase de "Reduce" del pipeline.
+    Recoge todos los TTPs aprobados de todos los chunks procesados en paralelo, 
+    elimina duplicados (fusionando evidencias de distintas páginas) y devuelve 
+    un JSON limpio y consolidado con el reporte final.
     matching the standard JSON schema.
     """
     all_ttps = state.get("all_approved_ttps", [])
@@ -2021,25 +2563,28 @@ def consolidator_node(state: GlobalState) -> dict:
 # THE MAIN ORCHESTRATOR (MAP-REDUCE EXECUTION)
 # ==============================================================================
 
+import time
+
 def process_full_report(source_file: str, global_context: str, sanitized_chunks: List[Dict[str, Any]]) -> dict:
     """
     Main orchestrator that executes the Map-Reduce flow.
-    Currently runs sequentially for local PoC testing, but can be parallelized in AWS.
+    Returns both the extracted TTPs and the internal timing metrics for Phase 3.
     """
     print(f"[*] Starting LangGraph Map-Reduce execution for: {source_file}")
     
     # Initialize the compiled chunk graph (Map Phase)
     chunk_graph = build_chunk_graph()
-    
-    # Master list to gather all approved TTPs (Reducer list)
     master_ttp_list = []
+    
+    # Acumuladores de tiempo
+    triage_time_total = 0.0
+    extraction_time_total = 0.0
+    validation_time_total = 0.0
     
     # 1. MAP: Loop over sanitized_chunks sequentially
     for i, chunk_data in enumerate(sanitized_chunks):
         print(f"  -> Processing chunk {i+1}/{len(sanitized_chunks)}...")
         
-        # In this PoC, chunk_data could be a dict or string depending on upstream, 
-        # assume dict with "text" and "metadata"
         chunk_text = chunk_data.get("text", str(chunk_data))
         chunk_metadata = chunk_data.get("metadata", {})
         
@@ -2052,17 +2597,24 @@ def process_full_report(source_file: str, global_context: str, sanitized_chunks:
             "draft_ttps": [],
             "approved_ttps": [],
             "validation_feedback": "",
-            "loop_count": 0
+            "loop_count": 0,
+            "triage_time": 0.0,
+            "extractor_time": 0.0,
+            "validator_time": 0.0
         }
         
         try:
             # Invoke the graph for this single chunk
             chunk_result = chunk_graph.invoke(initial_chunk_state)
-            approved = chunk_result.get("approved_ttps", [])
             
+            # Sumar tiempos reales medidos internamente por los nodos
+            triage_time_total += chunk_result.get("triage_time", 0.0)
+            extraction_time_total += chunk_result.get("extractor_time", 0.0)
+            validation_time_total += chunk_result.get("validator_time", 0.0)
+                
+            approved = chunk_result.get("approved_ttps", [])
             if approved:
                 print(f"     [+] Found {len(approved)} valid TTP(s) in chunk {i+1}")
-                # Append to master list
                 master_ttp_list.extend(approved)
             else:
                 print(f"     [-] No valid TTPs found in chunk {i+1}")
@@ -2081,13 +2633,22 @@ def process_full_report(source_file: str, global_context: str, sanitized_chunks:
         "final_json": {}
     }
     
-    # Execute the consolidator node directly
+    t0_red = time.time()
     final_state_update = consolidator_node(global_state)
+    consolidator_time = time.time() - t0_red
     
     print("[*] Reduce phase complete. Report ready.")
     
-    # Return the final formatted JSON
-    return final_state_update.get("final_json", {})
+    # Devolver estructura empaquetada con TTPs y Tiempos
+    return {
+        "extracted_ttps": final_state_update.get("final_json", []),
+        "timing_breakdown_phase3": {
+            "triage_node_seconds": round(triage_time_total, 2),
+            "extraction_oracle_node_seconds": round(extraction_time_total, 2),
+            "validator_node_seconds": round(validation_time_total, 2),
+            "consolidator_seconds": round(consolidator_time, 2)
+        }
+    }
 
 
 
@@ -2132,17 +2693,18 @@ bootstrap_environment()
 from dotenv import load_dotenv
 load_dotenv(override=True)
 
-from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.prompts import ChatPromptTemplate
 
 from src.langchain_pipeline.phase1_ingestion import ReportIngestor
 from src.langgraph_agents.graph_builder import process_full_report
 
-def generate_global_context(chunks: List[Any], llm: ChatGoogleGenerativeAI) -> str:
+def generate_global_context(chunks: List[Any], llm: BaseChatModel) -> str:
     """
-    Generates a high-level summary of the report to serve as global context.
-    This helps the extractor agents resolve pronouns and understand the broader scope.
-    Takes the first 4 chunks to extract Threat Actor, Malware, and Target.
+    Objetivo: Generar un resumen de alto nivel (Threat Actor, Malware, Target) a partir de la 
+    introducción del reporte. Este "contexto global" se inyectará después en todos los nodos 
+    de extracción para ayudar al LLM a resolver pronombres (ej: "ellos" -> APT29) y no perder 
+    el hilo conductor de la narrativa durante el procesamiento paralelo por chunks.
     """
     # Extract text from the first 4 chunks
     # Phase1_ingestion chunks are LangChain Document objects
@@ -2190,6 +2752,53 @@ def generate_global_context(chunks: List[Any], llm: ChatGoogleGenerativeAI) -> s
         print(f"[ERROR] Generating global context: {e}")
         return "Global context could not be generated."
 
+def run_langgraph_extraction(pdf_path: str):
+    """
+    Objetivo: Actuar como punto de entrada limpio para invocar toda la arquitectura multi-agente
+    sobre un PDF. Orquesta la Fase 1 (ingesta), extrae el contexto global y lanza el grafo.
+    Devuelve los TTPs consolidados y las métricas de tiempo para la evaluación.
+    """
+    import time
+    t0 = time.time()
+    
+    use_vlm_env = os.getenv("USE_VLM_EXTRACTION", "False").lower() in ("true", "1", "yes")
+    ingestor = ReportIngestor(chunk_size=3500, chunk_overlap=500, use_vlm=use_vlm_env)
+    
+    raw_chunks = ingestor.process_report(pdf_path)
+    p1_time = time.time() - t0
+    
+    sanitized_chunks = []
+    for c in raw_chunks:
+        if hasattr(c, 'page_content'):
+            sanitized_chunks.append({"text": c.page_content, "metadata": c.metadata})
+        elif isinstance(c, dict) and "text" in c:
+            sanitized_chunks.append(c)
+        else:
+            sanitized_chunks.append({"text": str(c), "metadata": {}})
+            
+    if not sanitized_chunks:
+        return [], {"error": "No text extracted"}
+
+    t1 = time.time()
+    from src.core.llm_factory import get_llm
+    llm = get_llm(temperature=0.0)
+    global_context = generate_global_context(sanitized_chunks, llm)
+    p2_time = time.time() - t1
+    
+    t2 = time.time()
+    result_dict = process_full_report(pdf_path, global_context, sanitized_chunks)
+    p3_time = time.time() - t2
+    extracted_ttps = result_dict.get("extracted_ttps", [])
+    
+    timing_metrics = {
+        "phase1_ingestion_seconds": round(p1_time, 2),
+        "phase3_retrieval_seconds": round(p2_time, 2), # Using Context Generation as setup/retrieval equivalent
+        "phase4_inference_seconds": round(p3_time, 2),
+        "langgraph_internal_breakdown": result_dict.get("timing_breakdown_phase3", {})
+    }
+    
+    return extracted_ttps, timing_metrics
+
 if __name__ == "__main__":
     if len(sys.argv) < 2:
         print("Usage: python -m src.langgraph_agents.main_langgraph <path_to_pdf>")
@@ -2211,7 +2820,7 @@ if __name__ == "__main__":
     t0 = time.time()
     
     use_vlm_env = os.getenv("USE_VLM_EXTRACTION", "False").lower() in ("true", "1", "yes")
-    ingestor = ReportIngestor(chunk_size=1500, chunk_overlap=300, use_vlm=use_vlm_env)
+    ingestor = ReportIngestor(chunk_size=3500, chunk_overlap=500, use_vlm=use_vlm_env)
     
     raw_chunks = ingestor.process_report(pdf_path)
     p1_time = time.time() - t0
@@ -2233,17 +2842,23 @@ if __name__ == "__main__":
     # 2. Global Context Generation Phase
     print("[*] [INFO] Phase 2: Generating Global Context...")
     t1 = time.time()
-    gemini_model = os.getenv("GEMINI_MODEL", "gemini-flash-lite-latest")
-    llm = ChatGoogleGenerativeAI(model=gemini_model, temperature=0.0)
+    from src.core.llm_factory import get_llm
+    llm = get_llm(temperature=0.0)
     global_context = generate_global_context(sanitized_chunks, llm)
     p2_time = time.time() - t1
     
     # 3. Execution Phase (Map-Reduce)
-    print("\n[*] [INFO] Phase 3: Starting Graph Execution (Map-Reduce)...")
+    print("\n[*] [INFO] Phase 4: Starting Graph Execution (Map-Reduce Inference)...")
     t2 = time.time()
-    extracted_ttps = process_full_report(pdf_path, global_context, sanitized_chunks)
+    # === CAMBIO AQUI ===
+    result_dict = process_full_report(pdf_path, global_context, sanitized_chunks)
     p3_time = time.time() - t2
-    print("[+] [INFO] Phase 3: Graph Execution Completed.")
+    print("[+] [INFO] Phase 4: Graph Execution Completed.")
+    
+    # Extraer variables
+    extracted_ttps = result_dict.get("extracted_ttps", [])
+    p3_breakdown = result_dict.get("timing_breakdown_phase3", {})
+    # ===================
     
     # 4. Construct Final JSON matching LangChain standard
     total_execution_time = time.time() - total_start_time
@@ -2254,8 +2869,9 @@ if __name__ == "__main__":
         "total_execution_time_minutes": round(total_execution_time / 60.0, 2),
         "timing_breakdown": {
             "phase1_ingestion_seconds": round(p1_time, 2),
-            "phase2_context_seconds": round(p2_time, 2),
-            "phase3_extraction_seconds": round(p3_time, 2)
+            "phase3_retrieval_seconds": round(p2_time, 2),
+            "phase4_inference_seconds": round(p3_time, 2),
+            "langgraph_internal_breakdown": p3_breakdown
         },
         "extracted_ttps": extracted_ttps
     }
@@ -2294,16 +2910,15 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 
 from .state import ChunkState
-from .tools import mitre_oracle
+from .tools import mitre_oracle, get_mitre_candidates
 
 # ==============================================================================
 # LLM FACTORY
 # ==============================================================================
 
 def get_llm(tier="pro", temperature=0.0):
-    from langchain_google_genai import ChatGoogleGenerativeAI
-    model_name = os.getenv("GEMINI_MODEL", "gemini-flash-lite-latest")
-    return ChatGoogleGenerativeAI(model=model_name, temperature=temperature, max_retries=3)
+    from src.core.llm_factory import get_llm as factory_get_llm
+    return factory_get_llm(temperature=temperature)
 
 # ==============================================================================
 # PYDANTIC SCHEMAS
@@ -2349,9 +2964,15 @@ def safe_invoke(callable_chain, input_data):
 
 def triage_node(state: ChunkState) -> dict:
     """
-    Goal: Act as a cheap, fast filter to drop irrelevant chunks 
-    (e.g., legal disclaimers, marketing noise).
+    Objetivo: Actuar como un filtro rápido de bajo coste.
+    Este agente lee el chunk y decide si contiene Inteligencia de Amenazas (TTPs, atacantes) 
+    o si es pura paja (índices, bibliografía, relleno). Si es irrelevante, cortamos la ejecución 
+    del chunk aquí mismo y ahorramos tokens en los agentes pesados.
     """
+    import time
+    t0 = time.time()
+    chunk_text = state["chunk_text"]
+    
     llm = get_llm(tier="lite")
     structured_llm = llm.with_structured_output(TriageDecision)
     
@@ -2364,20 +2985,25 @@ def triage_node(state: ChunkState) -> dict:
     
     chain = prompt | structured_llm
     
-    result = safe_invoke(chain, {"chunk_text": state["chunk_text"]})
+    result = safe_invoke(chain, {"chunk_text": chunk_text})
     
     if result is None:
         is_relevant = True
     else:
         is_relevant = result.is_relevant
         
-    print(f"[DEBUG] Triage - Chunk relevant: {is_relevant}")
-    return {"is_relevant": is_relevant}
+    print(f"[DEBUG] Triage - Is Relevant: {is_relevant}")
+    return {"is_relevant": is_relevant, "triage_time": time.time() - t0}
 
 def extractor_node(state: ChunkState) -> dict:
     """
-    Goal: Translate text to a Dense Tactical Summary, use Mechanical Retrieval, and draft TTPs.
+    Objetivo: El corazón del sistema. Analiza el chunk, extrae comportamientos tácticos,
+    consulta a la base de datos vectorial (MITRE_Oracle) para anclar el comportamiento a 
+    una técnica oficial de MITRE ATT&CK, y genera un borrador del TTP.
+    Si viene rebotado del Validator con feedback, intenta buscar técnicas alternativas.
     """
+    import time
+    t0 = time.time()
     chunk_text = state["chunk_text"]
     val_feedback = state.get("validation_feedback", "")
     approved_ttps = state.get("approved_ttps", [])
@@ -2407,31 +3033,17 @@ def extractor_node(state: ChunkState) -> dict:
     if val_feedback:
         search_query += f"\nPast Rejections & Feedback: {val_feedback}"
         
-    candidates_str = mitre_oracle.invoke(search_query)
+    candidates_list = get_mitre_candidates(search_query)
     
-    if "No matching MITRE techniques found" in candidates_str or "Error" in candidates_str or "No highly confident MITRE techniques" in candidates_str:
+    if not candidates_list:
         print("[DEBUG] Extractor - No candidates found via Mechanical Retrieval. Returning empty drafts.")
-        return {"draft_ttps": [], "loop_count": state.get("loop_count", 0) + 1}
+        return {"draft_ttps": [], "loop_count": state.get("loop_count", 0) + 1, "extractor_time": state.get("extractor_time", 0.0) + (time.time() - t0)}
     
     # 3. EXTRACTION (BRAINSTORMER)
     llm = get_llm(tier="pro")
     structured_llm = llm.with_structured_output(DraftTTPList)
     
-    prompt_text = f"Global Context: {state.get('global_context', '')}\n\n"
-    
-    if approved_ids:
-        prompt_text += f"ALREADY APPROVED TTPs FOR THIS CHUNK: {approved_ids}\n"
-        prompt_text += "Do NOT propose these exact technique IDs again. Search the text for OTHER distinct malicious behaviors.\n"
-        prompt_text += "If you cannot find any NEW behaviors, you MUST return an empty list.\n\n"
-        
-    if val_feedback:
-        prompt_text += f"PAST VALIDATOR REJECTIONS (CRITICAL: DO NOT PROPOSE THESE REJECTED TTPs AGAIN):\n{val_feedback}\n\n"
-        
-    prompt_text += f"Candidate MITRE Techniques:\n{candidates_str}\n\n"
-    prompt_text += f"Source Text:\n{chunk_text}"
-    
     use_prompt_repetition = os.getenv("USE_PROMPT_REPETITION", "False").lower() in ("true", "1", "yes")
-    
     sys_prompt = (
         "Role: Cyber Threat Intelligence Analyst.\n"
         "Task: Extract applicable MITRE ATT&CK techniques from the provided candidate list based on the source text.\n\n"
@@ -2441,7 +3053,6 @@ def extractor_node(state: ChunkState) -> dict:
         "3. Focus exclusively on observable actions (e.g., executing commands, dropping files, establishing tunnels). Do not map analytical context (geopolitics, victimology, motives) to techniques.\n"
         "4. Output strictly according to the requested JSON schema."
     )
-    
     if use_prompt_repetition:
         sys_prompt = f"{sys_prompt}\n\nReminder of Rules:\n{sys_prompt}"
         
@@ -2450,30 +3061,49 @@ def extractor_node(state: ChunkState) -> dict:
         ("human", "{prompt_text}")
     ])
     
-    parsed_result = safe_invoke(prompt | structured_llm, {"prompt_text": prompt_text})
+    # Chunk the candidates into blocks of 10 to avoid context overload
+    candidates_batches = [candidates_list[i:i+10] for i in range(0, len(candidates_list), 10)]
+    all_drafts = []
     
-    if parsed_result is None:
-        drafts = []
-    else:
-        drafts = []
-        loc = f"Page {state.get('chunk_metadata', {}).get('page_number', '?')}, Chunk {state.get('chunk_metadata', {}).get('chunk_index', '?')}"
-        for ttp in parsed_result.ttps:
-            draft = ttp.model_dump()
-            draft["location"] = loc
-            drafts.append(draft)
+    for batch in candidates_batches:
+        candidates_str = "CANDIDATE TECHNIQUES:\n" + "\n\n".join(batch)
         
-    draft_ids = [d.get("technique_id", "Unknown") for d in drafts]
-    print(f"[DEBUG] Extractor - Draft TTPs found: {len(drafts)} {draft_ids}")
-    return {"draft_ttps": drafts, "loop_count": state.get("loop_count", 0) + 1}
+        prompt_text = f"Global Context: {state.get('global_context', '')}\n\n"
+        
+        if approved_ids:
+            prompt_text += f"ALREADY APPROVED TTPs FOR THIS CHUNK: {approved_ids}\n"
+            prompt_text += "Do NOT propose these exact technique IDs again. Search the text for OTHER distinct malicious behaviors.\n"
+            prompt_text += "If you cannot find any NEW behaviors, you MUST return an empty list.\n\n"
+            
+        if val_feedback:
+            prompt_text += f"PAST VALIDATOR REJECTIONS (CRITICAL: DO NOT PROPOSE THESE REJECTED TTPs AGAIN):\n{val_feedback}\n\n"
+            
+        prompt_text += f"Candidate MITRE Techniques:\n{candidates_str}\n\n"
+        prompt_text += f"Source Text:\n{chunk_text}"
+        
+        parsed_result = safe_invoke(prompt | structured_llm, {"prompt_text": prompt_text})
+        
+        if parsed_result is not None:
+            loc = f"Page {state.get('chunk_metadata', {}).get('page_number', '?')}, Chunk {state.get('chunk_metadata', {}).get('chunk_index', '?')}"
+            for ttp in parsed_result.ttps:
+                draft = ttp.model_dump()
+                draft["location"] = loc
+                all_drafts.append(draft)
+        
+    draft_ids = [d.get("technique_id", "Unknown") for d in all_drafts]
+    print(f"[DEBUG] Extractor - Draft TTPs found: {len(all_drafts)} {draft_ids}")
+    return {"draft_ttps": all_drafts, "loop_count": state.get("loop_count", 0) + 1, "extractor_time": state.get("extractor_time", 0.0) + (time.time() - t0)}
 
 def validator_node(state: ChunkState) -> dict:
     """
     Goal: Perform a 'Line-Item Veto'. Strict verification of drafted TTPs against the source text.
     """
+    import time
+    t0 = time.time()
     draft_ttps_list = state.get("draft_ttps", [])
     if not draft_ttps_list:
         print("[DEBUG] Validator - No drafts to validate. Skipping LLM call.")
-        return {"approved_ttps": [], "validation_feedback": "", "draft_ttps": []}
+        return {"approved_ttps": [], "validation_feedback": "", "draft_ttps": [], "validator_time": state.get("validator_time", 0.0) + (time.time() - t0)}
 
     llm = get_llm(tier="pro", temperature=0.2)
     structured_llm = llm.with_structured_output(ValidationResult)
@@ -2511,31 +3141,24 @@ def validator_node(state: ChunkState) -> dict:
         print("[DEBUG] Validator - Validation failed gracefully.")
         return {"approved_ttps": [], "validation_feedback": "", "draft_ttps": []}
         
-    valid_ttps = [ttp.model_dump() for ttp in result.valid_ttps] if result and result.valid_ttps else []
+    new_approved = [ttp.model_dump() for ttp in result.valid_ttps] if result and result.valid_ttps else []
     
     # Accumulate approved TTPs with deduplication
     current_approved = state.get("approved_ttps", [])
-    existing_ids = {t.get("technique_id") for t in current_approved}
-    
-    for ttp in valid_ttps:
-        if ttp.get("technique_id") not in existing_ids:
-            current_approved.append(ttp)
-            
+        
     # Set feedback to current loop's rejections only
-    if len(valid_ttps) == len(draft_ttps_list):
+    if len(new_approved) == len(draft_ttps_list):
         feedback = ""
     else:
         feedback = "\n".join(result.feedback_notes) if result and result.feedback_notes else ""
         
-    valid_ids = [v.get("technique_id", "Unknown") for v in current_approved]
-    print(f"[DEBUG] Validator - Total Approved TTPs so far: {len(current_approved)} {valid_ids}")
-    if feedback:
-        print(f"[DEBUG] Validator - Rejection Feedback:\n{feedback}")
+    print(f"[DEBUG] Validator - Approved {len(new_approved)}/{len(draft_ttps_list)} drafts. Remaining feedback:\n{feedback}")
     
     return {
-        "approved_ttps": current_approved,
+        "approved_ttps": current_approved + new_approved,
         "validation_feedback": feedback,
-        "draft_ttps": []
+        "draft_ttps": [], # Limpiamos los drafts para la siguiente iteración
+        "validator_time": state.get("validator_time", 0.0) + (time.time() - t0)
     }
 
 
@@ -2562,6 +3185,9 @@ class ChunkState(TypedDict):
     approved_ttps: List[Any]
     validation_feedback: str
     loop_count: int
+    triage_time: float
+    extractor_time: float
+    validator_time: float
 
 
 
@@ -2600,7 +3226,8 @@ def get_retriever() -> CandidateRetriever:
         client.get_collections()
         
         # Initialize Embeddings
-        embeddings = HuggingFaceEmbeddings(model_name="BAAI/bge-m3")
+        from src.core.embedding_factory import get_embeddings
+        embeddings = get_embeddings()
         sparse_embeddings = FastEmbedSparse(model_name="Qdrant/bm25")
         
         # Create LangChain VectorStore
@@ -2693,6 +3320,72 @@ def load_mitre_json() -> dict:
 # LANGCHAIN TOOLS
 # ==============================================================================
 
+def get_mitre_candidates(query: str) -> list:
+    """Semantic search without the @tool decorator for direct node use. Returns a list of strings."""
+    retriever = get_retriever()
+    if not retriever:
+        return []
+        
+    try:
+        import os
+        import requests
+        # 1. Hybrid Search
+        candidates = retriever.vector_store.similarity_search(query, k=15)
+        if not candidates:
+            return []
+            
+        # 2. Rerank
+        # Reevaluamos los candidatos devueltos por Qdrant para tener scores más finos.
+        # En producción usamos Jina (remoto), y en local tiramos del CrossEncoder por defecto.
+        use_remote = os.getenv("EXECUTION_PROFILE", "LOCAL").upper() == "REMOTE"
+        reranker_url = os.getenv("RERANKER_URL", "http://10.0.152.198:8005/v1/rerank")
+        reranker_model = os.getenv("RERANKER_MODEL_NAME", "jina-reranker-v2-base-multilingual")
+        
+        scores = []
+        if use_remote and candidates:
+            docs_text = [doc.page_content for doc in candidates]
+            payload = {
+                "model": reranker_model,
+                "query": query,
+                "documents": docs_text
+            }
+            try:
+                response = requests.post(reranker_url, json=payload, headers={"Authorization": "Bearer EMPTY"})
+                if response.status_code == 200:
+                    res_data = response.json()
+                    scores = [0.0] * len(candidates)
+                    import math
+                    for item in res_data.get("results", []):
+                        idx = item["index"]
+                        raw_score = float(item["relevance_score"])
+                        # Jina devuelve logits puros que no nos sirven para el corte de 0.50.
+                        # Comprimimos a 0-1 con sigmoide igual que hace el CrossEncoder en local.
+                        scores[idx] = 1 / (1 + math.exp(-raw_score))
+            except Exception as e:
+                print(f"Error calling remote reranker: {e}")
+                scores = [0.0] * len(candidates)
+        else:
+            import torch
+            pairs = [[query, doc.page_content] for doc in candidates]
+            scores = retriever.reranker.predict(pairs, batch_size=32, activation_fn=torch.nn.Sigmoid()) if pairs else []
+        
+        # 3. Filter (Threshold = 0.50)
+        results = []
+        for doc, score in zip(candidates, scores):
+            if float(score) >= 0.50:
+                tech_id = doc.metadata.get("technique_id", "Unknown")
+                name = doc.metadata.get("name", "Unknown")
+                tactics = doc.metadata.get("tactics", "")
+                desc = doc.metadata.get("full_description", "No description available.")[:500]
+                results.append((float(score), f"- {tech_id}: {name} (Tactics: {tactics})\n  Description: {desc}..."))
+                
+        results.sort(key=lambda x: x[0], reverse=True)
+        return [res[1] for res in results]
+        
+    except Exception as e:
+        print(f"Error during search: {str(e)}")
+        return []
+
 @tool("MITRE_Oracle")
 def mitre_oracle(query: str) -> str:
     """Use this tool to search the MITRE ATT&CK database using semantic search."""
@@ -2704,22 +3397,50 @@ def mitre_oracle(query: str) -> str:
         import torch
         
         # 1. Hybrid Search
-        candidates = retriever.vector_store.similarity_search(query, k=30)
+        # OPTIMIZACIÓN: Bajar de 30 a 15
+        candidates = retriever.vector_store.similarity_search(query, k=15)
         if not candidates:
             return "No matching MITRE techniques found."
             
         # 2. Rerank
-        pairs = [[query, doc.page_content] for doc in candidates]
-        scores = retriever.reranker.predict(pairs, batch_size=32, activation_fn=torch.nn.Sigmoid()) if pairs else []
+        import os
+        import requests
+        use_remote = os.getenv("USE_REMOTE_EMBEDDINGS", "False").lower() in ("true", "1", "yes")
+        reranker_url = os.getenv("RERANKER_URL", "http://10.0.152.198:8005/v1/rerank")
+        reranker_model = os.getenv("RERANKER_MODEL_NAME", "jina-reranker-v2-base-multilingual")
         
-        # 3. Filter (Threshold = 0.20)
+        scores = []
+        if use_remote and candidates:
+            docs_text = [doc.page_content for doc in candidates]
+            payload = {
+                "model": reranker_model,
+                "query": query,
+                "documents": docs_text
+            }
+            try:
+                response = requests.post(reranker_url, json=payload, headers={"Authorization": "Bearer EMPTY"})
+                if response.status_code == 200:
+                    res_data = response.json()
+                    scores = [0.0] * len(candidates)
+                    for item in res_data.get("results", []):
+                        idx = item["index"]
+                        scores[idx] = float(item["relevance_score"])
+            except Exception as e:
+                print(f"Error calling remote reranker: {e}")
+                scores = [0.0] * len(candidates)
+        else:
+            pairs = [[query, doc.page_content] for doc in candidates]
+            scores = retriever.reranker.predict(pairs, batch_size=32, activation_fn=torch.nn.Sigmoid()) if pairs else []
+        
+        # 3. Filter (Threshold = 0.50)
         results = []
         for doc, score in zip(candidates, scores):
-            if float(score) >= 0.20:
+            if float(score) >= 0.50:
                 tech_id = doc.metadata.get("technique_id", "Unknown")
                 name = doc.metadata.get("name", "Unknown")
+                tactics = doc.metadata.get("tactics", "")
                 desc = doc.metadata.get("full_description", "No description available.")[:500]
-                results.append((float(score), f"- {tech_id}: {name}\n  Description: {desc}..."))
+                results.append((float(score), f"- {tech_id}: {name} (Tactics: {tactics})\n  Description: {desc}..."))
                 
         results.sort(key=lambda x: x[0], reverse=True)
         top_results = [res[1] for res in results[:6]]

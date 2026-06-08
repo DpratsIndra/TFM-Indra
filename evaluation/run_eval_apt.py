@@ -10,7 +10,7 @@ from tqdm import tqdm
 # Add project root to sys.path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from evaluation.data_loaders import CtiHalDataLoader
+from evaluation.data_loaders import AptReportDataLoader
 from evaluation.metrics_calculator import Evaluator
 from src.langchain_pipeline.main_pipeline import run_cti_extraction
 from src.langgraph_agents.main_langgraph import run_langgraph_extraction
@@ -21,15 +21,13 @@ load_dotenv(override=True)
 
 def run_evaluation():
     """
-    Objetivo: Ejecutar una evaluación End-to-End (E2E) sobre el dataset CTI-HAL.
-    A diferencia de TRAM (que evalúa oraciones sueltas), este script procesa PDFs enteros,
-    lanzando el pipeline completo (ingesta, vector store, inferencia) y comparando
-    las técnicas extraídas contra los ficheros markdown (ground truth) reales.
+    Objetivo: Ejecutar una evaluación End-to-End sobre el dataset APT_REPORT.
+    Se utiliza el nombre de la carpeta (ej. APT28) para obtener las técnicas de MITRE como Ground Truth.
     """
-    parser = argparse.ArgumentParser(description="Run single-config E2E evaluation on CTI-HAL dataset")
-    parser.add_argument("--dataset_path", type=str, default="data/eval_datasets/ctihal", help="Path to CTI-HAL dataset")
+    parser = argparse.ArgumentParser(description="Run single-config E2E evaluation on APT_REPORT dataset")
+    parser.add_argument("--dataset_path", type=str, default="data/eval_datasets/APT_REPORT", help="Path to APT_REPORT dataset")
     parser.add_argument("--limit", type=int, default=None, help="Max number of PDFs to evaluate (for quick testing)")
-    parser.add_argument("--pipeline", type=str, choices=["langchain", "langgraph"], default="langchain", help="Which architecture to evaluate")
+    parser.add_argument("--pipeline", type=str, choices=["langchain", "langgraph"], default="langgraph", help="Which architecture to evaluate")
     args = parser.parse_args()
 
     # Leer configuración desde las variables de entorno
@@ -38,18 +36,18 @@ def run_evaluation():
     pipeline = args.pipeline
 
     print("\n" + "="*80)
-    print(f"🚀 INICIANDO EVALUACIÓN CTI-HAL")
+    print(f"🚀 INICIANDO EVALUACIÓN APT_REPORT (CROSS-REFERENCE WITH MITRE GROUPS)")
     print(f"   Pipeline:           {pipeline.upper()}")
     print(f"   VLM Extraction:     {vlm_mode}")
     print(f"   Prompt Repetition:  {rep_mode}")
     print("="*80)
 
-    print(f"\n[*] Loading CTI-HAL dataset from: {args.dataset_path}")
-    loader = CtiHalDataLoader(base_path=args.dataset_path)
+    print(f"\n[*] Loading APT_REPORT dataset from: {args.dataset_path}")
+    loader = AptReportDataLoader(base_path=args.dataset_path)
     df = loader.load()
     
     if df.empty:
-        print("[!] Error: No PDFs/MDs matched. Check folder structure (ensure 'reports' and 'annotations/.../annotator L' exist).")
+        print("[!] Error: No PDFs/MDs matched. Ensure mitre_group_mapping.json exists and dataset has PDFs.")
         sys.exit(1)
         
     if args.limit:
@@ -66,6 +64,7 @@ def run_evaluation():
     for idx, row in tqdm(df.iterrows(), total=len(df), desc=f"Eval: {pipeline}"):
         pdf_path = row['source_file']
         true_lbls = row['true_labels']
+        group_name = row.get('group_name', 'Unknown')
         predicted_ids = []
         pdf_name = os.path.basename(pdf_path)
         
@@ -123,6 +122,7 @@ def run_evaluation():
             
             detailed_results.append({
                 "source_file": pdf_path,
+                "group_name": group_name,
                 "true_labels": true_lbls,
                 "predicted_labels_raw": [r.get("technique_id") for r in results_list if "technique_id" in r],
                 "predicted_labels_normalized": predicted_ids,
@@ -132,7 +132,7 @@ def run_evaluation():
                 "extracted_ttps": results_list
             })
             
-            tqdm.write(f" 📄 {pdf_name} -> TP: {len(tp)} | FP: {len(fp)} | FN: {len(fn)}")
+            tqdm.write(f" 📄 [{group_name}] {pdf_name} -> TP: {len(tp)} | FP: {len(fp)} | FN: {len(fn)}")
             
         except Exception as e:
             tqdm.write(f" [!] ERROR crítico en {pdf_name}: {e}")
@@ -142,7 +142,7 @@ def run_evaluation():
         predicted_labels.append(predicted_ids)
         
         # Cuidar el Rate Limit del Free Tier entre documentos pesados
-        time.sleep(10)
+        time.sleep(2)
         
     # Evaluar y exportar
     df['predicted_labels'] = predicted_labels
@@ -168,7 +168,7 @@ def run_evaluation():
     tag_rep = "rep_on" if str(rep_mode).lower() in ["true", "1", "yes"] else "rep_off"
     timestamp = datetime.now().strftime("%Y%m%d_%H%M")
     
-    output_filename = f"ctihal_eval_{pipeline}_{tag_vlm}_{tag_rep}_{timestamp}.json"
+    output_filename = f"apt_eval_{pipeline}_{tag_vlm}_{tag_rep}_{timestamp}.json"
     output_path = os.path.join("data", "output", "evaluations", output_filename)
     
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
@@ -176,7 +176,7 @@ def run_evaluation():
         json.dump(final_output, f, indent=4)
         
     print("\n" + "="*80)
-    print(f"🎯 RESULTADOS MICRO PARA {pipeline.upper()}")
+    print(f"🎯 RESULTADOS MICRO PARA APT_REPORT ({pipeline.upper()})")
     print("="*80)
     print(f"F0.5-Score: {results['micro']['f0.5']}")
     print(f"F1-Score:   {results['micro']['f1']}")

@@ -39,7 +39,7 @@ class CandidateRetriever:
         else:
             self.device = device
             
-        use_remote = os.getenv("USE_REMOTE_EMBEDDINGS", "False").lower() in ("true", "1", "yes")
+        use_remote = os.getenv("EXECUTION_PROFILE", "LOCAL").upper() == "REMOTE"
         if use_remote:
             logger.info("Using remote reranker. Local CrossEncoder will not be loaded.")
             self.reranker = None
@@ -62,8 +62,12 @@ class CandidateRetriever:
         candidates = self.vector_store.similarity_search(chunk.page_content, k=top_k)
         return candidates
 
-    def get_filtered_mitre_candidates(self, report_chunks: List[Document], threshold: float = 0.50) -> List[Dict[str, Any]]:
-        logger.info(f"Starting retrieval and reranking for {len(report_chunks)} chunks...")
+    def get_filtered_mitre_candidates(self, report_chunks: List[Document], threshold: float = None) -> List[Dict[str, Any]]:
+        # Si no se provee por argumento, se lee de .env (por defecto 0.50)
+        if threshold is None:
+            threshold = float(os.getenv("RERANKER_THRESHOLD", "0.50"))
+        
+        logger.info(f"Starting retrieval and reranking for {len(report_chunks)} chunks (Threshold: {threshold})...")
         
         all_initial_candidates = []
         
@@ -71,7 +75,7 @@ class CandidateRetriever:
             candidates = self._get_initial_candidates(chunk, top_k=15)
             all_initial_candidates.append((chunk, candidates))
             
-        use_remote = os.getenv("USE_REMOTE_EMBEDDINGS", "False").lower() in ("true", "1", "yes")
+        use_remote = os.getenv("EXECUTION_PROFILE", "LOCAL").upper() == "REMOTE"
         reranker_url = os.getenv("RERANKER_URL", "http://10.0.152.198:8005/v1/rerank")
         reranker_model = os.getenv("RERANKER_MODEL_NAME", "jina-reranker-v2-base-multilingual")
 
@@ -79,7 +83,8 @@ class CandidateRetriever:
         for chunk, candidates in all_initial_candidates:
             valid_candidates = []
             if use_remote:
-                # Petición a la API remota (estilo OpenAI/TEI)
+                # Le mandamos los candidatos en texto crudo a TEI/Jina para que haga un
+                # cross-encoding real contra la query y nos devuelva un score ajustado.
                 docs_text = [doc.page_content for doc in candidates]
                 payload = {
                     "model": reranker_model,
@@ -91,9 +96,14 @@ class CandidateRetriever:
                     if response.status_code == 200:
                         res_data = response.json()
                         # Jina/TEI suele devolver results: [{"index": X, "relevance_score": Y}]
+                        import math
                         for item in res_data.get("results", []):
                             idx = item["index"]
-                            score = float(item["relevance_score"])
+                            raw_score = float(item["relevance_score"])
+                            # El endpoint TEI/Jina nos devuelve los logits en bruto (pueden ser negativos o > 1).
+                            # Le metemos una sigmoide para forzarlos a rango [0, 1] y mantener compatibilidad
+                            # con el comportamiento del modelo local y el threshold posterior.
+                            score = 1 / (1 + math.exp(-raw_score))
                             if score >= threshold:
                                 doc = candidates[idx]
                                 valid_candidates.append({
@@ -120,6 +130,11 @@ class CandidateRetriever:
                                 "score": round(float(score), 4)
                             })
             
+                if valid_candidates:
+                    logger.debug(f"[DEBUG] Chunk {chunk.page_content[:30]}... Max valid score: {max(c['score'] for c in valid_candidates)}")
+                else:
+                    logger.debug(f"[DEBUG] Chunk {chunk.page_content[:30]}... 0 candidates passed threshold {threshold}. Max score was: {max(scores) if scores else 'N/A'}")
+                
             if valid_candidates:
                 valid_candidates.sort(key=lambda x: x["score"], reverse=True)
                 for i in range(0, len(valid_candidates), 10):

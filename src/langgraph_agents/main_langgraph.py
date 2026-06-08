@@ -44,9 +44,10 @@ from src.langgraph_agents.graph_builder import process_full_report
 
 def generate_global_context(chunks: List[Any], llm: BaseChatModel) -> str:
     """
-    Generates a high-level summary of the report to serve as global context.
-    This helps the extractor agents resolve pronouns and understand the broader scope.
-    Takes the first 4 chunks to extract Threat Actor, Malware, and Target.
+    Objetivo: Generar un resumen de alto nivel (Threat Actor, Malware, Target) a partir de la 
+    introducción del reporte. Este "contexto global" se inyectará después en todos los nodos 
+    de extracción para ayudar al LLM a resolver pronombres (ej: "ellos" -> APT29) y no perder 
+    el hilo conductor de la narrativa durante el procesamiento paralelo por chunks.
     """
     # Extract text from the first 4 chunks
     # Phase1_ingestion chunks are LangChain Document objects
@@ -95,7 +96,11 @@ def generate_global_context(chunks: List[Any], llm: BaseChatModel) -> str:
         return "Global context could not be generated."
 
 def run_langgraph_extraction(pdf_path: str):
-    """Función de entrada limpia para invocar todo el pipeline de LangGraph desde scripts de evaluación."""
+    """
+    Objetivo: Actuar como punto de entrada limpio para invocar toda la arquitectura multi-agente
+    sobre un PDF. Orquesta la Fase 1 (ingesta), extrae el contexto global y lanza el grafo.
+    Devuelve los TTPs consolidados y las métricas de tiempo para la evaluación.
+    """
     import time
     t0 = time.time()
     
@@ -130,8 +135,9 @@ def run_langgraph_extraction(pdf_path: str):
     
     timing_metrics = {
         "phase1_ingestion_seconds": round(p1_time, 2),
-        "phase2_context_seconds": round(p2_time, 2),
-        "phase3_extraction_seconds": round(p3_time, 2)
+        "phase3_retrieval_seconds": round(p2_time, 2), # Using Context Generation as setup/retrieval equivalent
+        "phase4_inference_seconds": round(p3_time, 2),
+        "langgraph_internal_breakdown": result_dict.get("timing_breakdown_phase3", {})
     }
     
     return extracted_ttps, timing_metrics
@@ -185,12 +191,12 @@ if __name__ == "__main__":
     p2_time = time.time() - t1
     
     # 3. Execution Phase (Map-Reduce)
-    print("\n[*] [INFO] Phase 3: Starting Graph Execution (Map-Reduce)...")
+    print("\n[*] [INFO] Phase 4: Starting Graph Execution (Map-Reduce Inference)...")
     t2 = time.time()
     # === CAMBIO AQUI ===
     result_dict = process_full_report(pdf_path, global_context, sanitized_chunks)
     p3_time = time.time() - t2
-    print("[+] [INFO] Phase 3: Graph Execution Completed.")
+    print("[+] [INFO] Phase 4: Graph Execution Completed.")
     
     # Extraer variables
     extracted_ttps = result_dict.get("extracted_ttps", [])
@@ -206,8 +212,9 @@ if __name__ == "__main__":
         "total_execution_time_minutes": round(total_execution_time / 60.0, 2),
         "timing_breakdown": {
             "phase1_ingestion_seconds": round(p1_time, 2),
-            "phase2_context_seconds": round(p2_time, 2),
-            "phase3_extraction_seconds": round(p3_time, 2)
+            "phase3_retrieval_seconds": round(p2_time, 2),
+            "phase4_inference_seconds": round(p3_time, 2),
+            "langgraph_internal_breakdown": p3_breakdown
         },
         "extracted_ttps": extracted_ttps
     }

@@ -124,6 +124,76 @@ def load_mitre_json() -> dict:
 # LANGCHAIN TOOLS
 # ==============================================================================
 
+def get_mitre_candidates(query: str) -> list:
+    """Semantic search without the @tool decorator for direct node use. Returns a list of strings."""
+    retriever = get_retriever()
+    if not retriever:
+        return []
+        
+    try:
+        import os
+        import requests
+        # 1. Hybrid Search
+        candidates = retriever.vector_store.similarity_search(query, k=15)
+        if not candidates:
+            return []
+            
+        # 2. Rerank
+        # Reevaluamos los candidatos devueltos por Qdrant para tener scores más finos.
+        # En producción usamos Jina (remoto), y en local tiramos del CrossEncoder por defecto.
+        use_remote = os.getenv("EXECUTION_PROFILE", "LOCAL").upper() == "REMOTE"
+        reranker_url = os.getenv("RERANKER_URL", "http://10.0.152.198:8005/v1/rerank")
+        reranker_model = os.getenv("RERANKER_MODEL_NAME", "jina-reranker-v2-base-multilingual")
+        
+        scores = []
+        if use_remote and candidates:
+            docs_text = [doc.page_content for doc in candidates]
+            payload = {
+                "model": reranker_model,
+                "query": query,
+                "documents": docs_text
+            }
+            try:
+                response = requests.post(reranker_url, json=payload, headers={"Authorization": "Bearer EMPTY"})
+                if response.status_code == 200:
+                    res_data = response.json()
+                    scores = [0.0] * len(candidates)
+                    import math
+                    for item in res_data.get("results", []):
+                        idx = item["index"]
+                        raw_score = float(item["relevance_score"])
+                        # Jina devuelve logits puros que no nos sirven para el corte de 0.50.
+                        # Comprimimos a 0-1 con sigmoide igual que hace el CrossEncoder en local.
+                        scores[idx] = 1 / (1 + math.exp(-raw_score))
+            except Exception as e:
+                print(f"Error calling remote reranker: {e}")
+                scores = [0.0] * len(candidates)
+        else:
+            import torch
+            pairs = [[query, doc.page_content] for doc in candidates]
+            scores = retriever.reranker.predict(pairs, batch_size=32, activation_fn=torch.nn.Sigmoid()) if pairs else []
+        
+        # 3. Filter (Threshold)
+        threshold = float(os.getenv("RERANKER_THRESHOLD", "0.50"))
+        if scores:
+            print(f"[DEBUG] get_mitre_candidates - Max Reranker Score before filtering: {max(scores):.4f}")
+            
+        results = []
+        for doc, score in zip(candidates, scores):
+            if float(score) >= threshold:
+                tech_id = doc.metadata.get("technique_id", "Unknown")
+                name = doc.metadata.get("name", "Unknown")
+                tactics = doc.metadata.get("tactics", "")
+                desc = doc.metadata.get("full_description", "No description available.")[:500]
+                results.append((float(score), f"- {tech_id}: {name} (Tactics: {tactics})\n  Description: {desc}..."))
+                
+        results.sort(key=lambda x: x[0], reverse=True)
+        return [res[1] for res in results]
+        
+    except Exception as e:
+        print(f"Error during search: {str(e)}")
+        return []
+
 @tool("MITRE_Oracle")
 def mitre_oracle(query: str) -> str:
     """Use this tool to search the MITRE ATT&CK database using semantic search."""
@@ -143,7 +213,7 @@ def mitre_oracle(query: str) -> str:
         # 2. Rerank
         import os
         import requests
-        use_remote = os.getenv("USE_REMOTE_EMBEDDINGS", "False").lower() in ("true", "1", "yes")
+        use_remote = os.getenv("EXECUTION_PROFILE", "LOCAL").upper() == "REMOTE"
         reranker_url = os.getenv("RERANKER_URL", "http://10.0.152.198:8005/v1/rerank")
         reranker_model = os.getenv("RERANKER_MODEL_NAME", "jina-reranker-v2-base-multilingual")
         
@@ -160,9 +230,13 @@ def mitre_oracle(query: str) -> str:
                 if response.status_code == 200:
                     res_data = response.json()
                     scores = [0.0] * len(candidates)
+                    import math
                     for item in res_data.get("results", []):
                         idx = item["index"]
-                        scores[idx] = float(item["relevance_score"])
+                        raw_score = float(item["relevance_score"])
+                        # Jina devuelve logits puros que no nos sirven para el corte.
+                        # Comprimimos a 0-1 con sigmoide igual que hace el CrossEncoder en local.
+                        scores[idx] = 1 / (1 + math.exp(-raw_score))
             except Exception as e:
                 print(f"Error calling remote reranker: {e}")
                 scores = [0.0] * len(candidates)
@@ -170,14 +244,19 @@ def mitre_oracle(query: str) -> str:
             pairs = [[query, doc.page_content] for doc in candidates]
             scores = retriever.reranker.predict(pairs, batch_size=32, activation_fn=torch.nn.Sigmoid()) if pairs else []
         
-        # 3. Filter (Threshold = 0.40)
+        # 3. Filter (Threshold)
+        threshold = float(os.getenv("RERANKER_THRESHOLD", "0.50"))
+        if scores:
+            print(f"[DEBUG] mitre_oracle - Max Reranker Score before filtering: {max(scores):.4f}")
+            
         results = []
         for doc, score in zip(candidates, scores):
-            if float(score) >= 0.40:
+            if float(score) >= threshold:
                 tech_id = doc.metadata.get("technique_id", "Unknown")
                 name = doc.metadata.get("name", "Unknown")
+                tactics = doc.metadata.get("tactics", "")
                 desc = doc.metadata.get("full_description", "No description available.")[:500]
-                results.append((float(score), f"- {tech_id}: {name}\n  Description: {desc}..."))
+                results.append((float(score), f"- {tech_id}: {name} (Tactics: {tactics})\n  Description: {desc}..."))
                 
         results.sort(key=lambda x: x[0], reverse=True)
         top_results = [res[1] for res in results[:6]]

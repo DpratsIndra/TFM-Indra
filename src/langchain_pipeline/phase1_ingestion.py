@@ -15,9 +15,12 @@ from src.core.ioc_masker import IoCMasker
 
 class ReportIngestor:
     """
-    Handles Phase 1 of the LangChain pipeline: Ingestion.
-    Responsible for loading PDF reports, filtering noise (headers, footers, boilerplate),
-    reconstructing structural Markdown, masking IoCs, and chunking semantically.
+    Fase 1: Ingesta y Particionado Semántico.
+    Objetivo: Transformar un PDF crudo en fragmentos de texto listos para el LLM.
+    - Modo Normal (Docling): Usa extracción tradicional para sacar texto y tablas.
+    - Modo VLM (Gemini): Convierte las páginas a imagen y le pide al LLM multimodal que transcriba
+      el texto. Muy útil para no perder info vital oculta en pantallazos negros de terminales.
+    Al final, ofusca los IoCs (IPs, hashes) para evitar sesgos y trocea el texto.
     """
 
     def __init__(self, chunk_size: int = 3500, chunk_overlap: int = 500, use_vlm: bool = False) -> None:
@@ -64,9 +67,10 @@ class ReportIngestor:
         if not os.path.exists(file_path):
             raise FileNotFoundError(f"The file {file_path} does not exist.")
             
+        from langchain_google_genai import ChatGoogleGenerativeAI
         logger.info(f"Loading PDF '{file_path}' using Multimodal VLM extraction (Gemini Flash)...")
-        
-        gemini_model = os.getenv("GEMINI_MODEL", "gemini-1.5-flash") # 1.5-flash es multimodal por defecto
+        # Por ahora forzamos Gemini siempre para VLM, ya que el cluster remoto vLLM no tiene modelo visual.
+        gemini_model = os.getenv("GEMINI_MODEL", "gemini-flash-lite-latest")
         llm = ChatGoogleGenerativeAI(model=gemini_model, temperature=0.0, max_retries=3)
         
         doc = fitz.open(file_path)
@@ -81,8 +85,10 @@ class ReportIngestor:
             img_base64 = base64.b64encode(img_data).decode("utf-8")
             
             prompt_text = (
-                "You are an expert CTI analyst and OCR specialist. Transcribe ALL text from this page of a cyber threat report.\n"
-                "CRITICAL INSTRUCTION: Pay special attention to images, dark terminal screenshots, and code snippets. "
+                "You are an expert Cyber Threat Intelligence parser.\n"
+                "Extract all text, terminal logs, and tables from this image perfectly.\n"
+                "Important: The document may be in any language (e.g., Spanish, Russian, Chinese). Transcribe it in its original language, do not translate it.\n"
+                "Do not add any commentary. Return only the raw extracted text formatted in Markdown."
                 "If you see any commands, URLs, or code inside an image, transcribe it exactly as it appears and wrap it in a markdown code block.\n"
                 "Do NOT summarize the page. Just provide the exact transcription."
             )
@@ -150,7 +156,25 @@ class ReportIngestor:
             
         logger.info(f"Loading PDF '{file_path}' using Docling (Pages detected: {num_pages})...")
         
-        converter = DocumentConverter()
+        try:
+            from docling.document_converter import DocumentConverter, PdfFormatOption
+            from docling.datamodel.pipeline_options import PdfPipelineOptions, EasyOcrOptions
+            from docling.datamodel.base_models import InputFormat
+            
+            # EasyOCR usa PyTorch y descarga los idiomas automáticamente por Python.
+            # Incluimos los idiomas más comunes en reportes CTI (Inglés, Ruso, Chino, Árabe, Coreano, etc.)
+            ocr_options = EasyOcrOptions(lang=["en", "es", "ru", "fr", "de", "ch_sim", "ch_tra", "ar", "fa", "ko", "ja"])
+            pipeline_options = PdfPipelineOptions(do_ocr=True, ocr_options=ocr_options)
+            
+            converter = DocumentConverter(
+                allowed_formats=[InputFormat.PDF],
+                format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options)}
+            )
+        except ImportError:
+            logger.warning("[WARNING] EasyOCR options failed to import. Falling back to default Docling converter.")
+            from docling.document_converter import DocumentConverter
+            converter = DocumentConverter()
+            
         result = converter.convert(file_path)
         doc = result.document
         

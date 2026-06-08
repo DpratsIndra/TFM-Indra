@@ -55,14 +55,10 @@ logging.getLogger("httpx").setLevel(logging.CRITICAL)
 
 def run_cti_extraction(pdf_path: str) -> str:
     """
-    Orquesta el flujo completo de 4 Fases de LangChain para extraer 
-    las tácticas y técnicas de MITRE ATT&CK desde un reporte CTI.
-    
-    Args:
-        pdf_path (str): Ruta absoluta o relativa al reporte en formato PDF.
-        
-    Returns:
-        str: Cadena JSON formateada con las detecciones TTP confirmadas.
+    Objetivo: Ejecutar el flujo original y secuencial de LangChain (Fases 1 a 4).
+    A diferencia de LangGraph, aquí la inferencia (Fase 4) se hace chunk por chunk 
+    y se vuelca directamente en JSON, sin agentes de validación intermedios.
+    Se utiliza como baseline para comparar el rendimiento con LangGraph en las evaluaciones.
     """
     logger.info(f"[INFO] Starting CTI extraction for: {pdf_path}")
     

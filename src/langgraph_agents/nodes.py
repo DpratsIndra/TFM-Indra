@@ -7,7 +7,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 
 from .state import ChunkState
-from .tools import mitre_oracle
+from .tools import mitre_oracle, get_mitre_candidates
 
 # ==============================================================================
 # LLM FACTORY
@@ -61,35 +61,48 @@ def safe_invoke(callable_chain, input_data):
 
 def triage_node(state: ChunkState) -> dict:
     """
-    Goal: Act as a cheap, fast filter to drop irrelevant chunks 
-    (e.g., legal disclaimers, marketing noise).
+    Objetivo: Actuar como un filtro rápido de bajo coste.
+    Este agente lee el chunk y decide si contiene Inteligencia de Amenazas (TTPs, atacantes) 
+    o si es pura paja (índices, bibliografía, relleno). Si es irrelevante, cortamos la ejecución 
+    del chunk aquí mismo y ahorramos tokens en los agentes pesados.
     """
+    import time
+    t0 = time.time()
+    chunk_text = state["chunk_text"]
+    
     llm = get_llm(tier="lite")
     structured_llm = llm.with_structured_output(TriageDecision)
     
     prompt = ChatPromptTemplate.from_messages([
         ("system", "Role: Cyber Threat Intelligence Analyst.\n"
                    "Task: Perform a binary classification on text chunks.\n"
-                   "Condition: Return True if the text contains cybersecurity threat intelligence, attacker behavior, or technical indicators. Return False otherwise."),
+                   "Condition: Return True if the text contains cybersecurity threat intelligence, attacker behavior, or technical indicators. Return False otherwise.\n"
+                   "Note: The text may be in any language (Spanish, Russian, etc.). Analyze it natively."),
         ("human", "<text>\n{chunk_text}\n</text>")
     ])
     
     chain = prompt | structured_llm
     
-    result = safe_invoke(chain, {"chunk_text": state["chunk_text"]})
+    result = safe_invoke(chain, {"chunk_text": chunk_text})
     
     if result is None:
         is_relevant = True
     else:
         is_relevant = result.is_relevant
         
-    print(f"[DEBUG] Triage - Chunk relevant: {is_relevant}")
-    return {"is_relevant": is_relevant}
+    c_idx = state.get("chunk_metadata", {}).get("chunk_index", "?")
+    print(f"[DEBUG] [Chunk {c_idx}] Triage - Is Relevant: {is_relevant}")
+    return {"is_relevant": is_relevant, "triage_time": time.time() - t0}
 
 def extractor_node(state: ChunkState) -> dict:
     """
-    Goal: Translate text to a Dense Tactical Summary, use Mechanical Retrieval, and draft TTPs.
+    Objetivo: El corazón del sistema. Analiza el chunk, extrae comportamientos tácticos,
+    consulta a la base de datos vectorial (MITRE_Oracle) para anclar el comportamiento a 
+    una técnica oficial de MITRE ATT&CK, y genera un borrador del TTP.
+    Si viene rebotado del Validator con feedback, intenta buscar técnicas alternativas.
     """
+    import time
+    t0 = time.time()
     chunk_text = state["chunk_text"]
     val_feedback = state.get("validation_feedback", "")
     approved_ttps = state.get("approved_ttps", [])
@@ -100,18 +113,20 @@ def extractor_node(state: ChunkState) -> dict:
     translator_prompt = ChatPromptTemplate.from_messages([
         ("system", "Role: Cyber Threat Intelligence Analyst.\n"
                    "Task: Extract a comma-separated list of abstract cybersecurity behaviors, tactics, and mechanisms from the text.\n"
-                   "Instructions: Translate specific tools into their tactical purpose (e.g., 'Ngrok' -> 'Protocol Tunneling'). Output only the keywords."),
+                   "Instructions: The text may be in any language. Translate specific tools into their tactical purpose (e.g., 'Ngrok' -> 'Protocol Tunneling'). Output ONLY the keywords in English."),
         ("human", "<text>\n{chunk_text}\n</text>")
     ])
     
     translation_chain = translator_prompt | translator_llm | StrOutputParser()
+    c_idx = state.get("chunk_metadata", {}).get("chunk_index", "?")
+    
     try:
         abstract_keywords = translation_chain.invoke({"chunk_text": chunk_text})
     except Exception as e:
-        print(f"[ERROR] Translation Error: {e}")
+        print(f"[ERROR] [Chunk {c_idx}] Translation Error: {e}")
         abstract_keywords = ""
         
-    print(f"[DEBUG] Extractor - Abstract Keywords: {abstract_keywords}")
+    print(f"[DEBUG] [Chunk {c_idx}] Extractor - Abstract Keywords: {abstract_keywords}")
     
     # 2. DYNAMIC MECHANICAL RETRIEVAL
     # Pass the RAW TEXT plus the keywords to the Oracle so no context is lost.
@@ -119,41 +134,27 @@ def extractor_node(state: ChunkState) -> dict:
     if val_feedback:
         search_query += f"\nPast Rejections & Feedback: {val_feedback}"
         
-    candidates_str = mitre_oracle.invoke(search_query)
+    candidates_list = get_mitre_candidates(search_query)
     
-    if "No matching MITRE techniques found" in candidates_str or "Error" in candidates_str or "No highly confident MITRE techniques" in candidates_str:
-        print("[DEBUG] Extractor - No candidates found via Mechanical Retrieval. Returning empty drafts.")
-        return {"draft_ttps": [], "loop_count": state.get("loop_count", 0) + 1}
+    if not candidates_list:
+        print(f"[DEBUG] [Chunk {c_idx}] Extractor - No candidates found via Mechanical Retrieval. Returning empty drafts.")
+        return {"draft_ttps": [], "loop_count": state.get("loop_count", 0) + 1, "extractor_time": state.get("extractor_time", 0.0) + (time.time() - t0)}
     
     # 3. EXTRACTION (BRAINSTORMER)
     llm = get_llm(tier="pro")
     structured_llm = llm.with_structured_output(DraftTTPList)
     
-    prompt_text = f"Global Context: {state.get('global_context', '')}\n\n"
-    
-    if approved_ids:
-        prompt_text += f"ALREADY APPROVED TTPs FOR THIS CHUNK: {approved_ids}\n"
-        prompt_text += "Do NOT propose these exact technique IDs again. Search the text for OTHER distinct malicious behaviors.\n"
-        prompt_text += "If you cannot find any NEW behaviors, you MUST return an empty list.\n\n"
-        
-    if val_feedback:
-        prompt_text += f"PAST VALIDATOR REJECTIONS (CRITICAL: DO NOT PROPOSE THESE REJECTED TTPs AGAIN):\n{val_feedback}\n\n"
-        
-    prompt_text += f"Candidate MITRE Techniques:\n{candidates_str}\n\n"
-    prompt_text += f"Source Text:\n{chunk_text}"
-    
     use_prompt_repetition = os.getenv("USE_PROMPT_REPETITION", "False").lower() in ("true", "1", "yes")
-    
     sys_prompt = (
         "Role: Cyber Threat Intelligence Analyst.\n"
         "Task: Extract applicable MITRE ATT&CK techniques from the provided candidate list based on the source text.\n\n"
         "Rules:\n"
-        "1. Extract all applicable new techniques. Do not artificially limit the output.\n"
-        "2. Ignore previously approved or rejected techniques.\n"
-        "3. Focus exclusively on observable actions (e.g., executing commands, dropping files, establishing tunnels). Do not map analytical context (geopolitics, victimology, motives) to techniques.\n"
-        "4. Output strictly according to the requested JSON schema."
+        "1. Multilingual: The source text may be in Spanish, Russian, Chinese, or any other language. Comprehend it natively but write your justification in English.\n"
+        "2. Extract all applicable new techniques. Do not artificially limit the output.\n"
+        "3. Ignore previously approved or rejected techniques.\n"
+        "4. Focus exclusively on observable actions (e.g., executing commands, dropping files). Do not map analytical context to techniques.\n"
+        "5. Output strictly according to the requested JSON schema."
     )
-    
     if use_prompt_repetition:
         sys_prompt = f"{sys_prompt}\n\nReminder of Rules:\n{sys_prompt}"
         
@@ -162,30 +163,51 @@ def extractor_node(state: ChunkState) -> dict:
         ("human", "{prompt_text}")
     ])
     
-    parsed_result = safe_invoke(prompt | structured_llm, {"prompt_text": prompt_text})
+    # Chunk the candidates into blocks of 10 to avoid context overload
+    candidates_batches = [candidates_list[i:i+10] for i in range(0, len(candidates_list), 10)]
+    all_drafts = []
     
-    if parsed_result is None:
-        drafts = []
-    else:
-        drafts = []
-        loc = f"Page {state.get('chunk_metadata', {}).get('page_number', '?')}, Chunk {state.get('chunk_metadata', {}).get('chunk_index', '?')}"
-        for ttp in parsed_result.ttps:
-            draft = ttp.model_dump()
-            draft["location"] = loc
-            drafts.append(draft)
+    for batch in candidates_batches:
+        candidates_str = "CANDIDATE TECHNIQUES:\n" + "\n\n".join(batch)
         
-    draft_ids = [d.get("technique_id", "Unknown") for d in drafts]
-    print(f"[DEBUG] Extractor - Draft TTPs found: {len(drafts)} {draft_ids}")
-    return {"draft_ttps": drafts, "loop_count": state.get("loop_count", 0) + 1}
+        prompt_text = f"Global Context: {state.get('global_context', '')}\n\n"
+        
+        if approved_ids:
+            prompt_text += f"ALREADY APPROVED TTPs FOR THIS CHUNK: {approved_ids}\n"
+            prompt_text += "Do NOT propose these exact technique IDs again. Search the text for OTHER distinct malicious behaviors.\n"
+            prompt_text += "If you cannot find any NEW behaviors, you MUST return an empty list.\n\n"
+            
+        if val_feedback:
+            prompt_text += f"PAST VALIDATOR REJECTIONS (CRITICAL: DO NOT PROPOSE THESE REJECTED TTPs AGAIN):\n{val_feedback}\n\n"
+            
+        prompt_text += f"Candidate MITRE Techniques:\n{candidates_str}\n\n"
+        prompt_text += f"Source Text:\n{chunk_text}"
+        
+        parsed_result = safe_invoke(prompt | structured_llm, {"prompt_text": prompt_text})
+        
+        if parsed_result is not None:
+            loc = f"Page {state.get('chunk_metadata', {}).get('page_number', '?')}, Chunk {state.get('chunk_metadata', {}).get('chunk_index', '?')}"
+            for ttp in parsed_result.ttps:
+                draft = ttp.model_dump()
+                draft["location"] = loc
+                all_drafts.append(draft)
+        
+    draft_ids = [d.get("technique_id", "Unknown") for d in all_drafts]
+    print(f"[DEBUG] [Chunk {c_idx}] Extractor - Draft TTPs found: {len(all_drafts)} {draft_ids}")
+    return {"draft_ttps": all_drafts, "loop_count": state.get("loop_count", 0) + 1, "extractor_time": state.get("extractor_time", 0.0) + (time.time() - t0)}
 
 def validator_node(state: ChunkState) -> dict:
     """
     Goal: Perform a 'Line-Item Veto'. Strict verification of drafted TTPs against the source text.
     """
+    import time
+    t0 = time.time()
+    c_idx = state.get("chunk_metadata", {}).get("chunk_index", "?")
+    
     draft_ttps_list = state.get("draft_ttps", [])
     if not draft_ttps_list:
-        print("[DEBUG] Validator - No drafts to validate. Skipping LLM call.")
-        return {"approved_ttps": [], "validation_feedback": "", "draft_ttps": []}
+        print(f"[DEBUG] [Chunk {c_idx}] Validator - No drafts to validate. Skipping LLM call.")
+        return {"approved_ttps": [], "validation_feedback": "", "draft_ttps": [], "validator_time": state.get("validator_time", 0.0) + (time.time() - t0)}
 
     llm = get_llm(tier="pro", temperature=0.2)
     structured_llm = llm.with_structured_output(ValidationResult)
@@ -196,11 +218,12 @@ def validator_node(state: ChunkState) -> dict:
         "Role: Cyber Threat Intelligence Analyst.\n"
         "Task: Validate drafted MITRE ATT&CK techniques against the source text.\n\n"
         "Rules:\n"
-        "1. Read the source text and the official MITRE description for each drafted technique.\n"
-        "2. Approve the technique if the text contains concrete evidence of the technical action described.\n"
-        "3. Reject the technique if it is based solely on theoretical motives, target demographics, or implies the action did not occur.\n"
-        "4. Provide specific feedback for rejected techniques to improve extraction accuracy.\n"
-        "5. Validate each technique independently."
+        "1. Multilingual: The source text may be in any language. Understand the native language but output your feedback in English.\n"
+        "2. Read the source text and the official MITRE description for each drafted technique.\n"
+        "3. Approve the technique if the text contains concrete evidence of the technical action described.\n"
+        "4. Reject the technique if it is based solely on theoretical motives or implies the action did not occur.\n"
+        "5. Provide specific feedback for rejected techniques to improve extraction accuracy.\n"
+        "6. Validate each technique independently."
     )
     
     if use_prompt_repetition:
@@ -220,32 +243,25 @@ def validator_node(state: ChunkState) -> dict:
     })
     
     if result is None:
-        print("[DEBUG] Validator - Validation failed gracefully.")
+        print(f"[DEBUG] [Chunk {c_idx}] Validator - Validation failed gracefully.")
         return {"approved_ttps": [], "validation_feedback": "", "draft_ttps": []}
         
-    valid_ttps = [ttp.model_dump() for ttp in result.valid_ttps] if result and result.valid_ttps else []
+    new_approved = [ttp.model_dump() for ttp in result.valid_ttps] if result and result.valid_ttps else []
     
     # Accumulate approved TTPs with deduplication
     current_approved = state.get("approved_ttps", [])
-    existing_ids = {t.get("technique_id") for t in current_approved}
-    
-    for ttp in valid_ttps:
-        if ttp.get("technique_id") not in existing_ids:
-            current_approved.append(ttp)
-            
+        
     # Set feedback to current loop's rejections only
-    if len(valid_ttps) == len(draft_ttps_list):
+    if len(new_approved) == len(draft_ttps_list):
         feedback = ""
     else:
         feedback = "\n".join(result.feedback_notes) if result and result.feedback_notes else ""
         
-    valid_ids = [v.get("technique_id", "Unknown") for v in current_approved]
-    print(f"[DEBUG] Validator - Total Approved TTPs so far: {len(current_approved)} {valid_ids}")
-    if feedback:
-        print(f"[DEBUG] Validator - Rejection Feedback:\n{feedback}")
+    print(f"[DEBUG] [Chunk {c_idx}] Validator - Approved {len(new_approved)}/{len(draft_ttps_list)} drafts.")
     
     return {
-        "approved_ttps": current_approved,
+        "approved_ttps": current_approved + new_approved,
         "validation_feedback": feedback,
-        "draft_ttps": []
+        "draft_ttps": [], # Limpiamos los drafts para la siguiente iteración
+        "validator_time": state.get("validator_time", 0.0) + (time.time() - t0)
     }

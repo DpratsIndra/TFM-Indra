@@ -17,3 +17,6 @@ class ChunkState(TypedDict):
     approved_ttps: List[Any]
     validation_feedback: str
     loop_count: int
+    triage_time: float
+    extractor_time: float
+    validator_time: float

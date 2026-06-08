@@ -40,12 +40,13 @@ class TTPAnalyzer:
             "Role: Cyber Threat Intelligence (CTI) Analyst.\n"
             "Task: Extract confirmed MITRE ATT&CK techniques from a report chunk based ONLY on the provided candidate techniques.\n\n"
             "Rules:\n"
+            "0. Multilingual Support: The source text may be in any language (Spanish, Russian, Chinese, etc.). Analyze it natively, but output the requested JSON schema in English.\n"
             "1. Evaluate all evidence blocks objectively.\n"
             "2. Set `is_present` to true only if the evidence technically confirms the technique. Add each confirming block to the `occurrences` list.\n"
             "3. If no blocks confirm the technique, set `is_present` to false and leave `occurrences` empty.\n"
             "4. Preserve the exact `location` and `Score` provided in the evidence tags.\n"
             "5. Map contextualized masked tags (e.g., <IoC_URL>) to their tactical intent.\n"
-            "6. Exclusion Criteria: Strictly map observable, technical intrusion activity. Exclude geopolitical context, analyst attribution theories, victimology, or historical background."
+            "6. Exclusion Criteria: Strictly map observable, technical intrusion activity. Exclude geopolitical context or attribution theories."
         )
         if self.use_prompt_repetition:
             system_instruction = f"{system_instruction}\n\nReminder of Rules:\n{system_instruction}"
@@ -96,12 +97,14 @@ class TTPAnalyzer:
         batch_responses = []
         artificial_delay = 0.0
         
-        if self.execution_profile == "AWS":
-            logger.info("AWS Profile detected: Running chain in parallel (Batching)...")
+        max_workers = int(os.getenv("MAX_CONCURRENT_CHUNKS", "2"))
+        
+        if self.execution_profile == "REMOTE" or max_workers > 1:
+            logger.info(f"Parallel batching enabled: Running LangChain inference concurrently (max_concurrency={max_workers})...")
             try:
-                batch_responses = chain.batch(inputs)
+                batch_responses = chain.batch(inputs, config={"max_concurrency": max_workers})
             except Exception as e:
-                logger.error(f"Error during AWS batching: {e}")
+                logger.error(f"Error during parallel batching: {e}")
         else:
             logger.info("LOCAL Profile detected: Running chain sequentially...")
             import time

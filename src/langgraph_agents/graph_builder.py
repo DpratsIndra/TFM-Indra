@@ -10,8 +10,9 @@ from .nodes import triage_node, extractor_node, validator_node
 
 def triage_router(state: ChunkState) -> str:
     """
-    Routes the chunk after the triage node.
-    If it's irrelevant, stop processing this chunk. Otherwise, proceed to extraction.
+    Router: Decide el siguiente paso tras el Triage.
+    Si el chunk es basura (is_relevant=False), matamos el proceso (END). 
+    Si hay contexto útil, pasamos al nodo Extractor.
     """
     if not state.get("is_relevant", True):
         return "end"
@@ -19,8 +20,8 @@ def triage_router(state: ChunkState) -> str:
 
 def extractor_router(state: ChunkState) -> str:
     """
-    Routes the chunk after the extractor node.
-    If the extractor returned 0 drafts, it means all TTPs are exhausted. We are done.
+    Router: Si el extractor devuelve 0 borradores, significa que ya hemos "agotado"
+    todos los TTPs posibles de este texto. Fin del procesamiento.
     """
     if len(state.get("draft_ttps", [])) == 0:
         return "end"
@@ -97,7 +98,10 @@ def build_chunk_graph():
 
 def consolidator_node(state: GlobalState) -> dict:
     """
-    Goal: Merge the outputs of all chunks into a final, clean list of TTPs 
+    Objetivo: Fase de "Reduce" del pipeline.
+    Recoge todos los TTPs aprobados de todos los chunks procesados en paralelo, 
+    elimina duplicados (fusionando evidencias de distintas páginas) y devuelve 
+    un JSON limpio y consolidado con el reporte final.
     matching the standard JSON schema.
     """
     all_ttps = state.get("all_approved_ttps", [])
@@ -158,54 +162,54 @@ def process_full_report(source_file: str, global_context: str, sanitized_chunks:
     extraction_time_total = 0.0
     validation_time_total = 0.0
     
-    # 1. MAP: Loop over sanitized_chunks sequentially
-    for i, chunk_data in enumerate(sanitized_chunks):
-        print(f"  -> Processing chunk {i+1}/{len(sanitized_chunks)}...")
-        
+    # 1. MAP: Loop over sanitized_chunks using ThreadPoolExecutor for parallelism
+    import os
+    import concurrent.futures
+    max_workers = int(os.getenv("MAX_CONCURRENT_CHUNKS", "2"))
+    print(f"[*] Starting MAP phase across {len(sanitized_chunks)} chunks (Concurrent workers: {max_workers})...")
+    
+    def _process_single_chunk(args):
+        i, chunk_data = args
         chunk_text = chunk_data.get("text", str(chunk_data))
         chunk_metadata = chunk_data.get("metadata", {})
         
-        # Initialize ChunkState
         initial_chunk_state: ChunkState = {
             "chunk_text": chunk_text,
             "chunk_metadata": chunk_metadata,
             "global_context": global_context,
-            "is_relevant": True,  # Will be assessed by triage
+            "is_relevant": True,
             "draft_ttps": [],
             "approved_ttps": [],
             "validation_feedback": "",
-            "loop_count": 0
+            "loop_count": 0,
+            "triage_time": 0.0,
+            "extractor_time": 0.0,
+            "validator_time": 0.0
         }
         
         try:
-            t0 = time.time()
-            # Invoke the graph for this single chunk
             chunk_result = chunk_graph.invoke(initial_chunk_state)
-            chunk_time = time.time() - t0
-            
-            # Aproximación heurística del tiempo según el camino que tomó en el grafo
-            if not chunk_result.get("is_relevant"):
-                # Murió en el Triage
-                triage_time_total += chunk_time
-            elif len(chunk_result.get("draft_ttps", [])) == 0 and len(chunk_result.get("approved_ttps", [])) == 0:
-                # Pasó Triage, fue al Extractor, pero no propuso nada (No llegó al Validator)
-                triage_time_total += (chunk_time * 0.15)
-                extraction_time_total += (chunk_time * 0.85)
-            else:
-                # Recorrió todo el camino (Triage -> Extractor -> Validator)
-                triage_time_total += (chunk_time * 0.10)
-                extraction_time_total += (chunk_time * 0.60)
-                validation_time_total += (chunk_time * 0.30)
-                
-            approved = chunk_result.get("approved_ttps", [])
-            if approved:
-                print(f"     [+] Found {len(approved)} valid TTP(s) in chunk {i+1}")
-                master_ttp_list.extend(approved)
-            else:
-                print(f"     [-] No valid TTPs found in chunk {i+1}")
-                
+            return i, chunk_result
         except Exception as e:
             print(f"     [!] Error processing chunk {i+1}: {str(e)}")
+            return i, None
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        args_list = [(i, chunk) for i, chunk in enumerate(sanitized_chunks)]
+        results = list(executor.map(_process_single_chunk, args_list))
+        
+    for i, chunk_result in results:
+        if chunk_result is None:
+            continue
+            
+        triage_time_total += chunk_result.get("triage_time", 0.0)
+        extraction_time_total += chunk_result.get("extractor_time", 0.0)
+        validation_time_total += chunk_result.get("validator_time", 0.0)
+            
+        approved = chunk_result.get("approved_ttps", [])
+        if approved:
+            print(f"     [+] Found {len(approved)} valid TTP(s) in chunk {i+1}")
+            master_ttp_list.extend(approved)
             
     print(f"[*] Map phase complete. Consolidating {len(master_ttp_list)} total TTP(s)...")
     
