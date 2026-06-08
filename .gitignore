@@ -13,3 +13,4 @@ digest.txt
 data/output
 data/eval_datasets/
 *.json
+infraestracture/qdrant_data/
