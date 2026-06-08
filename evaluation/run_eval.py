@@ -261,12 +261,15 @@ def run_tram_evaluation(file_path: str, sample_size: int = None, pipeline_type: 
     print(f"[+] Saved {len(diffs)} conflict cases for manual review in: {diff_path}")
 
 if __name__ == "__main__":
-    dataset_path = "data/eval_datasets/tram2/multi_label.json"
-    
-    if not os.path.exists(dataset_path):
-        print(f"[!] Error: Dataset not found at {dataset_path}")
+    import argparse
+    parser = argparse.ArgumentParser(description="Run single-config evaluation on TRAM dataset")
+    parser.add_argument("--dataset_path", type=str, default="data/eval_datasets/tram2/multi_label.json", help="Path to TRAM dataset")
+    parser.add_argument("--limit", type=int, default=None, help="Max number of sentences to evaluate (for quick testing)")
+    parser.add_argument("--pipeline", type=str, choices=["langchain", "langgraph"], default="langchain", help="Which architecture to evaluate")
+    args = parser.parse_args()
+
+    if not os.path.exists(args.dataset_path):
+        print(f"[!] Error: Dataset not found at {args.dataset_path}")
         sys.exit(1)
         
-    # Elige aquí qué pipeline evaluar: "langchain" o "langgraph"
-    # Cambia el sample_size para pruebas rápidas
-    run_tram_evaluation(dataset_path, sample_size=None, pipeline_type="langchain")
+    run_tram_evaluation(args.dataset_path, sample_size=args.limit, pipeline_type=args.pipeline)
