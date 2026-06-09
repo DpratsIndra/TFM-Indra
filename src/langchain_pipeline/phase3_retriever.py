@@ -42,7 +42,9 @@ class CandidateRetriever:
             self.device = device
 
         use_remote = os.getenv("EXECUTION_PROFILE", "LOCAL").upper() == "REMOTE"
-        if use_remote:
+        use_local_reranker = os.getenv("USE_LOCAL_RERANKER", "False").lower() in ("true", "1", "yes")
+        
+        if use_remote and not use_local_reranker:
             logger.info("Using remote reranker. Local CrossEncoder will not be loaded.")
             self.reranker = None
         else:
@@ -86,12 +88,13 @@ class CandidateRetriever:
             all_initial_candidates.append((chunk, candidates))
 
         use_remote = os.getenv("EXECUTION_PROFILE", "LOCAL").upper() == "REMOTE"
+        use_local_reranker = os.getenv("USE_LOCAL_RERANKER", "False").lower() in ("true", "1", "yes")
         reranker_url = os.getenv("RERANKER_URL")
         reranker_model = os.getenv(
             "RERANKER_MODEL_NAME", "jina-reranker-v2-base-multilingual"
         )
 
-        if use_remote and not reranker_url:
+        if use_remote and not use_local_reranker and not reranker_url:
             raise ValueError(
                 "RERANKER_URL must be defined in .env for REMOTE execution profile"
             )
@@ -99,7 +102,7 @@ class CandidateRetriever:
         chunk_results = []
         for chunk, candidates in all_initial_candidates:
             valid_candidates = []
-            if use_remote:
+            if use_remote and not use_local_reranker:
                 # Le mandamos los candidatos en texto crudo a TEI/Jina para que haga un
                 # cross-encoding real contra la query y nos devuelva un score ajustado.
                 docs_text = [doc.page_content for doc in candidates]

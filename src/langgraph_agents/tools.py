@@ -163,18 +163,19 @@ def get_mitre_candidates(query: str, top_k: int = 25, offset: int = 0) -> tuple:
         # Reevaluamos los candidatos devueltos por Qdrant para tener scores más finos.
         # En producción usamos Jina (remoto), y en local tiramos del CrossEncoder por defecto.
         use_remote = os.getenv("EXECUTION_PROFILE", "LOCAL").upper() == "REMOTE"
+        use_local_reranker = os.getenv("USE_LOCAL_RERANKER", "False").lower() in ("true", "1", "yes")
         reranker_url = os.getenv("RERANKER_URL")
         reranker_model = os.getenv(
             "RERANKER_MODEL_NAME", "jina-reranker-v2-base-multilingual"
         )
 
-        if use_remote and not reranker_url:
+        if use_remote and not use_local_reranker and not reranker_url:
             raise ValueError(
                 "RERANKER_URL must be defined in .env for REMOTE execution profile"
             )
 
         scores = []
-        if use_remote and candidates:
+        if use_remote and not use_local_reranker and candidates:
             docs_text = [doc.page_content for doc in candidates]
             payload = {"model": reranker_model, "query": query, "documents": docs_text}
             try:
