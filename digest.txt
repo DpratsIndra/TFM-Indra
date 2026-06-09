@@ -3,14 +3,19 @@ Directory structure:
     ├── ARCHITECTURE.md
     ├── requirements-dev.txt
     ├── requirements.txt
+    ├── run_all_evals.sh
     ├── TFM.code-workspace
     ├── dashboard/
     │   └── cti_inspector.py
     ├── evaluation/
     │   ├── data_loaders.py
+    │   ├── generate_apt_mapping.py
+    │   ├── generate_ctibench_csv.py
     │   ├── generate_ctihal_csv.py
     │   ├── metrics_calculator.py
     │   ├── run_eval.py
+    │   ├── run_eval_apt.py
+    │   ├── run_eval_ctibench.py
     │   └── run_eval_ctihal.py
     ├── infrastructure/
     │   └── docker-compose.yml
@@ -115,6 +120,7 @@ fastembed
 pymupdf
 pydantic
 requests
+easyocr
 
 # IA y Embeddings
 sentence-transformers
@@ -127,6 +133,54 @@ python-dotenv
 pandas
 scikit-learn
 tqdm
+
+
+
+================================================
+FILE: run_all_evals.sh
+================================================
+#!/bin/bash
+
+# Script para ejecutar todas las configuraciones de evaluación (Langchain y Langgraph)
+# con las diferentes combinaciones de VLM y PROMPT REPETITION
+
+# Puedes cambiar el script a evaluar, por defecto usará run_eval.py (TRAM)
+# Otros ejemplos: evaluation/run_eval_ctihal.py, evaluation/run_eval_apt.py
+EVAL_SCRIPT=${1:-"evaluation/run_eval.py"}
+
+echo "======================================================="
+echo "Iniciando suite de evaluaciones en: $EVAL_SCRIPT"
+echo "======================================================="
+
+# --- LANGCHAIN ---
+echo "[*] Ejecutando LANGCHAIN: Nada (VLM=False, Repetition=False)"
+USE_VLM_EXTRACTION=False USE_PROMPT_REPETITION=False PYTHONPATH=. python "$EVAL_SCRIPT" --pipeline langchain
+
+echo "[*] Ejecutando LANGCHAIN: Solo VLM (VLM=True, Repetition=False)"
+USE_VLM_EXTRACTION=True USE_PROMPT_REPETITION=False PYTHONPATH=. python "$EVAL_SCRIPT" --pipeline langchain
+
+echo "[*] Ejecutando LANGCHAIN: Solo Repetition (VLM=False, Repetition=True)"
+USE_VLM_EXTRACTION=False USE_PROMPT_REPETITION=True PYTHONPATH=. python "$EVAL_SCRIPT" --pipeline langchain
+
+echo "[*] Ejecutando LANGCHAIN: Ambas (VLM=True, Repetition=True)"
+USE_VLM_EXTRACTION=True USE_PROMPT_REPETITION=True PYTHONPATH=. python "$EVAL_SCRIPT" --pipeline langchain
+
+# --- LANGGRAPH ---
+echo "[*] Ejecutando LANGGRAPH: Nada (VLM=False, Repetition=False)"
+USE_VLM_EXTRACTION=False USE_PROMPT_REPETITION=False PYTHONPATH=. python "$EVAL_SCRIPT" --pipeline langgraph
+
+echo "[*] Ejecutando LANGGRAPH: Solo VLM (VLM=True, Repetition=False)"
+USE_VLM_EXTRACTION=True USE_PROMPT_REPETITION=False PYTHONPATH=. python "$EVAL_SCRIPT" --pipeline langgraph
+
+echo "[*] Ejecutando LANGGRAPH: Solo Repetition (VLM=False, Repetition=True)"
+USE_VLM_EXTRACTION=False USE_PROMPT_REPETITION=True PYTHONPATH=. python "$EVAL_SCRIPT" --pipeline langgraph
+
+echo "[*] Ejecutando LANGGRAPH: Ambas (VLM=True, Repetition=True)"
+USE_VLM_EXTRACTION=True USE_PROMPT_REPETITION=True PYTHONPATH=. python "$EVAL_SCRIPT" --pipeline langgraph
+
+echo "======================================================="
+echo "Suite de evaluaciones finalizada."
+echo "======================================================="
 
 
 
@@ -334,7 +388,226 @@ class CtiHalDataLoader(BaseDataLoader):
                 "true_labels": true_labels
             })
             
+            
         return pd.DataFrame(records)
+
+class AptReportDataLoader(BaseDataLoader):
+    """
+    Carga el dataset APT_REPORT.
+    Usa el nombre de la carpeta (nombre del grupo APT) para buscar en la base de datos STIX
+    de MITRE ATT&CK todas las técnicas históricamente atribuidas a ese grupo.
+    Estas técnicas se usarán como las 'true_labels' para los reportes de esa carpeta.
+    """
+    def __init__(self, base_path: str = "data/eval_datasets/APT_REPORT"):
+        self.base_path = base_path
+        self.mapping_file = os.path.join(base_path, "mitre_group_mapping.json")
+        
+    def load(self, file_path: str = None) -> pd.DataFrame:
+        if not os.path.exists(self.mapping_file):
+            print(f"[*] Mapping file not found at {self.mapping_file}. Generating it now...")
+            import subprocess
+            import sys
+            script_path = os.path.join(os.path.dirname(__file__), "generate_apt_mapping.py")
+            subprocess.run([sys.executable, script_path], check=True)
+            
+        with open(self.mapping_file, "r") as f:
+            group_mapping = json.load(f)
+            
+        records = []
+        
+        # Recorrer todas las carpetas dentro de APT_REPORT
+        for item in os.listdir(self.base_path):
+            dir_path = os.path.join(self.base_path, item)
+            if not os.path.isdir(dir_path) or item.startswith("."):
+                continue
+                
+            # Normalizar el nombre de la carpeta para buscar el alias
+            alias = item.lower().strip()
+            
+            # Buscar coincidencia exacta o parcial estricta
+            matched_techniques = []
+            if alias in group_mapping:
+                matched_techniques = group_mapping[alias]
+            else:
+                # Intento de matching estricto ignorando guiones, espacios y mayúsculas
+                clean_alias = alias.replace("-", "").replace(" ", "").replace("_", "")
+                for map_alias, techs in group_mapping.items():
+                    clean_map_alias = map_alias.replace("-", "").replace(" ", "").replace("_", "")
+                    if clean_alias == clean_map_alias:
+                        matched_techniques = techs
+                        break
+                        
+            if not matched_techniques:
+                continue # Saltamos las carpetas de las que no tenemos técnicas en MITRE
+                
+            # Encontrar todos los PDFs en esta carpeta de forma robusta
+            pdf_files = []
+            for root_dir, _, files in os.walk(dir_path):
+                for f in files:
+                    if f.lower().endswith(".pdf"):
+                        pdf_files.append(os.path.join(root_dir, f))
+                        
+            for pdf in pdf_files:
+                records.append({
+                    "source_file": pdf,
+                    "true_labels": matched_techniques,
+                    "group_name": item
+                })
+                
+        df = pd.DataFrame(records)
+        print(f"[*] AptReportDataLoader loaded {len(df)} PDFs with MITRE Group mappings.")
+        return df
+
+class CtibenchDataLoader(BaseDataLoader):
+    """
+    Carga el dataset CTIBench (cti-ate.tsv) convertido a CSV.
+    A diferencia de CTI-HAL, este dataset contiene descripciones cortas (text)
+    y no ficheros PDF completos.
+    """
+    def __init__(self, base_path: str = "data/eval_datasets/ctibench"):
+        self.base_path = base_path
+        self.csv_path = os.path.join(base_path, "ctibench_mapping.csv")
+        
+    def load(self, file_path: str = None) -> pd.DataFrame:
+        if not os.path.exists(self.csv_path):
+            print("[*] ctibench_mapping.csv not found. Generating it now...")
+            import subprocess
+            import sys
+            script_path = os.path.join(os.path.dirname(__file__), "generate_ctibench_csv.py")
+            subprocess.run([sys.executable, script_path], check=True)
+            
+        df = pd.read_csv(self.csv_path)
+        records = []
+        for _, row in df.iterrows():
+            labels_str = str(row['true_labels']).strip()
+            if not labels_str or labels_str == 'nan':
+                continue
+                
+            true_labels = [l.strip() for l in labels_str.split(',') if l.strip()]
+            records.append({
+                "text": row['text'],
+                "true_labels": true_labels
+            })
+            
+        return pd.DataFrame(records)
+
+
+
+================================================
+FILE: evaluation/generate_apt_mapping.py
+================================================
+import urllib.request
+import json
+import os
+
+def generate_mapping(output_path: str = "data/eval_datasets/APT_REPORT/mitre_group_mapping.json"):
+    """
+    Descarga la base de datos oficial STIX de MITRE ATT&CK (Enterprise) 
+    y genera un diccionario mapeando todos los aliases de grupos APT 
+    a sus técnicas históricamente utilizadas.
+    """
+    print("[*] Leyendo base de datos STIX local de MITRE ATT&CK Enterprise...")
+    local_stix_path = "data/mitre_data/enterprise-attack.json"
+    
+    if not os.path.exists(local_stix_path):
+        print(f"[!] Error: El archivo {local_stix_path} no existe. Por favor, corre primero la fase de indexación o descárgalo.")
+        return
+        
+    try:
+        with open(local_stix_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as e:
+        print(f"[!] Error leyendo los datos locales de MITRE: {e}")
+        return
+
+    groups = {}
+    relationships = []
+
+    print("[*] Parseando objetos STIX (Grupos y Relaciones)...")
+    for obj in data.get("objects", []):
+        if obj["type"] == "intrusion-set":
+            # Guardar el nombre del grupo y sus alias
+            aliases = [obj.get("name", "").lower()] + [a.lower() for a in obj.get("aliases", [])]
+            groups[obj["id"]] = {"name": obj["name"], "aliases": aliases, "techniques": set()}
+        elif obj["type"] == "relationship" and obj["relationship_type"] == "uses":
+            relationships.append(obj)
+
+    # Mapa para traducir un ID interno de STIX a un ID de MITRE (ej. T1059)
+    tech_map = {
+        obj["id"]: obj.get("external_references", [{}])[0].get("external_id") 
+        for obj in data.get("objects", []) 
+        if obj["type"] == "attack-pattern"
+    }
+
+    # Asociar técnicas a los grupos usando las relaciones 'uses'
+    for rel in relationships:
+        if rel["source_ref"] in groups and rel["target_ref"] in tech_map:
+            tech_id = tech_map[rel["target_ref"]]
+            if tech_id:
+                groups[rel["source_ref"]]["techniques"].add(tech_id)
+
+    # Aplanar el diccionario: Key=Alias, Value=[Técnicas]
+    mapping = {}
+    for g in groups.values():
+        for alias in g["aliases"]:
+            if alias: # Evitar strings vacíos
+                mapping[alias] = list(g["techniques"])
+
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    with open(output_path, "w", encoding="utf-8") as f:
+        json.dump(mapping, f, indent=4)
+        
+    print(f"[*] ¡Éxito! Mapeo creado en {output_path} con {len(mapping)} alias de grupos APT resolubles.")
+
+if __name__ == "__main__":
+    generate_mapping()
+
+
+
+================================================
+FILE: evaluation/generate_ctibench_csv.py
+================================================
+import os
+import pandas as pd
+
+def main():
+    """
+    Convierte el archivo cti-ate.tsv de CTIBench en un CSV estándar
+    compatible con el framework de evaluación.
+    """
+    tsv_path = "data/eval_datasets/ctibench/cti-ate.tsv"
+    csv_path = "data/eval_datasets/ctibench/ctibench_mapping.csv"
+    
+    if not os.path.exists(tsv_path):
+        print(f"[!] Error: {tsv_path} no existe.")
+        return
+        
+    print(f"[*] Procesando {tsv_path}...")
+    df = pd.read_csv(tsv_path, sep="\t")
+    
+    records = []
+    for _, row in df.iterrows():
+        text = str(row.get("Description", "")).strip()
+        gt = str(row.get("GT", "")).strip()
+        
+        if not text or not gt or gt.lower() == "nan":
+            continue
+            
+        # Limpiar técnicas (ej. 'T1071, T1573' -> ['T1071', 'T1573'])
+        true_labels = [t.strip() for t in gt.split(",") if t.strip()]
+        
+        records.append({
+            "text": text,
+            "true_labels": ",".join(true_labels)
+        })
+        
+    out_df = pd.DataFrame(records)
+    os.makedirs(os.path.dirname(csv_path), exist_ok=True)
+    out_df.to_csv(csv_path, index=False)
+    print(f"[*] ¡Éxito! Generado {csv_path} con {len(out_df)} registros.")
+
+if __name__ == "__main__":
+    main()
 
 
 
@@ -785,15 +1058,431 @@ def run_tram_evaluation(file_path: str, sample_size: int = None, pipeline_type: 
     print(f"[+] Saved {len(diffs)} conflict cases for manual review in: {diff_path}")
 
 if __name__ == "__main__":
-    dataset_path = "data/eval_datasets/tram2/multi_label.json"
-    
-    if not os.path.exists(dataset_path):
-        print(f"[!] Error: Dataset not found at {dataset_path}")
+    import argparse
+    parser = argparse.ArgumentParser(description="Run single-config evaluation on TRAM dataset")
+    parser.add_argument("--dataset_path", type=str, default="data/eval_datasets/tram2/multi_label.json", help="Path to TRAM dataset")
+    parser.add_argument("--limit", type=int, default=None, help="Max number of sentences to evaluate (for quick testing)")
+    parser.add_argument("--pipeline", type=str, choices=["langchain", "langgraph"], default="langchain", help="Which architecture to evaluate")
+    args = parser.parse_args()
+
+    if not os.path.exists(args.dataset_path):
+        print(f"[!] Error: Dataset not found at {args.dataset_path}")
         sys.exit(1)
         
-    # Elige aquí qué pipeline evaluar: "langchain" o "langgraph"
-    # Cambia el sample_size para pruebas rápidas
-    run_tram_evaluation(dataset_path, sample_size=None, pipeline_type="langchain")
+    run_tram_evaluation(args.dataset_path, sample_size=args.limit, pipeline_type=args.pipeline)
+
+
+
+================================================
+FILE: evaluation/run_eval_apt.py
+================================================
+import os
+import sys
+import json
+import time
+import argparse
+import contextlib
+from datetime import datetime
+from tqdm import tqdm
+
+# Add project root to sys.path
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
+from evaluation.data_loaders import AptReportDataLoader
+from evaluation.metrics_calculator import Evaluator
+from src.langchain_pipeline.main_pipeline import run_cti_extraction
+from src.langgraph_agents.main_langgraph import run_langgraph_extraction
+from dotenv import load_dotenv
+
+# Cargar variables de entorno (USE_VLM_EXTRACTION, USE_PROMPT_REPETITION, etc.)
+load_dotenv(override=True)
+
+def run_evaluation():
+    """
+    Objetivo: Ejecutar una evaluación End-to-End sobre el dataset APT_REPORT.
+    Se utiliza el nombre de la carpeta (ej. APT28) para obtener las técnicas de MITRE como Ground Truth.
+    """
+    parser = argparse.ArgumentParser(description="Run single-config E2E evaluation on APT_REPORT dataset")
+    parser.add_argument("--dataset_path", type=str, default="data/eval_datasets/APT_REPORT", help="Path to APT_REPORT dataset")
+    parser.add_argument("--limit", type=int, default=None, help="Max number of PDFs to evaluate (for quick testing)")
+    parser.add_argument("--pipeline", type=str, choices=["langchain", "langgraph"], default="langgraph", help="Which architecture to evaluate")
+    args = parser.parse_args()
+
+    # Leer configuración desde las variables de entorno
+    vlm_mode = os.getenv("USE_VLM_EXTRACTION", "False")
+    rep_mode = os.getenv("USE_PROMPT_REPETITION", "False")
+    pipeline = args.pipeline
+
+    print("\n" + "="*80)
+    print(f"🚀 INICIANDO EVALUACIÓN APT_REPORT (CROSS-REFERENCE WITH MITRE GROUPS)")
+    print(f"   Pipeline:           {pipeline.upper()}")
+    print(f"   VLM Extraction:     {vlm_mode}")
+    print(f"   Prompt Repetition:  {rep_mode}")
+    print("="*80)
+
+    print(f"\n[*] Loading APT_REPORT dataset from: {args.dataset_path}")
+    loader = AptReportDataLoader(base_path=args.dataset_path)
+    df = loader.load()
+    
+    if df.empty:
+        print("[!] Error: No PDFs/MDs matched. Ensure mitre_group_mapping.json exists and dataset has PDFs.")
+        sys.exit(1)
+        
+    if args.limit:
+        print(f"[*] Subsampling {args.limit} random reports for testing...")
+        df = df.sample(n=args.limit, random_state=42).reset_index(drop=True)
+        
+    print(f"[*] Successfully paired {len(df)} PDF raw reports with Ground Truth.")
+    
+    predicted_labels = []
+    detailed_results = []
+    hierarchy_stats = {"total_exact_matches": 0, "total_more_detailed": 0, "total_more_general": 0}
+    
+    # Bucle de inferencia E2E
+    for idx, row in tqdm(df.iterrows(), total=len(df), desc=f"Eval: {pipeline}"):
+        pdf_path = row['source_file']
+        true_lbls = row['true_labels']
+        group_name = row.get('group_name', 'Unknown')
+        predicted_ids = []
+        pdf_name = os.path.basename(pdf_path)
+        
+        try:
+            # Silenciar prints internos de las tuberías para que no rompan la barra de progreso
+            with open(os.devnull, 'w') as devnull:
+                with contextlib.redirect_stdout(devnull), contextlib.redirect_stderr(devnull):
+                    if pipeline == "langchain":
+                        results_list, timing = run_cti_extraction(pdf_path)
+                    else:
+                        results_list, timing = run_langgraph_extraction(pdf_path)
+                        
+            # Normalización y Trazabilidad Jerárquica
+            normalized_preds = []
+            traceability_summary = {"exact": 0, "more_detailed": 0, "more_general": 0}
+            
+            for result_ttp in results_list:
+                pred_id = result_ttp.get("technique_id")
+                if not pred_id:
+                    continue
+                    
+                matched_true = None
+                match_type = "false_positive"
+                
+                for t in true_lbls:
+                    if pred_id == t:
+                        matched_true = t
+                        match_type = "exact"
+                        break
+                    elif "." not in t and pred_id.startswith(t + "."):
+                        matched_true = t
+                        match_type = "more_detailed"
+                        break
+                    elif "." not in pred_id and t.startswith(pred_id + "."):
+                        matched_true = t
+                        match_type = "more_general"
+                        break
+                        
+                result_ttp["hierarchy_match"] = match_type
+                if matched_true:
+                    result_ttp["matched_true_label"] = matched_true
+                    normalized_preds.append(matched_true)
+                    traceability_summary[match_type] += 1
+                    
+                    if match_type == "exact": hierarchy_stats["total_exact_matches"] += 1
+                    elif match_type == "more_detailed": hierarchy_stats["total_more_detailed"] += 1
+                    elif match_type == "more_general": hierarchy_stats["total_more_general"] += 1
+                else:
+                    normalized_preds.append(pred_id)
+            
+            predicted_ids = list(set(normalized_preds))
+            tp = list(set(true_lbls) & set(predicted_ids))
+            fp = list(set(predicted_ids) - set(true_lbls))
+            fn = list(set(true_lbls) - set(predicted_ids))
+            
+            detailed_results.append({
+                "source_file": pdf_path,
+                "group_name": group_name,
+                "true_labels": true_lbls,
+                "predicted_labels_raw": [r.get("technique_id") for r in results_list if "technique_id" in r],
+                "predicted_labels_normalized": predicted_ids,
+                "metrics": {"TP": len(tp), "FP": len(fp), "FN": len(fn)},
+                "traceability_summary": traceability_summary,
+                "timing_breakdown": timing,
+                "extracted_ttps": results_list
+            })
+            
+            tqdm.write(f" 📄 [{group_name}] {pdf_name} -> TP: {len(tp)} | FP: {len(fp)} | FN: {len(fn)}")
+            
+        except Exception as e:
+            tqdm.write(f" [!] ERROR crítico en {pdf_name}: {e}")
+            predicted_ids = []
+            detailed_results.append({"source_file": pdf_path, "error": str(e)})
+        
+        predicted_labels.append(predicted_ids)
+        
+        # Cuidar el Rate Limit del Free Tier entre documentos pesados
+        time.sleep(2)
+        
+    # Evaluar y exportar
+    df['predicted_labels'] = predicted_labels
+    evaluator = Evaluator(df)
+    results = evaluator.evaluate()
+    
+    # Calcular tiempo total de esta config
+    total_seconds = sum(
+        sum(v for k, v in d.get("timing_breakdown", {}).items() if isinstance(v, (int, float))) 
+        for d in detailed_results if "timing_breakdown" in d
+    )
+    
+    # Estructura JSON estandarizada
+    final_output = {
+        "total_execution_minutes": round(total_seconds / 60.0, 2),
+        "global_metrics": results,
+        "hierarchy_analysis": hierarchy_stats,
+        "detailed_executions": detailed_results
+    }
+    
+    # Nombres de archivo dinámicos basados en la config actual
+    tag_vlm = "vlm_on" if str(vlm_mode).lower() in ["true", "1", "yes"] else "vlm_off"
+    tag_rep = "rep_on" if str(rep_mode).lower() in ["true", "1", "yes"] else "rep_off"
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M")
+    
+    output_filename = f"apt_eval_{pipeline}_{tag_vlm}_{tag_rep}_{timestamp}.json"
+    output_path = os.path.join("data", "output", "evaluations", output_filename)
+    
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    with open(output_path, "w", encoding="utf-8") as f:
+        json.dump(final_output, f, indent=4)
+        
+    print("\n" + "="*80)
+    print(f"🎯 RESULTADOS MICRO PARA APT_REPORT ({pipeline.upper()})")
+    print("="*80)
+    print(f"F0.5-Score: {results['micro']['f0.5']}")
+    print(f"F1-Score:   {results['micro']['f1']}")
+    print(f"Precision:  {results['micro']['precision']}")
+    print(f"Recall:     {results['micro']['recall']}")
+    print(f"\n💾 Resumen completo guardado en: {output_path}")
+
+if __name__ == "__main__":
+    run_evaluation()
+
+
+
+================================================
+FILE: evaluation/run_eval_ctibench.py
+================================================
+import os
+import sys
+import json
+import time
+import argparse
+import contextlib
+from datetime import datetime
+from tqdm import tqdm
+from langchain.docstore.document import Document
+
+# Add project root to sys.path
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
+from evaluation.data_loaders import CtibenchDataLoader
+from evaluation.metrics_calculator import Evaluator
+from src.langchain_pipeline.phase4_inference import TTPAnalyzer
+from src.langgraph_agents.main_langgraph import process_full_report
+from qdrant_client import QdrantClient
+from langchain_qdrant import QdrantVectorStore
+from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_qdrant.retrieval_mode import RetrievalMode
+from src.langchain_pipeline.phase3_retriever import CandidateRetriever
+from fastembed import SparseTextEmbedding
+from dotenv import load_dotenv
+
+load_dotenv(override=True)
+
+class FastEmbedSparse:
+    def __init__(self, model_name="Qdrant/bm25"):
+        self.model = SparseTextEmbedding(model_name=model_name)
+    def embed_query(self, query: str):
+        return list(self.model.embed([query]))[0]
+    def embed_documents(self, texts):
+        return list(self.model.embed(texts))
+
+def setup_langchain_components():
+    qdrant_host = os.getenv("QDRANT_HOST", "localhost")
+    qdrant_port = os.getenv("QDRANT_PORT", "6333")
+    qdrant_url = f"http://{qdrant_host}:{qdrant_port}"
+    client = QdrantClient(url=qdrant_url)
+    
+    vector_store = QdrantVectorStore(
+        client=client, collection_name="mitre_attack",
+        embedding=HuggingFaceEmbeddings(model_name="BAAI/bge-m3"),
+        sparse_embedding=FastEmbedSparse(model_name="Qdrant/bm25"),
+        retrieval_mode=RetrievalMode.HYBRID
+    )
+    retriever = CandidateRetriever(vector_store=vector_store)
+    from src.core.llm_factory import get_llm
+    llm = get_llm(temperature=0.0)
+    analyzer = TTPAnalyzer(llm=llm)
+    
+    return retriever, analyzer
+
+def run_evaluation():
+    """
+    Ejecuta una evaluación sobre el dataset de CTIBench (textos cortos).
+    Este dataset contiene descripciones de malware y herramientas APT.
+    """
+    parser = argparse.ArgumentParser(description="Run evaluation on CTIBench dataset")
+    parser.add_argument("--dataset_path", type=str, default="data/eval_datasets/ctibench", help="Path to CTIBench dataset")
+    parser.add_argument("--limit", type=int, default=None, help="Max number of sentences to evaluate (for quick testing)")
+    parser.add_argument("--pipeline", type=str, choices=["langchain", "langgraph"], default="langgraph", help="Which architecture to evaluate")
+    args = parser.parse_args()
+
+    pipeline_type = args.pipeline
+
+    print("\n" + "="*80)
+    print(f"🚀 INICIANDO EVALUACIÓN CTIBENCH (TEXT-LEVEL)")
+    print(f"   Pipeline:           {pipeline_type.upper()}")
+    print("="*80)
+
+    print(f"\n[*] Loading CTIBench dataset from: {args.dataset_path}")
+    loader = CtibenchDataLoader(base_path=args.dataset_path)
+    df = loader.load()
+    
+    if df.empty:
+        print("[!] Error: No data found. Ensure cti-ate.tsv exists.")
+        sys.exit(1)
+        
+    if args.limit:
+        print(f"[*] Subsampling {args.limit} random records for testing...")
+        df = df.sample(n=args.limit, random_state=42).reset_index(drop=True)
+        
+    print(f"[*] Total sentences for evaluation: {len(df)}")
+    
+    if pipeline_type == "langchain":
+        retriever, analyzer = setup_langchain_components()
+        
+    predicted_labels = []
+    detailed_results = []
+    hierarchy_stats = {"total_exact_matches": 0, "total_more_detailed": 0, "total_more_general": 0}
+    
+    for idx, row in tqdm(df.iterrows(), total=len(df), desc=f"Eval: {pipeline_type}"):
+        text = row['text']
+        true_lbls = row['true_labels']
+        predicted_ids = []
+        
+        try:
+            if pipeline_type == "langchain":
+                doc = Document(page_content=text, metadata={"chunk_index": idx, "page_number": 1})
+                candidates = retriever.get_filtered_mitre_candidates([doc], threshold=0.8)
+                if candidates:
+                    detections, _ = analyzer.analyze_candidates(candidates)
+                    predicted_ids = [d.technique_id for d in detections if d.is_present]
+                    extracted_payload = [d.model_dump() for d in detections if d.is_present]
+                else:
+                    extracted_payload = []
+                    
+            elif pipeline_type == "langgraph":
+                sanitized_chunks = [{"text": text, "metadata": {"chunk_index": idx}}]
+                global_context = "This is a tool/malware description from CTIBench."
+                
+                with open(os.devnull, 'w') as devnull:
+                    with contextlib.redirect_stdout(devnull), contextlib.redirect_stderr(devnull):
+                        result = process_full_report(
+                            source_file=f"ctibench_doc_{idx}",
+                            global_context=global_context,
+                            sanitized_chunks=sanitized_chunks
+                        )
+                        extracted_payload = result.get("extracted_ttps", [])
+                        predicted_ids = [ttp.get("technique_id") for ttp in extracted_payload]
+                        
+            # Normalización y Trazabilidad Jerárquica
+            normalized_preds = []
+            traceability_summary = {"exact": 0, "more_detailed": 0, "more_general": 0}
+            
+            for result_ttp in extracted_payload:
+                pred_id = result_ttp.get("technique_id")
+                if not pred_id: continue
+                
+                matched_true = None
+                match_type = "false_positive"
+                
+                for t in true_lbls:
+                    if pred_id == t:
+                        matched_true = t
+                        match_type = "exact"
+                        break
+                    elif "." not in t and pred_id.startswith(t + "."):
+                        matched_true = t
+                        match_type = "more_detailed"
+                        break
+                    elif "." not in pred_id and t.startswith(pred_id + "."):
+                        matched_true = t
+                        match_type = "more_general"
+                        break
+                        
+                result_ttp["hierarchy_match"] = match_type
+                if matched_true:
+                    result_ttp["matched_true_label"] = matched_true
+                    normalized_preds.append(matched_true)
+                    traceability_summary[match_type] += 1
+                    
+                    if match_type == "exact": hierarchy_stats["total_exact_matches"] += 1
+                    elif match_type == "more_detailed": hierarchy_stats["total_more_detailed"] += 1
+                    elif match_type == "more_general": hierarchy_stats["total_more_general"] += 1
+                else:
+                    normalized_preds.append(pred_id)
+            
+            predicted_ids = list(set(normalized_preds))
+            tp = list(set(true_lbls) & set(predicted_ids))
+            fp = list(set(predicted_ids) - set(true_lbls))
+            fn = list(set(true_lbls) - set(predicted_ids))
+            
+            detailed_results.append({
+                "sentence_id": idx,
+                "text": text,
+                "true_labels": true_lbls,
+                "predicted_labels_raw": [r.get("technique_id") for r in extracted_payload if "technique_id" in r],
+                "predicted_labels_normalized": predicted_ids,
+                "metrics": {"TP": len(tp), "FP": len(fp), "FN": len(fn)},
+                "traceability_summary": traceability_summary,
+                "extracted_ttps": extracted_payload
+            })
+            
+        except Exception as e:
+            tqdm.write(f" [!] ERROR crítico en id {idx}: {e}")
+            predicted_ids = []
+            detailed_results.append({"sentence_id": idx, "error": str(e)})
+            
+        predicted_labels.append(predicted_ids)
+        time.sleep(0.5)  # Breve pausa para no saturar APIs
+        
+    df['predicted_labels'] = predicted_labels
+    evaluator = Evaluator(df)
+    results = evaluator.evaluate()
+    
+    final_output = {
+        "global_metrics": results,
+        "hierarchy_analysis": hierarchy_stats,
+        "detailed_executions": detailed_results
+    }
+    
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M")
+    output_filename = f"ctibench_eval_{pipeline_type}_{timestamp}.json"
+    output_path = os.path.join("data", "output", "evaluations", output_filename)
+    
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    with open(output_path, "w", encoding="utf-8") as f:
+        json.dump(final_output, f, indent=4)
+        
+    print("\n" + "="*80)
+    print(f"🎯 RESULTADOS MICRO PARA CTIBENCH ({pipeline_type.upper()})")
+    print("="*80)
+    print(f"F0.5-Score: {results['micro']['f0.5']}")
+    print(f"F1-Score:   {results['micro']['f1']}")
+    print(f"Precision:  {results['micro']['precision']}")
+    print(f"Recall:     {results['micro']['recall']}")
+    print(f"\n💾 Resumen completo guardado en: {output_path}")
+
+if __name__ == "__main__":
+    run_evaluation()
 
 
 
@@ -1117,9 +1806,13 @@ def get_embeddings():
     profile = os.getenv("EXECUTION_PROFILE", "LOCAL").upper()
     
     if profile == "REMOTE":
+        base_url = os.getenv("EMBEDDINGS_BASE_URL")
+        if not base_url:
+            raise ValueError("EMBEDDINGS_BASE_URL is not set in .env")
+            
         return OpenAIEmbeddings(
             model=os.getenv("EMBEDDINGS_MODEL_NAME", "BAAI/bge-m3"),
-            base_url=os.getenv("EMBEDDINGS_BASE_URL", "http://10.0.152.198:8002/v1"),
+            base_url=base_url,
             api_key="EMPTY"
         )
     else:
@@ -1247,9 +1940,13 @@ def get_llm(temperature: float = 0.0) -> BaseChatModel:
     
     if profile == "REMOTE":
         from langchain_openai import ChatOpenAI
+        vllm_base_url = os.getenv("VLLM_BASE_URL")
+        if not vllm_base_url:
+            raise ValueError("VLLM_BASE_URL is not set in .env")
+            
         return ChatOpenAI(
             model=os.getenv("VLLM_MODEL_NAME", "gpt-oss-20b"),
-            base_url=os.getenv("VLLM_BASE_URL", "http://10.0.152.198:8000/v1"),
+            base_url=vllm_base_url,
             api_key="EMPTY",
             temperature=temperature,
             max_retries=3
@@ -1615,9 +2312,10 @@ class ReportIngestor:
         if not os.path.exists(file_path):
             raise FileNotFoundError(f"The file {file_path} does not exist.")
             
+        from langchain_google_genai import ChatGoogleGenerativeAI
         logger.info(f"Loading PDF '{file_path}' using Multimodal VLM extraction (Gemini Flash)...")
-        
-        gemini_model = os.getenv("GEMINI_MODEL", "gemini-flash-lite-latest") # flash-lite es multimodal
+        # Por ahora forzamos Gemini siempre para VLM, ya que el cluster remoto vLLM no tiene modelo visual.
+        gemini_model = os.getenv("GEMINI_MODEL", "gemini-flash-lite-latest")
         llm = ChatGoogleGenerativeAI(model=gemini_model, temperature=0.0, max_retries=3)
         
         doc = fitz.open(file_path)
@@ -1632,8 +2330,10 @@ class ReportIngestor:
             img_base64 = base64.b64encode(img_data).decode("utf-8")
             
             prompt_text = (
-                "You are an expert CTI analyst and OCR specialist. Transcribe ALL text from this page of a cyber threat report.\n"
-                "CRITICAL INSTRUCTION: Pay special attention to images, dark terminal screenshots, and code snippets. "
+                "You are an expert Cyber Threat Intelligence parser.\n"
+                "Extract all text, terminal logs, and tables from this image perfectly.\n"
+                "Important: The document may be in any language (e.g., Spanish, Russian, Chinese). Transcribe it in its original language, do not translate it.\n"
+                "Do not add any commentary. Return only the raw extracted text formatted in Markdown."
                 "If you see any commands, URLs, or code inside an image, transcribe it exactly as it appears and wrap it in a markdown code block.\n"
                 "Do NOT summarize the page. Just provide the exact transcription."
             )
@@ -1701,7 +2401,25 @@ class ReportIngestor:
             
         logger.info(f"Loading PDF '{file_path}' using Docling (Pages detected: {num_pages})...")
         
-        converter = DocumentConverter()
+        try:
+            from docling.document_converter import DocumentConverter, PdfFormatOption
+            from docling.datamodel.pipeline_options import PdfPipelineOptions
+            from docling.datamodel.base_models import InputFormat
+            
+            # Quitamos EasyOCR por completo porque es demasiado restrictivo.
+            # Docling tiene integrado RapidOCR por defecto que procesa de forma universal
+            # ruso, chino, árabe, japonés e inglés simultáneamente con un único modelo global sin crashear.
+            pipeline_options = PdfPipelineOptions(do_ocr=True)
+            
+            converter = DocumentConverter(
+                allowed_formats=[InputFormat.PDF],
+                format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options)}
+            )
+        except ImportError:
+            logger.warning("[WARNING] EasyOCR options failed to import. Falling back to default Docling converter.")
+            from docling.document_converter import DocumentConverter
+            converter = DocumentConverter()
+            
         result = converter.convert(file_path)
         doc = result.document
         
@@ -2119,6 +2837,7 @@ FILE: src/langchain_pipeline/phase3_retriever.py
 import os
 import requests
 import logging
+import math
 from typing import List, Dict, Any
 
 import torch
@@ -2157,7 +2876,7 @@ class CandidateRetriever:
         else:
             self.device = device
             
-        use_remote = os.getenv("USE_REMOTE_EMBEDDINGS", "False").lower() in ("true", "1", "yes")
+        use_remote = os.getenv("EXECUTION_PROFILE", "LOCAL").upper() == "REMOTE"
         if use_remote:
             logger.info("Using remote reranker. Local CrossEncoder will not be loaded.")
             self.reranker = None
@@ -2180,18 +2899,25 @@ class CandidateRetriever:
         candidates = self.vector_store.similarity_search(chunk.page_content, k=top_k)
         return candidates
 
-    def get_filtered_mitre_candidates(self, report_chunks: List[Document], threshold: float = 0.50) -> List[Dict[str, Any]]:
-        logger.info(f"Starting retrieval and reranking for {len(report_chunks)} chunks...")
+    def get_filtered_mitre_candidates(self, report_chunks: List[Document], threshold: float = None) -> List[Dict[str, Any]]:
+        # Si no se provee por argumento, se lee de .env (por defecto 0.20 para ser permisivos)
+        if threshold is None:
+            threshold = float(os.getenv("RERANKER_THRESHOLD", "0.20"))
+        
+        logger.info(f"Starting retrieval and reranking for {len(report_chunks)} chunks (Threshold: {threshold})...")
         
         all_initial_candidates = []
         
         for chunk in report_chunks:
-            candidates = self._get_initial_candidates(chunk, top_k=15)
+            candidates = self._get_initial_candidates(chunk, top_k=25)
             all_initial_candidates.append((chunk, candidates))
             
         use_remote = os.getenv("EXECUTION_PROFILE", "LOCAL").upper() == "REMOTE"
-        reranker_url = os.getenv("RERANKER_URL", "http://10.0.152.198:8005/v1/rerank")
+        reranker_url = os.getenv("RERANKER_URL")
         reranker_model = os.getenv("RERANKER_MODEL_NAME", "jina-reranker-v2-base-multilingual")
+        
+        if use_remote and not reranker_url:
+            raise ValueError("RERANKER_URL must be defined in .env for REMOTE execution profile")
 
         chunk_results = []
         for chunk, candidates in all_initial_candidates:
@@ -2206,18 +2932,20 @@ class CandidateRetriever:
                     "documents": docs_text
                 }
                 try:
-                    response = requests.post(reranker_url, json=payload, headers={"Authorization": "Bearer EMPTY"})
+                    response = requests.post(reranker_url, json=payload, headers={"Authorization": "Bearer EMPTY"}, timeout=60)
+                    response.raise_for_status()
                     if response.status_code == 200:
                         res_data = response.json()
                         # Jina/TEI suele devolver results: [{"index": X, "relevance_score": Y}]
-                        import math
                         for item in res_data.get("results", []):
                             idx = item["index"]
                             raw_score = float(item["relevance_score"])
                             # El endpoint TEI/Jina nos devuelve los logits en bruto (pueden ser negativos o > 1).
-                            # Le metemos una sigmoide para forzarlos a rango [0, 1] y mantener compatibilidad
-                            # con el comportamiento del modelo local y el threshold posterior.
-                            score = 1 / (1 + math.exp(-raw_score))
+                            # Overflow-safe Sigmoid para forzarlos a rango [0, 1] y mantener compatibilidad.
+                            if raw_score < -709:
+                                score = 0.0
+                            else:
+                                score = 1 / (1 + math.exp(-raw_score))
                             if score >= threshold:
                                 doc = candidates[idx]
                                 valid_candidates.append({
@@ -2244,6 +2972,11 @@ class CandidateRetriever:
                                 "score": round(float(score), 4)
                             })
             
+                if valid_candidates:
+                    logger.debug(f"[DEBUG] Chunk {chunk.page_content[:30]}... Max valid score: {max(c['score'] for c in valid_candidates)}")
+                else:
+                    logger.debug(f"[DEBUG] Chunk {chunk.page_content[:30]}... 0 candidates passed threshold {threshold}. Max score was: {max(scores) if len(scores) > 0 else 'N/A'}")
+                
             if valid_candidates:
                 valid_candidates.sort(key=lambda x: x["score"], reverse=True)
                 for i in range(0, len(valid_candidates), 10):
@@ -2302,12 +3035,13 @@ class TTPAnalyzer:
             "Role: Cyber Threat Intelligence (CTI) Analyst.\n"
             "Task: Extract confirmed MITRE ATT&CK techniques from a report chunk based ONLY on the provided candidate techniques.\n\n"
             "Rules:\n"
+            "0. Multilingual Support: The source text may be in any language (Spanish, Russian, Chinese, etc.). Analyze it natively, but output the requested JSON schema in English.\n"
             "1. Evaluate all evidence blocks objectively.\n"
-            "2. Set `is_present` to true only if the evidence technically confirms the technique. Add each confirming block to the `occurrences` list.\n"
-            "3. If no blocks confirm the technique, set `is_present` to false and leave `occurrences` empty.\n"
+            "2. Only extract techniques that are unequivocally confirmed by the technical evidence.\n"
+            "3. Do not include techniques that are false positives, benign, or defensive mentions. If none are valid, return an empty list.\n"
             "4. Preserve the exact `location` and `Score` provided in the evidence tags.\n"
             "5. Map contextualized masked tags (e.g., <IoC_URL>) to their tactical intent.\n"
-            "6. Exclusion Criteria: Strictly map observable, technical intrusion activity. Exclude geopolitical context, analyst attribution theories, victimology, or historical background."
+            "6. Exclusion Criteria: Strictly map observable, technical intrusion activity. Exclude geopolitical context or attribution theories."
         )
         if self.use_prompt_repetition:
             system_instruction = f"{system_instruction}\n\nReminder of Rules:\n{system_instruction}"
@@ -2339,9 +3073,9 @@ class TTPAnalyzer:
             cand_strings = []
             tech_metadata_map = {}
             for c in candidates:
-                tech_id = c["technique_id"]
+                tech_id = str(c.get("technique_id", "Unknown")).strip().upper()
                 cand_strings.append(f"ID: {tech_id} | Name: {c['name']} | Tactics: {', '.join(c['tactics'])}\nDescription: {c['description']}")
-                tech_metadata_map[tech_id] = {"tactics": c["tactics"], "score": c["score"]}
+                tech_metadata_map[tech_id] = {"tactics": c["tactics"], "score": c["score"], "name": c["name"]}
                 
             page_val = chunk.metadata.get("page")
             page_num = int(page_val) + 1 if page_val is not None else chunk.metadata.get("page_number", "Unknown")
@@ -2358,12 +3092,14 @@ class TTPAnalyzer:
         batch_responses = []
         artificial_delay = 0.0
         
-        if self.execution_profile == "AWS":
-            logger.info("AWS Profile detected: Running chain in parallel (Batching)...")
+        max_workers = int(os.getenv("MAX_CONCURRENT_CHUNKS", "2"))
+        
+        if self.execution_profile == "REMOTE" or max_workers > 1:
+            logger.info(f"Parallel batching enabled: Running LangChain inference concurrently (max_concurrency={max_workers})...")
             try:
-                batch_responses = chain.batch(inputs)
+                batch_responses = chain.batch(inputs, config={"max_concurrency": max_workers})
             except Exception as e:
-                logger.error(f"Error during AWS batching: {e}")
+                logger.error(f"Error during parallel batching: {e}")
         else:
             logger.info("LOCAL Profile detected: Running chain sequentially...")
             import time
@@ -2389,14 +3125,20 @@ class TTPAnalyzer:
                 continue
                 
             for ext in res.extracted_ttps:
-                tech_id = ext.technique_id
-                meta = inp["_meta_map"].get(tech_id, {"tactics": [], "score": 0.99})
+                tech_id = str(ext.technique_id).strip().upper()
+                
+                # ANTI-HALLUCINATION GUARD: Reject if LLM bypassed RAG and invented an ID
+                if tech_id not in inp["_meta_map"]:
+                    logger.warning(f"Descartando TTP alucinado/inventado por el LLM: {tech_id}")
+                    continue
+                    
+                meta = inp["_meta_map"][tech_id]
                 
                 if tech_id not in global_ttps:
                     global_ttps[tech_id] = TTPDetection(
                         technique_id=tech_id,
                         tactic=meta["tactics"],
-                        technique_name=ext.technique_name,
+                        technique_name=meta["name"],
                         is_present=True,
                         occurrences=[]
                     )
@@ -2581,19 +3323,22 @@ def process_full_report(source_file: str, global_context: str, sanitized_chunks:
     extraction_time_total = 0.0
     validation_time_total = 0.0
     
-    # 1. MAP: Loop over sanitized_chunks sequentially
-    for i, chunk_data in enumerate(sanitized_chunks):
-        print(f"  -> Processing chunk {i+1}/{len(sanitized_chunks)}...")
-        
+    # 1. MAP: Loop over sanitized_chunks using ThreadPoolExecutor for parallelism
+    import os
+    import concurrent.futures
+    max_workers = int(os.getenv("MAX_CONCURRENT_CHUNKS", "2"))
+    print(f"[*] Starting MAP phase across {len(sanitized_chunks)} chunks (Concurrent workers: {max_workers})...")
+    
+    def _process_single_chunk(args):
+        i, chunk_data = args
         chunk_text = chunk_data.get("text", str(chunk_data))
         chunk_metadata = chunk_data.get("metadata", {})
         
-        # Initialize ChunkState
         initial_chunk_state: ChunkState = {
             "chunk_text": chunk_text,
             "chunk_metadata": chunk_metadata,
             "global_context": global_context,
-            "is_relevant": True,  # Will be assessed by triage
+            "is_relevant": True,
             "draft_ttps": [],
             "approved_ttps": [],
             "validation_feedback": "",
@@ -2604,23 +3349,28 @@ def process_full_report(source_file: str, global_context: str, sanitized_chunks:
         }
         
         try:
-            # Invoke the graph for this single chunk
             chunk_result = chunk_graph.invoke(initial_chunk_state)
-            
-            # Sumar tiempos reales medidos internamente por los nodos
-            triage_time_total += chunk_result.get("triage_time", 0.0)
-            extraction_time_total += chunk_result.get("extractor_time", 0.0)
-            validation_time_total += chunk_result.get("validator_time", 0.0)
-                
-            approved = chunk_result.get("approved_ttps", [])
-            if approved:
-                print(f"     [+] Found {len(approved)} valid TTP(s) in chunk {i+1}")
-                master_ttp_list.extend(approved)
-            else:
-                print(f"     [-] No valid TTPs found in chunk {i+1}")
-                
+            return i, chunk_result
         except Exception as e:
             print(f"     [!] Error processing chunk {i+1}: {str(e)}")
+            return i, None
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        args_list = [(i, chunk) for i, chunk in enumerate(sanitized_chunks)]
+        results = list(executor.map(_process_single_chunk, args_list))
+        
+    for i, chunk_result in results:
+        if chunk_result is None:
+            continue
+            
+        triage_time_total += chunk_result.get("triage_time", 0.0)
+        extraction_time_total += chunk_result.get("extractor_time", 0.0)
+        validation_time_total += chunk_result.get("validator_time", 0.0)
+            
+        approved = chunk_result.get("approved_ttps", [])
+        if approved:
+            print(f"     [+] Found {len(approved)} valid TTP(s) in chunk {i+1}")
+            master_ttp_list.extend(approved)
             
     print(f"[*] Map phase complete. Consolidating {len(master_ttp_list)} total TTP(s)...")
     
@@ -2979,7 +3729,8 @@ def triage_node(state: ChunkState) -> dict:
     prompt = ChatPromptTemplate.from_messages([
         ("system", "Role: Cyber Threat Intelligence Analyst.\n"
                    "Task: Perform a binary classification on text chunks.\n"
-                   "Condition: Return True if the text contains cybersecurity threat intelligence, attacker behavior, or technical indicators. Return False otherwise."),
+                   "Condition: Return True if the text contains cybersecurity threat intelligence, attacker behavior, or technical indicators. Return False otherwise.\n"
+                   "Note: The text may be in any language (Spanish, Russian, etc.). Analyze it natively."),
         ("human", "<text>\n{chunk_text}\n</text>")
     ])
     
@@ -2992,7 +3743,8 @@ def triage_node(state: ChunkState) -> dict:
     else:
         is_relevant = result.is_relevant
         
-    print(f"[DEBUG] Triage - Is Relevant: {is_relevant}")
+    c_idx = state.get("chunk_metadata", {}).get("chunk_index", "?")
+    print(f"[DEBUG] [Chunk {c_idx}] Triage - Is Relevant: {is_relevant}")
     return {"is_relevant": is_relevant, "triage_time": time.time() - t0}
 
 def extractor_node(state: ChunkState) -> dict:
@@ -3010,34 +3762,53 @@ def extractor_node(state: ChunkState) -> dict:
     approved_ids = [t.get("technique_id") for t in approved_ttps]
     
     # 1. QUERY TRANSFORMATION: Abstract Keywords Only
-    translator_llm = get_llm(tier="lite")
-    translator_prompt = ChatPromptTemplate.from_messages([
-        ("system", "Role: Cyber Threat Intelligence Analyst.\n"
-                   "Task: Extract a comma-separated list of abstract cybersecurity behaviors, tactics, and mechanisms from the text.\n"
-                   "Instructions: Translate specific tools into their tactical purpose (e.g., 'Ngrok' -> 'Protocol Tunneling'). Output only the keywords."),
-        ("human", "<text>\n{chunk_text}\n</text>")
-    ])
-    
-    translation_chain = translator_prompt | translator_llm | StrOutputParser()
-    try:
-        abstract_keywords = translation_chain.invoke({"chunk_text": chunk_text})
-    except Exception as e:
-        print(f"[ERROR] Translation Error: {e}")
-        abstract_keywords = ""
+    c_idx = state.get("chunk_metadata", {}).get("chunk_index", "?")
+    if state.get("abstract_keywords"):
+        abstract_keywords = state["abstract_keywords"]
+        print(f"[DEBUG] [Chunk {c_idx}] Extractor - Abstract Keywords (Cached): {abstract_keywords}")
+    else:
+        translator_llm = get_llm(tier="lite")
+        translator_prompt = ChatPromptTemplate.from_messages([
+            ("system", "Role: Cyber Threat Intelligence Analyst.\n"
+                       "Task: Extract a comma-separated list of abstract cybersecurity behaviors, tactics, and mechanisms from the text.\n"
+                       "Instructions: The text may be in any language. Translate specific tools into their tactical purpose (e.g., 'Ngrok' -> 'Protocol Tunneling'). Output ONLY the keywords in English."),
+            ("human", "<text>\n{chunk_text}\n</text>")
+        ])
         
-    print(f"[DEBUG] Extractor - Abstract Keywords: {abstract_keywords}")
+        translation_chain = translator_prompt | translator_llm | StrOutputParser()
+        
+        try:
+            abstract_keywords = translation_chain.invoke({"chunk_text": chunk_text})
+        except Exception as e:
+            print(f"[ERROR] [Chunk {c_idx}] Translation Error: {e}")
+            abstract_keywords = ""
+            
+        print(f"[DEBUG] [Chunk {c_idx}] Extractor - Abstract Keywords: {abstract_keywords}")
     
     # 2. DYNAMIC MECHANICAL RETRIEVAL
     # Pass the RAW TEXT plus the keywords to the Oracle so no context is lost.
+    # We DO NOT include val_feedback in the vector query to avoid polluting the semantic search.
     search_query = f"Raw Text: {chunk_text}\nKeywords: {abstract_keywords}"
-    if val_feedback:
-        search_query += f"\nPast Rejections & Feedback: {val_feedback}"
-        
-    candidates_list = get_mitre_candidates(search_query)
+    
+    # Expanding Window mechanism: Use Pagination
+    # Iter 0 -> Offset 0 (Top 1-25)
+    # Iter 1 -> Offset 25 (Top 26-50)
+    # Iter 2 -> Offset 50 (Top 51-75)
+    loop = state.get("loop_count", 0)
+    
+    current_meta_map = state.get("metadata_map", {})
+    if state.get("candidates_list"):
+        candidates_list = state["candidates_list"]
+        print(f"[DEBUG] [Chunk {c_idx}] Extractor - Using cached candidates_list ({len(candidates_list)} candidates).")
+    else:
+        # Recuperamos la bolsa de 50 y el extractor procesará TODOS los que superen el threshold, de 10 en 10
+        candidates_list, meta_map = get_mitre_candidates(search_query, top_k=50, offset=0)
+        # Fusionamos con el metadata_map previo por si hay varias iteraciones
+        current_meta_map.update(meta_map)
     
     if not candidates_list:
-        print("[DEBUG] Extractor - No candidates found via Mechanical Retrieval. Returning empty drafts.")
-        return {"draft_ttps": [], "loop_count": state.get("loop_count", 0) + 1, "extractor_time": state.get("extractor_time", 0.0) + (time.time() - t0)}
+        print(f"[DEBUG] [Chunk {c_idx}] Extractor - No candidates found via Mechanical Retrieval. Returning empty drafts.")
+        return {"draft_ttps": [], "metadata_map": current_meta_map, "loop_count": state.get("loop_count", 0) + 1, "extractor_time": state.get("extractor_time", 0.0) + (time.time() - t0)}
     
     # 3. EXTRACTION (BRAINSTORMER)
     llm = get_llm(tier="pro")
@@ -3048,10 +3819,11 @@ def extractor_node(state: ChunkState) -> dict:
         "Role: Cyber Threat Intelligence Analyst.\n"
         "Task: Extract applicable MITRE ATT&CK techniques from the provided candidate list based on the source text.\n\n"
         "Rules:\n"
-        "1. Extract all applicable new techniques. Do not artificially limit the output.\n"
-        "2. Ignore previously approved or rejected techniques.\n"
-        "3. Focus exclusively on observable actions (e.g., executing commands, dropping files, establishing tunnels). Do not map analytical context (geopolitics, victimology, motives) to techniques.\n"
-        "4. Output strictly according to the requested JSON schema."
+        "1. Multilingual: The source text may be in Spanish, Russian, Chinese, or any other language. Comprehend it natively but write your justification in English.\n"
+        "2. Extract all applicable new techniques. Do not artificially limit the output.\n"
+        "3. Ignore previously approved or rejected techniques.\n"
+        "4. Focus exclusively on observable actions (e.g., executing commands, dropping files). Do not map analytical context to techniques.\n"
+        "5. Output strictly according to the requested JSON schema."
     )
     if use_prompt_repetition:
         sys_prompt = f"{sys_prompt}\n\nReminder of Rules:\n{sys_prompt}"
@@ -3087,12 +3859,43 @@ def extractor_node(state: ChunkState) -> dict:
             loc = f"Page {state.get('chunk_metadata', {}).get('page_number', '?')}, Chunk {state.get('chunk_metadata', {}).get('chunk_index', '?')}"
             for ttp in parsed_result.ttps:
                 draft = ttp.model_dump()
+                tech_id = str(draft.get("technique_id", "")).strip().upper()
+                
+                # ANTI-HALLUCINATION GUARD: Reject if LLM invented an ID, but be permissive if it exists in the full DB
+                if tech_id not in current_meta_map:
+                    from .tools import load_mitre_json
+                    mitre_db = load_mitre_json()
+                    if tech_id in mitre_db:
+                        print(f"[DEBUG] [Chunk {c_idx}] Extractor - Aceptando TTP 'alucinado' pero valido: {tech_id}")
+                        draft["technique_id"] = tech_id
+                        draft["name"] = mitre_db[tech_id]["name"]
+                        draft["tactic"] = mitre_db[tech_id]["tactics"]
+                        draft["confidence_score"] = 0.0 # Not retrieved by Oracle
+                        draft["location"] = loc
+                        all_drafts.append(draft)
+                    else:
+                        print(f"[DEBUG] [Chunk {c_idx}] Descartando TTP alucinado: {tech_id}")
+                    continue
+                
+                # FORZAR METADATA OFICIAL DE LA BASE DE DATOS
+                draft["technique_id"] = tech_id
+                draft["name"] = current_meta_map[tech_id]["name"]
+                draft["tactic"] = current_meta_map[tech_id]["tactics"]
+                draft["confidence_score"] = current_meta_map[tech_id]["score"]
+                    
                 draft["location"] = loc
                 all_drafts.append(draft)
         
     draft_ids = [d.get("technique_id", "Unknown") for d in all_drafts]
-    print(f"[DEBUG] Extractor - Draft TTPs found: {len(all_drafts)} {draft_ids}")
-    return {"draft_ttps": all_drafts, "loop_count": state.get("loop_count", 0) + 1, "extractor_time": state.get("extractor_time", 0.0) + (time.time() - t0)}
+    print(f"[DEBUG] [Chunk {c_idx}] Extractor - Draft TTPs found: {len(all_drafts)} {draft_ids}")
+    return {
+        "draft_ttps": all_drafts, 
+        "metadata_map": current_meta_map, 
+        "loop_count": state.get("loop_count", 0) + 1, 
+        "extractor_time": state.get("extractor_time", 0.0) + (time.time() - t0),
+        "candidates_list": candidates_list,
+        "abstract_keywords": abstract_keywords
+    }
 
 def validator_node(state: ChunkState) -> dict:
     """
@@ -3100,9 +3903,11 @@ def validator_node(state: ChunkState) -> dict:
     """
     import time
     t0 = time.time()
+    c_idx = state.get("chunk_metadata", {}).get("chunk_index", "?")
+    
     draft_ttps_list = state.get("draft_ttps", [])
     if not draft_ttps_list:
-        print("[DEBUG] Validator - No drafts to validate. Skipping LLM call.")
+        print(f"[DEBUG] [Chunk {c_idx}] Validator - No drafts to validate. Skipping LLM call.")
         return {"approved_ttps": [], "validation_feedback": "", "draft_ttps": [], "validator_time": state.get("validator_time", 0.0) + (time.time() - t0)}
 
     llm = get_llm(tier="pro", temperature=0.2)
@@ -3114,11 +3919,12 @@ def validator_node(state: ChunkState) -> dict:
         "Role: Cyber Threat Intelligence Analyst.\n"
         "Task: Validate drafted MITRE ATT&CK techniques against the source text.\n\n"
         "Rules:\n"
-        "1. Read the source text and the official MITRE description for each drafted technique.\n"
-        "2. Approve the technique if the text contains concrete evidence of the technical action described.\n"
-        "3. Reject the technique if it is based solely on theoretical motives, target demographics, or implies the action did not occur.\n"
-        "4. Provide specific feedback for rejected techniques to improve extraction accuracy.\n"
-        "5. Validate each technique independently."
+        "1. Multilingual: The source text may be in any language. Understand the native language but output your feedback in English.\n"
+        "2. Read the source text and the official MITRE description for each drafted technique.\n"
+        "3. Approve the technique if the text contains concrete evidence of the technical action described.\n"
+        "4. Reject the technique if it is based solely on theoretical motives or implies the action did not occur.\n"
+        "5. Provide specific feedback for rejected techniques to improve extraction accuracy.\n"
+        "6. Validate each technique independently."
     )
     
     if use_prompt_repetition:
@@ -3138,24 +3944,45 @@ def validator_node(state: ChunkState) -> dict:
     })
     
     if result is None:
-        print("[DEBUG] Validator - Validation failed gracefully.")
+        print(f"[DEBUG] [Chunk {c_idx}] Validator - Validation failed gracefully.")
         return {"approved_ttps": [], "validation_feedback": "", "draft_ttps": []}
         
-    new_approved = [ttp.model_dump() for ttp in result.valid_ttps] if result and result.valid_ttps else []
+    current_meta_map = state.get("metadata_map", {})
+    new_approved = []
+    if result and result.valid_ttps:
+        for ttp in result.valid_ttps:
+            ttp_dict = ttp.model_dump()
+            tech_id = str(ttp_dict["technique_id"]).strip().upper()
+            if tech_id not in current_meta_map:
+                from .tools import load_mitre_json
+                mitre_db = load_mitre_json()
+                if tech_id in mitre_db:
+                    print(f"[DEBUG] [Chunk {c_idx}] Validator - Aceptando TTP 'alucinado' pero valido: {tech_id}")
+                    ttp_dict["technique_id"] = tech_id
+                    ttp_dict["name"] = mitre_db[tech_id]["name"]
+                    ttp_dict["tactic"] = mitre_db[tech_id]["tactics"]
+                    ttp_dict["confidence_score"] = 0.0
+                    new_approved.append(ttp_dict)
+                else:
+                    print(f"[DEBUG] [Chunk {c_idx}] Validator - Descartando TTP alucinado/modificado: {tech_id}")
+                continue
+            # Force metadata
+            ttp_dict["technique_id"] = tech_id
+            ttp_dict["name"] = current_meta_map[tech_id]["name"]
+            ttp_dict["tactic"] = current_meta_map[tech_id]["tactics"]
+            ttp_dict["confidence_score"] = current_meta_map[tech_id]["score"]
+            new_approved.append(ttp_dict)
     
-    # Accumulate approved TTPs with deduplication
-    current_approved = state.get("approved_ttps", [])
-        
     # Set feedback to current loop's rejections only
     if len(new_approved) == len(draft_ttps_list):
         feedback = ""
     else:
         feedback = "\n".join(result.feedback_notes) if result and result.feedback_notes else ""
         
-    print(f"[DEBUG] Validator - Approved {len(new_approved)}/{len(draft_ttps_list)} drafts. Remaining feedback:\n{feedback}")
+    print(f"[DEBUG] [Chunk {c_idx}] Validator - Approved {len(new_approved)}/{len(draft_ttps_list)} drafts.")
     
     return {
-        "approved_ttps": current_approved + new_approved,
+        "approved_ttps": new_approved,
         "validation_feedback": feedback,
         "draft_ttps": [], # Limpiamos los drafts para la siguiente iteración
         "validator_time": state.get("validator_time", 0.0) + (time.time() - t0)
@@ -3182,12 +4009,20 @@ class ChunkState(TypedDict):
     global_context: str
     is_relevant: bool
     draft_ttps: List[Any]
-    approved_ttps: List[Any]
+    approved_ttps: Annotated[List[Any], operator.add]
     validation_feedback: str
+    # Loop Control & Metrics
     loop_count: int
     triage_time: float
     extractor_time: float
     validator_time: float
+    
+    # Official Metadata map injected by Oracle
+    metadata_map: dict
+    
+    # Cached items to prevent re-running tools on loops
+    candidates_list: List[str]
+    abstract_keywords: str
 
 
 
@@ -3196,6 +4031,8 @@ FILE: src/langgraph_agents/tools.py
 ================================================
 import os
 import json
+import math
+import requests
 from functools import lru_cache
 from langchain_core.tools import tool
 
@@ -3309,7 +4146,11 @@ def load_mitre_json() -> dict:
                 else:
                     enriched_desc = base_desc
                     
-                lookup_dict[tech_id.upper()] = enriched_desc
+                lookup_dict[tech_id.upper()] = {
+                    "description": enriched_desc,
+                    "name": obj.get("name", "Unknown"),
+                    "tactics": [kc.get("phase_name") for kc in obj.get("kill_chain_phases", [])]
+                }
                 
         return lookup_dict
     except Exception as e:
@@ -3320,26 +4161,31 @@ def load_mitre_json() -> dict:
 # LANGCHAIN TOOLS
 # ==============================================================================
 
-def get_mitre_candidates(query: str) -> list:
-    """Semantic search without the @tool decorator for direct node use. Returns a list of strings."""
+def get_mitre_candidates(query: str, top_k: int = 25, offset: int = 0) -> tuple:
+    """Semantic search for node use. Returns a tuple: (list_of_formatted_strings, metadata_map)"""
     retriever = get_retriever()
     if not retriever:
-        return []
+        return [], {}
         
     try:
         import os
         import requests
         # 1. Hybrid Search
-        candidates = retriever.vector_store.similarity_search(query, k=15)
+        # Recuperamos una bolsa profunda (50) para balancear seguridad y velocidad
+        deep_k = 50
+        candidates = retriever.vector_store.similarity_search(query, k=deep_k)
         if not candidates:
-            return []
+            return [], {}
             
         # 2. Rerank
         # Reevaluamos los candidatos devueltos por Qdrant para tener scores más finos.
         # En producción usamos Jina (remoto), y en local tiramos del CrossEncoder por defecto.
         use_remote = os.getenv("EXECUTION_PROFILE", "LOCAL").upper() == "REMOTE"
-        reranker_url = os.getenv("RERANKER_URL", "http://10.0.152.198:8005/v1/rerank")
+        reranker_url = os.getenv("RERANKER_URL")
         reranker_model = os.getenv("RERANKER_MODEL_NAME", "jina-reranker-v2-base-multilingual")
+        
+        if use_remote and not reranker_url:
+            raise ValueError("RERANKER_URL must be defined in .env for REMOTE execution profile")
         
         scores = []
         if use_remote and candidates:
@@ -3350,7 +4196,8 @@ def get_mitre_candidates(query: str) -> list:
                 "documents": docs_text
             }
             try:
-                response = requests.post(reranker_url, json=payload, headers={"Authorization": "Bearer EMPTY"})
+                response = requests.post(reranker_url, json=payload, headers={"Authorization": "Bearer EMPTY"}, timeout=60)
+                response.raise_for_status()
                 if response.status_code == 200:
                     res_data = response.json()
                     scores = [0.0] * len(candidates)
@@ -3369,22 +4216,41 @@ def get_mitre_candidates(query: str) -> list:
             pairs = [[query, doc.page_content] for doc in candidates]
             scores = retriever.reranker.predict(pairs, batch_size=32, activation_fn=torch.nn.Sigmoid()) if pairs else []
         
-        # 3. Filter (Threshold = 0.50)
+        # 3. Filter (Threshold)
+        # Bajamos el threshold de 0.50 a 0.20 porque las queries generadas por el Agente 
+        # (lista de keywords abstractas) tienen menos similitud léxica con los TTPs largos,
+        # lo que causaba falsos negativos tempranos. Dejamos que el LLM valide.
+        threshold = float(os.getenv("RERANKER_THRESHOLD", "0.30"))
+        if len(scores) > 0:
+            print(f"[DEBUG] get_mitre_candidates - Max Reranker Score before filtering: {max(scores):.4f}")
+            
         results = []
         for doc, score in zip(candidates, scores):
-            if float(score) >= 0.50:
-                tech_id = doc.metadata.get("technique_id", "Unknown")
+            if float(score) >= threshold:
+                tech_id = str(doc.metadata.get("technique_id", "Unknown")).strip().upper()
                 name = doc.metadata.get("name", "Unknown")
-                tactics = doc.metadata.get("tactics", "")
+                tactics_str = doc.metadata.get("tactics", "")
+                tactics = [t.strip() for t in tactics_str.split(",") if t.strip()]
                 desc = doc.metadata.get("full_description", "No description available.")[:500]
-                results.append((float(score), f"- {tech_id}: {name} (Tactics: {tactics})\n  Description: {desc}..."))
+                
+                results.append((float(score), tech_id, name, tactics_str, tactics, desc))
                 
         results.sort(key=lambda x: x[0], reverse=True)
-        return [res[1] for res in results]
+        
+        # Tal y como has pedido, nos quedamos con TODOS los que superen el threshold sin cortes artificiales
+        top_results = results
+        
+        metadata_map = {}
+        formatted_list = []
+        for score, tech_id, name, tactics_str, tactics, desc in top_results:
+            formatted_list.append(f"- {tech_id}: {name} (Tactics: {tactics_str})\n  Description: {desc}...")
+            metadata_map[tech_id] = {"name": name, "tactics": tactics, "score": score}
+                
+        return formatted_list, metadata_map
         
     except Exception as e:
         print(f"Error during search: {str(e)}")
-        return []
+        return [], {}
 
 @tool("MITRE_Oracle")
 def mitre_oracle(query: str) -> str:
@@ -3397,17 +4263,20 @@ def mitre_oracle(query: str) -> str:
         import torch
         
         # 1. Hybrid Search
-        # OPTIMIZACIÓN: Bajar de 30 a 15
-        candidates = retriever.vector_store.similarity_search(query, k=15)
+        # OPTIMIZACIÓN: Aumentado de 15 a 25 para dar mayor cobertura de TTPs
+        candidates = retriever.vector_store.similarity_search(query, k=25)
         if not candidates:
             return "No matching MITRE techniques found."
             
         # 2. Rerank
         import os
         import requests
-        use_remote = os.getenv("USE_REMOTE_EMBEDDINGS", "False").lower() in ("true", "1", "yes")
-        reranker_url = os.getenv("RERANKER_URL", "http://10.0.152.198:8005/v1/rerank")
+        use_remote = os.getenv("EXECUTION_PROFILE", "LOCAL").upper() == "REMOTE"
+        reranker_url = os.getenv("RERANKER_URL")
         reranker_model = os.getenv("RERANKER_MODEL_NAME", "jina-reranker-v2-base-multilingual")
+        
+        if use_remote and not reranker_url:
+            raise ValueError("RERANKER_URL must be defined in .env for REMOTE execution profile")
         
         scores = []
         if use_remote and candidates:
@@ -3418,13 +4287,21 @@ def mitre_oracle(query: str) -> str:
                 "documents": docs_text
             }
             try:
-                response = requests.post(reranker_url, json=payload, headers={"Authorization": "Bearer EMPTY"})
-                if response.status_code == 200:
-                    res_data = response.json()
-                    scores = [0.0] * len(candidates)
-                    for item in res_data.get("results", []):
-                        idx = item["index"]
-                        scores[idx] = float(item["relevance_score"])
+                response = requests.post(reranker_url, json=payload, headers={"Authorization": "Bearer EMPTY"}, timeout=60)
+                response.raise_for_status()
+                res_data = response.json()
+                scores = [0.0] * len(candidates)
+                import math
+                for item in res_data.get("results", []):
+                    idx = item["index"]
+                    raw_score = float(item["relevance_score"])
+                    
+                    if raw_score < -709:
+                        score = 0.0
+                    else:
+                        score = 1 / (1 + math.exp(-raw_score))
+                        
+                    scores[idx] = score
             except Exception as e:
                 print(f"Error calling remote reranker: {e}")
                 scores = [0.0] * len(candidates)
@@ -3432,10 +4309,15 @@ def mitre_oracle(query: str) -> str:
             pairs = [[query, doc.page_content] for doc in candidates]
             scores = retriever.reranker.predict(pairs, batch_size=32, activation_fn=torch.nn.Sigmoid()) if pairs else []
         
-        # 3. Filter (Threshold = 0.50)
+        # 3. Filter (Threshold)
+        # Bajar threshold por defecto para evitar truncar resultados buenos.
+        threshold = float(os.getenv("RERANKER_THRESHOLD", "0.20"))
+        if len(scores) > 0:
+            print(f"[DEBUG] mitre_oracle - Max Reranker Score before filtering: {max(scores):.4f}")
+            
         results = []
         for doc, score in zip(candidates, scores):
-            if float(score) >= 0.50:
+            if float(score) >= threshold:
                 tech_id = doc.metadata.get("technique_id", "Unknown")
                 name = doc.metadata.get("name", "Unknown")
                 tactics = doc.metadata.get("tactics", "")
@@ -3467,7 +4349,7 @@ def mitre_id_lookup(technique_id: str) -> str:
     
     if tech_id_upper in lookup_dict:
         # Return the official description
-        return lookup_dict[tech_id_upper]
+        return lookup_dict[tech_id_upper]["description"]
     else:
         return "Technique ID not found. The LLM must not use this ID."
 
