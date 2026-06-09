@@ -35,6 +35,19 @@ def test_reranker(req_id, url, model):
     except Exception as e:
         return req_id, f"ERROR: {e}", time.time() - t0
 
+def test_embeddings(req_id, url, model):
+    payload = {
+        "model": model,
+        "input": [f"This is a test sentence for embeddings number {req_id}"]
+    }
+    t0 = time.time()
+    try:
+        res = requests.post(url, json=payload, headers={"Authorization": "Bearer EMPTY"}, timeout=60)
+        res.raise_for_status()
+        return req_id, "SUCCESS", time.time() - t0
+    except Exception as e:
+        return req_id, f"ERROR: {e}", time.time() - t0
+
 def main():
     load_dotenv(override=True)
     
@@ -44,6 +57,9 @@ def main():
     
     reranker_url = os.getenv("RERANKER_URL", "http://10.0.152.198:8005/v1/rerank")
     reranker_model = os.getenv("RERANKER_MODEL_NAME", "jina-reranker-v2-base-multilingual")
+
+    embeddings_url = os.getenv("EMBEDDINGS_BASE_URL", "http://10.0.152.198:8002/v1").rstrip("/") + "/embeddings"
+    embeddings_model = os.getenv("EMBEDDINGS_MODEL_NAME", "BAAI/bge-m3")
     
     CONCURRENT_REQUESTS = 15
 
@@ -78,6 +94,20 @@ def main():
                 print(f"  [-] Req {req_id:02d} | Status: {status} | Time: {duration:.2f}s")
                 
     print(f"-> Reranker Test Finished. Total time: {time.time() - start_rerank:.2f}s")
+    
+    # 3. Test Embeddings Endpoint
+    print(f"\n[3] Testing TEI Embeddings Endpoint: {embeddings_url} (Model: {embeddings_model})")
+    start_embed = time.time()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=CONCURRENT_REQUESTS) as executor:
+        futures = [executor.submit(test_embeddings, i, embeddings_url, embeddings_model) for i in range(CONCURRENT_REQUESTS)]
+        for f in concurrent.futures.as_completed(futures):
+            req_id, status, duration = f.result()
+            if status == "SUCCESS":
+                print(f"  [+] Req {req_id:02d} | Status: {status} | Time: {duration:.2f}s")
+            else:
+                print(f"  [-] Req {req_id:02d} | Status: {status} | Time: {duration:.2f}s")
+                
+    print(f"-> Embeddings Test Finished. Total time: {time.time() - start_embed:.2f}s")
     print("="*60)
 
 if __name__ == "__main__":
