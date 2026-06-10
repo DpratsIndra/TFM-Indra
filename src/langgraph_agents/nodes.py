@@ -301,19 +301,33 @@ def extractor_node(state: ChunkState) -> dict:
             draft = ttp.model_dump()
             tech_id = str(draft.get("technique_id", "")).strip().upper()
 
-            # ANTI-HALLUCINATION GUARD: Strict Rejection
+            # --- EL GUARDIÁN HÍBRIDO (Tu idea) ---
             if tech_id not in current_meta_map:
-                print(
-                    f"[DEBUG] Descartando TTP inventado por el modelo local: {tech_id}"
-                )
-                continue
+                # 1. El LLM ha propuesto un ID que no le dio Qdrant.
+                # Vamos a comprobar si es una alucinación (T9999) o si es real (T1203).
+                
+                # Cargamos el diccionario global de MITRE (está cacheado, es instantáneo)
+                global_mitre_db = load_mitre_json() 
+                
+                if tech_id in global_mitre_db:
+                    print(f"[DEBUG] Respaldo Paramétrico: El LLM dedujo {tech_id} sin ayuda de Qdrant. Aceptado para validación.")
+                    # Inyectamos la metadata oficial para que el Validator no se confunda
+                    draft["technique_id"] = tech_id
+                    draft["name"] = global_mitre_db[tech_id]["name"]
+                    draft["tactic"] = global_mitre_db[tech_id]["tactics"]
+                    draft["confidence_score"] = 0.0 # Score 0.0 indica que viene de memoria, no de Qdrant
+                    draft["location"] = loc
+                    all_drafts.append(draft)
+                else:
+                    print(f"[DEBUG] Descartando alucinación pura: {tech_id} no existe en MITRE.")
+                
+                continue # Saltamos a la siguiente iteración
 
-            # FORZAR METADATA OFICIAL DE LA BASE DE DATOS
+            # 2. Si venía de Qdrant (Comportamiento normal)
             draft["technique_id"] = tech_id
             draft["name"] = current_meta_map[tech_id]["name"]
             draft["tactic"] = current_meta_map[tech_id]["tactics"]
             draft["confidence_score"] = current_meta_map[tech_id]["score"]
-
             draft["location"] = loc
             all_drafts.append(draft)
 
