@@ -54,7 +54,8 @@ class TTPAnalyzer:
             "3. Do not include techniques that are false positives, benign, or defensive mentions. If none are valid, return an empty list.\n"
             "4. Preserve the exact `location` and `Score` provided in the evidence tags.\n"
             "5. Map contextualized masked tags (e.g., <IoC_URL>) to their tactical intent.\n"
-            "6. Exclusion Criteria: Strictly map observable, technical intrusion activity. Exclude geopolitical context or attribution theories."
+            "6. Exclusion Criteria: Strictly map observable, technical intrusion activity. Exclude geopolitical context or attribution theories.\n"
+            "7. CRITICAL JSON FORMATTING: In the 'procedure' field, you MUST write a full descriptive sentence of what the attacker did (e.g., 'The attacker used Ngrok to establish a tunnel.'). DO NOT write single words or tactic names."
         )
         if self.use_prompt_repetition:
             system_instruction = (

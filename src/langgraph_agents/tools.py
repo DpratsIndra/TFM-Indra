@@ -216,27 +216,26 @@ def get_mitre_candidates(query: str, top_k: int = 25, offset: int = 0) -> tuple:
                 f"[DEBUG] get_mitre_candidates - Max Reranker Score before filtering: {max(scores):.4f}"
             )
 
-        results = []
+        results_with_scores = []
         for doc, score in zip(candidates, scores):
-            if float(score) >= threshold:
-                tech_id = (
-                    str(doc.metadata.get("technique_id", "Unknown")).strip().upper()
-                )
-                name = doc.metadata.get("name", "Unknown")
-                tactics_str = doc.metadata.get("tactics", "")
-                tactics = [t.strip() for t in tactics_str.split(",") if t.strip()]
-                desc = doc.metadata.get(
-                    "full_description", "No description available."
-                )[:500]
+            tech_id = str(doc.metadata.get("technique_id", "Unknown")).strip().upper()
+            name = doc.metadata.get("name", "Unknown")
+            tactics_str = doc.metadata.get("tactics", "")
+            tactics = [t.strip() for t in tactics_str.split(",") if t.strip()]
+            desc = doc.metadata.get("full_description", "No description available.")[:500]
 
-                results.append(
-                    (float(score), tech_id, name, tactics_str, tactics, desc)
-                )
+            results_with_scores.append((float(score), tech_id, name, tactics_str, tactics, desc))
 
-        results.sort(key=lambda x: x[0], reverse=True)
+        # Ordenamos de mayor a menor
+        results_with_scores.sort(key=lambda x: x[0], reverse=True)
 
-        # Tal y como has pedido, nos quedamos con TODOS los que superen el threshold sin cortes artificiales
-        top_results = results
+        # Filtramos los que superan el threshold
+        top_results = [r for r in results_with_scores if r[0] >= threshold]
+
+        # SALVAVIDAS: Si el filtro fue demasiado estricto y eliminó todo, nos quedamos con los 3 mejores
+        if len(top_results) == 0 and len(results_with_scores) > 0:
+            print(f"[DEBUG] Reranking adaptativo activado. Tomando Top 3 ignorando threshold.")
+            top_results = results_with_scores[:3]
 
         metadata_map = {}
         formatted_list = []

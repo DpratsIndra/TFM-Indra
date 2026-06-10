@@ -122,6 +122,7 @@ class CandidateRetriever:
                     if response.status_code == 200:
                         res_data = response.json()
                         # Jina/TEI suele devolver results: [{"index": X, "relevance_score": Y}]
+                        candidates_with_scores = []
                         for item in res_data.get("results", []):
                             idx = item["index"]
                             raw_score = float(item["relevance_score"])
@@ -131,27 +132,23 @@ class CandidateRetriever:
                                 score = 0.0
                             else:
                                 score = 1 / (1 + math.exp(-raw_score))
-                            if score >= threshold:
-                                doc = candidates[idx]
-                                valid_candidates.append(
-                                    {
-                                        "technique_id": doc.metadata.get(
-                                            "technique_id", "Unknown"
-                                        ),
-                                        "name": doc.metadata.get("name", "Unknown"),
-                                        "tactics": [
-                                            t.strip()
-                                            for t in doc.metadata.get(
-                                                "tactics", ""
-                                            ).split(",")
-                                            if t.strip()
-                                        ],
-                                        "description": doc.metadata.get(
-                                            "full_description", ""
-                                        ),
-                                        "score": round(score, 4),
-                                    }
-                                )
+                            doc = candidates[idx]
+                            candidates_with_scores.append(
+                                {
+                                    "technique_id": doc.metadata.get("technique_id", "Unknown"),
+                                    "name": doc.metadata.get("name", "Unknown"),
+                                    "tactics": [t.strip() for t in doc.metadata.get("tactics", "").split(",") if t.strip()],
+                                    "description": doc.metadata.get("full_description", ""),
+                                    "score": round(score, 4),
+                                }
+                            )
+
+                        candidates_with_scores.sort(key=lambda x: x["score"], reverse=True)
+                        valid_candidates = [c for c in candidates_with_scores if c["score"] >= threshold]
+
+                        if len(valid_candidates) == 0 and len(candidates_with_scores) > 0:
+                            logger.debug(f"[DEBUG] Reranking adaptativo activado. Tomando Top 3 ignorando threshold.")
+                            valid_candidates = candidates_with_scores[:3]
                 except Exception as e:
                     logger.error(f"Error calling remote reranker: {e}")
             else:
@@ -161,27 +158,24 @@ class CandidateRetriever:
                     scores = self.reranker.predict(
                         pairs, batch_size=32, activation_fn=torch.nn.Sigmoid()
                     )
+                    candidates_with_scores = []
                     for doc, score in zip(candidates, scores):
-                        if score >= threshold:
-                            valid_candidates.append(
-                                {
-                                    "technique_id": doc.metadata.get(
-                                        "technique_id", "Unknown"
-                                    ),
-                                    "name": doc.metadata.get("name", "Unknown"),
-                                    "tactics": [
-                                        t.strip()
-                                        for t in doc.metadata.get("tactics", "").split(
-                                            ","
-                                        )
-                                        if t.strip()
-                                    ],
-                                    "description": doc.metadata.get(
-                                        "full_description", ""
-                                    ),
-                                    "score": round(float(score), 4),
-                                }
-                            )
+                        candidates_with_scores.append(
+                            {
+                                "technique_id": doc.metadata.get("technique_id", "Unknown"),
+                                "name": doc.metadata.get("name", "Unknown"),
+                                "tactics": [t.strip() for t in doc.metadata.get("tactics", "").split(",") if t.strip()],
+                                "description": doc.metadata.get("full_description", ""),
+                                "score": round(float(score), 4),
+                            }
+                        )
+
+                    candidates_with_scores.sort(key=lambda x: x["score"], reverse=True)
+                    valid_candidates = [c for c in candidates_with_scores if c["score"] >= threshold]
+
+                    if len(valid_candidates) == 0 and len(candidates_with_scores) > 0:
+                        logger.debug(f"[DEBUG] Reranking adaptativo activado. Tomando Top 3 ignorando threshold.")
+                        valid_candidates = candidates_with_scores[:3]
 
                 if valid_candidates:
                     logger.debug(

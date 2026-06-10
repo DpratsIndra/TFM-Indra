@@ -165,7 +165,10 @@ def extractor_node(state: ChunkState) -> dict:
         sys_prompt = (
             "Role: Cyber Threat Intelligence Analyst.\n"
             "Task: Extract a comma-separated list of abstract cybersecurity behaviors, tactics, and mechanisms from the text.\n"
-            "Instructions: The text may be in any language. Translate specific tools into their tactical purpose (e.g., 'Ngrok' -> 'Protocol Tunneling'). Output ONLY the keywords in English."
+            "Instructions: Translate specific tools into their tactical purpose. Output ONLY the keywords in English.\n\n"
+            "EXAMPLE:\n"
+            "Source Text: 'The actors sent an email with a malicious PDF called invoice.pdf that executes a hidden macro.'\n"
+            "Output: Spearphishing Attachment, Malicious File, User Execution, Phishing, Social Engineering\n"
         )
 
         if val_feedback:
@@ -255,11 +258,12 @@ def extractor_node(state: ChunkState) -> dict:
         "Role: Cyber Threat Intelligence Analyst.\n"
         "Task: Extract applicable MITRE ATT&CK techniques from the provided candidate list based on the source text.\n\n"
         "Rules:\n"
-        "1. Multilingual: The source text may be in Spanish, Russian, Chinese, or any other language. Comprehend it natively but write your justification in English.\n"
+        "1. Multilingual: The source text may be in any language, but write your justification in English.\n"
         "2. Extract all applicable new techniques. Do not artificially limit the output.\n"
         "3. Ignore previously approved or rejected techniques.\n"
-        "4. Focus exclusively on observable actions (e.g., executing commands, dropping files). Do not map analytical context to techniques.\n"
-        "5. Output strictly according to the requested JSON schema."
+        "4. Focus exclusively on observable actions.\n"
+        "5. CRITICAL JSON FORMATTING: In the 'procedure' field, you MUST write a full descriptive sentence of what the attacker did (e.g., 'The attacker used Ngrok to establish a tunnel.'). DO NOT write single words or tactic names.\n"
+        "6. Output strictly according to the requested JSON schema."
     )
     if use_prompt_repetition:
         sys_prompt = f"{sys_prompt}\n\nReminder of Rules:\n{sys_prompt}"
