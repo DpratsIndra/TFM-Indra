@@ -69,13 +69,11 @@ def run_evaluation():
         pdf_name = os.path.basename(pdf_path)
         
         try:
-            # Silenciar prints internos de las tuberías para que no rompan la barra de progreso
-            with open(os.devnull, 'w') as devnull:
-                with contextlib.redirect_stdout(devnull), contextlib.redirect_stderr(devnull):
-                    if pipeline == "langchain":
-                        results_list, timing = run_cti_extraction(pdf_path)
-                    else:
-                        results_list, timing = run_langgraph_extraction(pdf_path)
+            # Ejecución limpia: Dejamos que los logs de Fase pasen (INFO/ERROR)
+            if pipeline == "langchain":
+                results_list, timing = run_cti_extraction(pdf_path)
+            else:
+                results_list, timing = run_langgraph_extraction(pdf_path)
                         
             # Normalización y Trazabilidad Jerárquica
             normalized_preds = []

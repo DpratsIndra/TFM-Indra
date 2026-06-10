@@ -125,15 +125,16 @@ class TTPAnalyzer:
         max_workers = int(os.getenv("MAX_CONCURRENT_CHUNKS", "2"))
 
         if self.execution_profile == "REMOTE" or max_workers > 1:
-            logger.info(
-                f"Parallel batching enabled: Running LangChain inference concurrently (max_concurrency={max_workers})..."
-            )
+            logger.info(f"Running LangChain inference concurrently (max_concurrency={max_workers})...")
             try:
+                # return_exceptions=True devuelve el error en la lista en lugar de bloquear el proceso
                 batch_responses = chain.batch(
-                    inputs, config={"max_concurrency": max_workers}
+                    inputs, 
+                    config={"max_concurrency": max_workers},
+                    return_exceptions=True 
                 )
             except Exception as e:
-                logger.error(f"Error during parallel batching: {e}")
+                logger.error(f"Error crítico en el orquestador de batch: {e}")
         else:
             logger.info("LOCAL Profile detected: Running chain sequentially...")
             is_gemini = "google" in str(type(self.llm)).lower()
@@ -156,6 +157,11 @@ class TTPAnalyzer:
         # Reducer: Consolidar ChunkExtraction de vuelta a List[TTPDetection]
         global_ttps = {}
         for inp, res in zip(inputs, batch_responses):
+            # AÑADIDO: Controlar si el resultado fue una excepción (ej. Timeout)
+            if isinstance(res, Exception):
+                logger.error(f"  [!] Fallo/Timeout en chunk {inp['_location']}: {res}")
+                continue
+
             if not res or not hasattr(res, "extracted_ttps") or not res.extracted_ttps:
                 continue
 

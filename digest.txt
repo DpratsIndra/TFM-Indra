@@ -4,6 +4,7 @@ Directory structure:
     ├── requirements-dev.txt
     ├── requirements.txt
     ├── run_all_evals.sh
+    ├── test_remote_concurrency.py
     ├── TFM.code-workspace
     ├── dashboard/
     │   └── cti_inspector.py
@@ -181,6 +182,126 @@ USE_VLM_EXTRACTION=True USE_PROMPT_REPETITION=True PYTHONPATH=. python "$EVAL_SC
 echo "======================================================="
 echo "Suite de evaluaciones finalizada."
 echo "======================================================="
+
+
+
+================================================
+FILE: test_remote_concurrency.py
+================================================
+import os
+import time
+import requests
+import concurrent.futures
+from dotenv import load_dotenv
+
+def test_vllm(req_id, url, model):
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": f"Hi, just testing concurrency. Request ID {req_id}. Please reply with a short message."}],
+        "max_tokens": 50
+    }
+    t0 = time.time()
+    try:
+        res = requests.post(url, json=payload, timeout=60)
+        res.raise_for_status()
+        return req_id, "SUCCESS", time.time() - t0
+    except Exception as e:
+        return req_id, f"ERROR: {e}", time.time() - t0
+
+def test_reranker(req_id, url, model):
+    payload = {
+        "model": model,
+        "query": f"Cybersecurity test query {req_id}",
+        "documents": [
+            f"This is a relevant document for test {req_id}", 
+            f"This is an irrelevant random sentence for test {req_id}"
+        ]
+    }
+    t0 = time.time()
+    try:
+        res = requests.post(url, json=payload, headers={"Authorization": "Bearer EMPTY"}, timeout=60)
+        res.raise_for_status()
+        return req_id, "SUCCESS", time.time() - t0
+    except Exception as e:
+        return req_id, f"ERROR: {e}", time.time() - t0
+
+def test_embeddings(req_id, url, model):
+    payload = {
+        "model": model,
+        "input": [f"This is a test sentence for embeddings number {req_id}"]
+    }
+    t0 = time.time()
+    try:
+        res = requests.post(url, json=payload, headers={"Authorization": "Bearer EMPTY"}, timeout=60)
+        res.raise_for_status()
+        return req_id, "SUCCESS", time.time() - t0
+    except Exception as e:
+        return req_id, f"ERROR: {e}", time.time() - t0
+
+def main():
+    load_dotenv(override=True)
+    
+    # Configure URLs based on .env
+    vllm_url = os.getenv("VLLM_BASE_URL", "http://10.0.152.198:8001/v1").rstrip("/") + "/chat/completions"
+    vllm_model = os.getenv("VLLM_MODEL_NAME", "gpt-oss-20b")
+    
+    reranker_url = os.getenv("RERANKER_URL", "http://10.0.152.198:8005/v1/rerank")
+    reranker_model = os.getenv("RERANKER_MODEL_NAME", "jina-reranker-v2-base-multilingual")
+
+    embeddings_url = os.getenv("EMBEDDINGS_BASE_URL", "http://10.0.152.198:8002/v1").rstrip("/") + "/embeddings"
+    embeddings_model = os.getenv("EMBEDDINGS_MODEL_NAME", "BAAI/bge-m3")
+    
+    CONCURRENT_REQUESTS = 15
+
+    print("="*60)
+    print(f"CONCURRENCY STRESS TEST: {CONCURRENT_REQUESTS} REQUESTS")
+    print("="*60)
+    
+    # 1. Test LLM Endpoint
+    print(f"\n[1] Testing vLLM Endpoint: {vllm_url} (Model: {vllm_model})")
+    start_llm = time.time()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=CONCURRENT_REQUESTS) as executor:
+        futures = [executor.submit(test_vllm, i, vllm_url, vllm_model) for i in range(CONCURRENT_REQUESTS)]
+        for f in concurrent.futures.as_completed(futures):
+            req_id, status, duration = f.result()
+            if status == "SUCCESS":
+                print(f"  [+] Req {req_id:02d} | Status: {status} | Time: {duration:.2f}s")
+            else:
+                print(f"  [-] Req {req_id:02d} | Status: {status} | Time: {duration:.2f}s")
+                
+    print(f"-> LLM Test Finished. Total time: {time.time() - start_llm:.2f}s")
+
+    # 2. Test Reranker Endpoint
+    print(f"\n[2] Testing TEI Reranker Endpoint: {reranker_url} (Model: {reranker_model})")
+    start_rerank = time.time()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=CONCURRENT_REQUESTS) as executor:
+        futures = [executor.submit(test_reranker, i, reranker_url, reranker_model) for i in range(CONCURRENT_REQUESTS)]
+        for f in concurrent.futures.as_completed(futures):
+            req_id, status, duration = f.result()
+            if status == "SUCCESS":
+                print(f"  [+] Req {req_id:02d} | Status: {status} | Time: {duration:.2f}s")
+            else:
+                print(f"  [-] Req {req_id:02d} | Status: {status} | Time: {duration:.2f}s")
+                
+    print(f"-> Reranker Test Finished. Total time: {time.time() - start_rerank:.2f}s")
+    
+    # 3. Test Embeddings Endpoint
+    print(f"\n[3] Testing TEI Embeddings Endpoint: {embeddings_url} (Model: {embeddings_model})")
+    start_embed = time.time()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=CONCURRENT_REQUESTS) as executor:
+        futures = [executor.submit(test_embeddings, i, embeddings_url, embeddings_model) for i in range(CONCURRENT_REQUESTS)]
+        for f in concurrent.futures.as_completed(futures):
+            req_id, status, duration = f.result()
+            if status == "SUCCESS":
+                print(f"  [+] Req {req_id:02d} | Status: {status} | Time: {duration:.2f}s")
+            else:
+                print(f"  [-] Req {req_id:02d} | Status: {status} | Time: {duration:.2f}s")
+                
+    print(f"-> Embeddings Test Finished. Total time: {time.time() - start_embed:.2f}s")
+    print("="*60)
+
+if __name__ == "__main__":
+    main()
 
 
 
@@ -1698,92 +1819,109 @@ services:
 ================================================
 FILE: src/debug_ngrok.py
 ================================================
-import os
 import torch
 from sentence_transformers import CrossEncoder
 from qdrant_client import QdrantClient
 from langchain_qdrant import QdrantVectorStore, FastEmbedSparse, RetrievalMode
 from langchain_huggingface import HuggingFaceEmbeddings
 
+
 def run_debug():
     print("[*] Conectando a Qdrant y cargando modelos...")
     qdrant_url = "http://localhost:6333"
     client = QdrantClient(url=qdrant_url)
-    
+
     embeddings = HuggingFaceEmbeddings(model_name="BAAI/bge-m3")
     sparse_embeddings = FastEmbedSparse(model_name="Qdrant/bm25")
-    
+
     vector_store = QdrantVectorStore(
         client=client,
         collection_name="mitre_attack",
         embedding=embeddings,
         sparse_embedding=sparse_embeddings,
-        retrieval_mode=RetrievalMode.HYBRID
+        retrieval_mode=RetrievalMode.HYBRID,
     )
-    
-    reranker = CrossEncoder('BAAI/bge-reranker-base', device='cpu')
-    
+
+    reranker = CrossEncoder("BAAI/bge-reranker-base", device="cpu")
+
     # Textos extraídos de tus logs de LangSmith
     chunk_text = """Figure.3 “DIPLOMATIC-CAR-FOR-SALE-BMW.pdf” lure document.
 Figure.4 PowerShell script deploying .pdf lure and downloading next-stage payload from <IoC_DOMAIN>.
 Ngrok, at its core, is an incredibly versatile and cross-platform tool designed to expose local network ports securely to the internet through a process known as tunneling. However, in the context of cyber adversaries, Ngrok has taken on a diﬀerent role. Instead of legitimate purposes, adversaries have begun leveraging Ngrok to store their next-stage PowerShell payloads and establish covert communication channels.
 In this nefarious tactic, they utilize Ngrok's services by utilizing free static domains provided by Ngrok, typically in the form of a subdomain under "<IoC_DOMAIN>." These subdomains act as discrete and inconspicuous rendezvous points for their malicious payloads. This clever adaptation allows the adversaries to obfuscate their activities and communicate with compromised systems while evading detection. By exploiting Ngrok's capabilities in this manner, threat actors can further complicate cybersecurity eﬀorts and remain under the radar, making defense and attribution more challenging.
 6: HKLUK"""
-    
+
     abstract_keywords = "Spearphishing Attachment, Remote File Download, Protocol Tunneling, Command and Control, Obfuscation, Payload Delivery, Living off the Land"
-    
+
     # Esta es la query exacta que tu Extractor está enviando a mitre_oracle
     search_query = f"Raw Text: {chunk_text}\nKeywords: {abstract_keywords}"
-    
-    print("\n" + "="*50)
+
+    print("\n" + "=" * 50)
     print("1. BÚSQUEDA HÍBRIDA EN QDRANT (TOP 15)")
-    print("="*50)
-    
+    print("=" * 50)
+
     # Obtenemos candidatos con su score de Qdrant
-    candidates_with_scores = vector_store.similarity_search_with_score(search_query, k=15)
-    
+    candidates_with_scores = vector_store.similarity_search_with_score(
+        search_query, k=15
+    )
+
     t1572_found_in_qdrant = False
-    
+
     for i, (doc, score) in enumerate(candidates_with_scores):
-        tech_id = doc.metadata.get('technique_id', 'Unknown')
-        name = doc.metadata.get('name', 'Unknown')
-        print(f"{i+1}. {tech_id} - {name} (Qdrant Score: {score:.4f})")
-        if tech_id == 'T1572':
+        tech_id = doc.metadata.get("technique_id", "Unknown")
+        name = doc.metadata.get("name", "Unknown")
+        print(f"{i + 1}. {tech_id} - {name} (Qdrant Score: {score:.4f})")
+        if tech_id == "T1572":
             t1572_found_in_qdrant = True
 
     if not t1572_found_in_qdrant:
-        print("\n[ERROR] T1572 (Protocol Tunneling) was not retrieved by Qdrant in the TOP 15.")
-        print("[ERROR] This indicates an indexing failure in Qdrant or that the query text dilutes BM25.")
-        
-    print("\n" + "="*50)
+        print(
+            "\n[ERROR] T1572 (Protocol Tunneling) was not retrieved by Qdrant in the TOP 15."
+        )
+        print(
+            "[ERROR] This indicates an indexing failure in Qdrant or that the query text dilutes BM25."
+        )
+
+    print("\n" + "=" * 50)
     print("2. EVALUACIÓN DEL CROSS-ENCODER (RERANKER)")
-    print("="*50)
-    
+    print("=" * 50)
+
     all_pairs = [[search_query, doc.page_content] for doc, _ in candidates_with_scores]
-    
+
     if all_pairs:
         # Extraemos logits brutos primero para ver qué está pensando el modelo matemáticamente
         raw_logits = reranker.predict(all_pairs, batch_size=16)
         # Extraemos probabilidades con Sigmoide
-        probabilities = reranker.predict(all_pairs, batch_size=16, activation_fn=torch.nn.Sigmoid())
-        
+        probabilities = reranker.predict(
+            all_pairs, batch_size=16, activation_fn=torch.nn.Sigmoid()
+        )
+
         results = []
         for i, (doc, _) in enumerate(candidates_with_scores):
-            tech_id = doc.metadata.get('technique_id', 'Unknown')
-            name = doc.metadata.get('name', 'Unknown')
-            results.append({
-                "id": tech_id, 
-                "name": name, 
-                "logit": raw_logits[i], 
-                "prob": probabilities[i]
-            })
-            
+            tech_id = doc.metadata.get("technique_id", "Unknown")
+            name = doc.metadata.get("name", "Unknown")
+            results.append(
+                {
+                    "id": tech_id,
+                    "name": name,
+                    "logit": raw_logits[i],
+                    "prob": probabilities[i],
+                }
+            )
+
         # Ordenar por probabilidad
         results.sort(key=lambda x: x["prob"], reverse=True)
-        
+
         for res in results:
-            marker = "--> [PASA EL CORTE >= 0.15]" if res["prob"] >= 0.15 else "    [RECHAZADO]"
-            print(f"{marker} {res['id']} - {res['name']} | Logit: {res['logit']:.4f} | Prob(Sigmoid): {res['prob']:.4f}")
+            marker = (
+                "--> [PASA EL CORTE >= 0.15]"
+                if res["prob"] >= 0.15
+                else "    [RECHAZADO]"
+            )
+            print(
+                f"{marker} {res['id']} - {res['name']} | Logit: {res['logit']:.4f} | Prob(Sigmoid): {res['prob']:.4f}"
+            )
+
 
 if __name__ == "__main__":
     run_debug()
@@ -1797,6 +1935,7 @@ import os
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_openai import OpenAIEmbeddings
 
+
 def get_embeddings():
     """
     Factoría para seleccionar el modelo de Embeddings.
@@ -1804,16 +1943,16 @@ def get_embeddings():
     - LOCAL: Ejecuta bge-m3 en local mediante HuggingFace (suficiente para pruebas y poco consumo).
     """
     profile = os.getenv("EXECUTION_PROFILE", "LOCAL").upper()
-    
+
     if profile == "REMOTE":
         base_url = os.getenv("EMBEDDINGS_BASE_URL")
         if not base_url:
             raise ValueError("EMBEDDINGS_BASE_URL is not set in .env")
-            
+
         return OpenAIEmbeddings(
             model=os.getenv("EMBEDDINGS_MODEL_NAME", "BAAI/bge-m3"),
             base_url=base_url,
-            api_key="EMPTY"
+            api_key="EMPTY",
         )
     else:
         return HuggingFaceEmbeddings(model_name="BAAI/bge-m3")
@@ -1825,101 +1964,100 @@ FILE: src/core/ioc_masker.py
 ================================================
 import re
 
+
 class IoCMasker:
     """
     A utility class to mask Indicators of Compromise (IoCs) in Cyber Threat Intelligence (CTI) reports.
     Replaces raw IPs, hashes, URLs, emails, and domains with typed semantic tags to prevent
     data leakage or hallucination in embedding spaces and LLM prompts.
     """
-    
+
     def __init__(self) -> None:
         # Regex patterns compiled for performance
-        
-        self.large_payload_pattern = re.compile(r'\b[a-zA-Z0-9+/=]{150,}\b')
-        
+
+        self.large_payload_pattern = re.compile(r"\b[a-zA-Z0-9+/=]{150,}\b")
+
         # URLs: Matches http, https, ftp
         self.url_pattern = re.compile(
-            r'(?:https?|ftp)://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+',
-            re.IGNORECASE
+            r"(?:https?|ftp)://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+",
+            re.IGNORECASE,
         )
-        
+
         # Emails: Standard email address matching
         self.email_pattern = re.compile(
-            r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b',
-            re.IGNORECASE
+            r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b", re.IGNORECASE
         )
-        
+
         # IPv6: Basic matching for IPv6 addresses
         self.ipv6_pattern = re.compile(
-            r'\b(?:[a-fA-F0-9]{1,4}:){7}[a-fA-F0-9]{1,4}\b',
-            re.IGNORECASE
+            r"\b(?:[a-fA-F0-9]{1,4}:){7}[a-fA-F0-9]{1,4}\b", re.IGNORECASE
         )
-        
+
         # IPv4: Matches valid IPv4 octets
         self.ipv4_pattern = re.compile(
-            r'\b(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.'
-            r'(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.'
-            r'(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.'
-            r'(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\b'
+            r"\b(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\."
+            r"(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\."
+            r"(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\."
+            r"(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\b"
         )
-        
+
         # Hashes: MD5 (32), SHA1 (40), SHA256 (64)
         self.hash_pattern = re.compile(
-            r'\b(?:[a-fA-F0-9]{32}|[a-fA-F0-9]{40}|[a-fA-F0-9]{64})\b'
+            r"\b(?:[a-fA-F0-9]{32}|[a-fA-F0-9]{40}|[a-fA-F0-9]{64})\b"
         )
-        
+
         # Domains: Matches standard domain formats
         # We apply this last or carefully so it doesn't mask parts of emails or valid prose
         self.domain_pattern = re.compile(
-            r'\b(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+(?:com|org|net|info|biz|io|app|co|us|uk|ru|cn|dev|me|tv|ws|xyz|top|tk|ml|ga|cf|gq|site|online|tech)\b',
-            re.IGNORECASE
+            r"\b(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+(?:com|org|net|info|biz|io|app|co|us|uk|ru|cn|dev|me|tv|ws|xyz|top|tk|ml|ga|cf|gq|site|online|tech)\b",
+            re.IGNORECASE,
         )
 
     def _refang(self, text: str) -> str:
         """
         Reverts defanged IoCs to their original form before masking.
         """
-        text = text.replace('hxxps', 'https')
-        text = text.replace('hxxp', 'http')
-        text = text.replace('[.]', '.')
+        text = text.replace("hxxps", "https")
+        text = text.replace("hxxp", "http")
+        text = text.replace("[.]", ".")
         return text
 
     def mask_text(self, text: str) -> str:
         """
         Masks all identified IoCs in the provided text with typed tags.
-        
-        Order of substitution is critical to avoid partial matches 
+
+        Order of substitution is critical to avoid partial matches
         (e.g., masking a domain inside an email or URL first).
-        
+
         Args:
             text (str): The raw text from the CTI report.
-            
+
         Returns:
             str: The sanitized text with IoCs masked.
         """
         if not text:
             return text
-            
+
         text = self._refang(text)
-        
-        masked_text = self.large_payload_pattern.sub('<LARGE_PAYLOAD_REMOVED>', text)
-        
+
+        masked_text = self.large_payload_pattern.sub("<LARGE_PAYLOAD_REMOVED>", text)
+
         # 1. URLs (most complex, contains domains/paths)
-        masked_text = self.url_pattern.sub('<IoC_URL>', masked_text)
-        
+        masked_text = self.url_pattern.sub("<IoC_URL>", masked_text)
+
         # 2. Emails (contains domains)
-        masked_text = self.email_pattern.sub('<IoC_EMAIL>', masked_text)
-        
+        masked_text = self.email_pattern.sub("<IoC_EMAIL>", masked_text)
+
         # 3. IPv6 and IPv4
-        masked_text = self.ipv6_pattern.sub('<IoC_IPv6>', masked_text)
-        masked_text = self.ipv4_pattern.sub('<IoC_IPv4>', masked_text)
-        
+        masked_text = self.ipv6_pattern.sub("<IoC_IPv6>", masked_text)
+        masked_text = self.ipv4_pattern.sub("<IoC_IPv4>", masked_text)
+
         # 4. Hashes (MD5, SHA1, SHA256)
-        masked_text = self.hash_pattern.sub('<IoC_HASH>', masked_text)
-        
+        masked_text = self.hash_pattern.sub("<IoC_HASH>", masked_text)
+
         # 5. Domains (done after URLs and Emails to prevent partial overrides)
-        masked_text = self.domain_pattern.sub('<IoC_DOMAIN>', masked_text)
-        
+        masked_text = self.domain_pattern.sub("<IoC_DOMAIN>", masked_text)
+
         return masked_text
 
 
@@ -1929,6 +2067,9 @@ FILE: src/core/llm_factory.py
 ================================================
 import os
 from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_openai import ChatOpenAI
+from langchain_google_genai import ChatGoogleGenerativeAI
+
 
 def get_llm(temperature: float = 0.0) -> BaseChatModel:
     """
@@ -1937,27 +2078,23 @@ def get_llm(temperature: float = 0.0) -> BaseChatModel:
     - LOCAL: Usa la API de Google Gemini como modelo de desarrollo rápido.
     """
     profile = os.getenv("EXECUTION_PROFILE", "LOCAL").upper()
-    
+
     if profile == "REMOTE":
-        from langchain_openai import ChatOpenAI
         vllm_base_url = os.getenv("VLLM_BASE_URL")
         if not vllm_base_url:
             raise ValueError("VLLM_BASE_URL is not set in .env")
-            
+
         return ChatOpenAI(
             model=os.getenv("VLLM_MODEL_NAME", "gpt-oss-20b"),
             base_url=vllm_base_url,
             api_key="EMPTY",
             temperature=temperature,
-            max_retries=3
+            max_retries=3,
         )
     else:
-        from langchain_google_genai import ChatGoogleGenerativeAI
         model_name = os.getenv("GEMINI_MODEL", "gemini-flash-lite-latest")
         return ChatGoogleGenerativeAI(
-            model=model_name,
-            temperature=temperature,
-            max_retries=3
+            model=model_name, temperature=temperature, max_retries=3
         )
 
 
@@ -1968,59 +2105,64 @@ FILE: src/core/schemas.py
 from typing import List
 from pydantic import BaseModel, Field
 
+
 class Evidence(BaseModel):
     location: str = Field(
-        ...,
-        description="The location of the evidence (e.g., 'Page 3, Chunk 5')."
+        ..., description="The location of the evidence (e.g., 'Page 3, Chunk 5')."
     )
     procedure: str = Field(
         ...,
-        description="A concise explanation of the exact, specific action the attacker took in this report (The MITRE ATT&CK Procedure)."
+        description="A concise explanation of the exact, specific action the attacker took in this report (The MITRE ATT&CK Procedure).",
     )
     justification: str = Field(
         ...,
-        description="Technical explanation of why this chunk demonstrates the technique, quoting the original provided text."
+        description="Technical explanation of why this chunk demonstrates the technique, quoting the original provided text.",
     )
     confidence_score: float = Field(
-        ...,
-        description="Confidence score coming from the retrieval phase."
+        ..., description="Confidence score coming from the retrieval phase."
     )
+
 
 class TTPDetection(BaseModel):
     """
     Pydantic schema to enforce structured LLM output for MITRE ATT&CK technique detection.
     """
+
     technique_id: str = Field(
-        ...,
-        description="The MITRE ATT&CK technique ID (e.g. T1059)."
+        ..., description="The MITRE ATT&CK technique ID (e.g. T1059)."
     )
     tactic: List[str] = Field(
         default_factory=list,
-        description="List of associated MITRE tactics obtained from context."
+        description="List of associated MITRE tactics obtained from context.",
     )
     technique_name: str = Field(
-        default="",
-        description="The full name of the MITRE ATT&CK technique."
+        default="", description="The full name of the MITRE ATT&CK technique."
     )
     is_present: bool = Field(
         ...,
-        description="True if the evidence unequivocally demonstrates the attacker used this technique. False if it is a false positive, benign, or defensive mention."
+        description="True if the evidence unequivocally demonstrates the attacker used this technique. False if it is a false positive, benign, or defensive mention.",
     )
     occurrences: List[Evidence] = Field(
         default_factory=list,
-        description="A list of specific occurrences/evidence blocks where the technique was confirmed."
+        description="A list of specific occurrences/evidence blocks where the technique was confirmed.",
     )
 
+
 class ChunkEvidence(BaseModel):
-    technique_id: str = Field(..., description="The MITRE ATT&CK technique ID (e.g. T1059)")
+    technique_id: str = Field(
+        ..., description="The MITRE ATT&CK technique ID (e.g. T1059)"
+    )
     technique_name: str = Field(..., description="The name of the technique")
-    procedure: str = Field(..., description="Exact attacker action described in this chunk")
+    procedure: str = Field(
+        ..., description="Exact attacker action described in this chunk"
+    )
     justification: str = Field(..., description="Why this chunk matches the technique")
+
 
 class ChunkExtraction(BaseModel):
     extracted_ttps: List[ChunkEvidence] = Field(
-        default_factory=list, 
-        description="List of confirmed techniques in this chunk. Return an empty list if no candidate techniques are present."
+        default_factory=list,
+        description="List of confirmed techniques in this chunk. Return an empty list if no candidate techniques are present.",
     )
 
 
@@ -2034,77 +2176,92 @@ import subprocess
 import time
 
 # Add the project root to the python path so imports from src work smoothly
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
+
 
 def bootstrap_environment():
     """Instala dependencias e inicia los servicios requeridos (Ollama y Qdrant)."""
     print("[INFO] Configuring execution environment...")
-    
+
     print("[INFO] Installing dependencies from requirements.txt...")
     try:
-        subprocess.run([sys.executable, "-m", "pip", "install", "-r", "requirements.txt"], check=True)
+        subprocess.run(
+            [sys.executable, "-m", "pip", "install", "-r", "requirements.txt"],
+            check=True,
+        )
     except Exception as e:
         print(f"[ERROR] Error installing dependencies: {e}")
 
     llm_provider = os.environ.get("LLM_PROVIDER", "ollama").lower()
-    
+
     if llm_provider == "ollama":
         print("[INFO] Initializing Ollama service...")
         try:
-            subprocess.Popen(["ollama", "serve"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.Popen(
+                ["ollama", "serve"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
         except FileNotFoundError:
             print("[WARNING] 'ollama' is not installed or not in PATH.")
 
     print("[INFO] Waiting 5 seconds for services to be ready...\n")
     time.sleep(5)
 
+
 bootstrap_environment()
 
 import json
 import logging
-from typing import List
 
 from dotenv import load_dotenv
+
 load_dotenv(override=True)
 
 from src.langchain_pipeline.phase1_ingestion import ReportIngestor
 
 from langchain_qdrant import QdrantVectorStore, FastEmbedSparse, RetrievalMode
-from langchain_huggingface import HuggingFaceEmbeddings
 from qdrant_client import QdrantClient
 
 from src.langchain_pipeline.phase3_retriever import CandidateRetriever
 from src.langchain_pipeline.phase4_inference import TTPAnalyzer
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
+)
 logger = logging.getLogger(__name__)
 
 logging.getLogger("langsmith.client").setLevel(logging.CRITICAL)
 logging.getLogger("urllib3.connectionpool").setLevel(logging.CRITICAL)
 logging.getLogger("httpx").setLevel(logging.CRITICAL)
 
+
 def run_cti_extraction(pdf_path: str) -> str:
     """
     Objetivo: Ejecutar el flujo original y secuencial de LangChain (Fases 1 a 4).
-    A diferencia de LangGraph, aquí la inferencia (Fase 4) se hace chunk por chunk 
+    A diferencia de LangGraph, aquí la inferencia (Fase 4) se hace chunk por chunk
     y se vuelca directamente en JSON, sin agentes de validación intermedios.
     Se utiliza como baseline para comparar el rendimiento con LangGraph en las evaluaciones.
     """
     logger.info(f"[INFO] Starting CTI extraction for: {pdf_path}")
-    
+
     # ------------------------------------------------------------------
     # PHASE 1: Ingesta y Particionado Semántico
     # ------------------------------------------------------------------
     logger.info("[INFO] Phase 1: Ingesting and sanitizing the report...")
     t0 = time.time()
-    
-    use_vlm_env = os.getenv("USE_VLM_EXTRACTION", "False").lower() in ("true", "1", "yes")
+
+    use_vlm_env = os.getenv("USE_VLM_EXTRACTION", "False").lower() in (
+        "true",
+        "1",
+        "yes",
+    )
     ingestor = ReportIngestor(chunk_size=3500, chunk_overlap=500, use_vlm=use_vlm_env)
-    
+
     report_chunks = ingestor.process_report(pdf_path)
     p1_time = time.time() - t0
     logger.info(f"[INFO] Phase 1: Generated {len(report_chunks)} masked chunks.")
-    
+
     # ------------------------------------------------------------------
     # PHASE 2/3 SETUP: Conexión a Base de Datos Vectorial (MITRE)
     # ------------------------------------------------------------------
@@ -2113,18 +2270,22 @@ def run_cti_extraction(pdf_path: str) -> str:
     qdrant_port = os.getenv("QDRANT_PORT", "6333")
     qdrant_url = f"http://{qdrant_host}:{qdrant_port}"
     collection_name = "mitre_attack"
-    
+
     try:
         client = QdrantClient(url=qdrant_url)
-        
+
         if not client.collection_exists(collection_name):
-            logger.info(f"[INFO] Setup: Collection '{collection_name}' does not exist. Running Indexer (Phase 2)...")
+            logger.info(
+                f"[INFO] Setup: Collection '{collection_name}' does not exist. Running Indexer (Phase 2)..."
+            )
             from src.langchain_pipeline.phase2_indexer import setup_mitre_index
+
             setup_mitre_index(qdrant_url, collection_name)
             logger.info("[INFO] Setup: MITRE ATT&CK collection built successfully.")
             client = QdrantClient(url=qdrant_url)
-            
+
         from src.core.embedding_factory import get_embeddings
+
         embeddings = get_embeddings()
         sparse_embeddings = FastEmbedSparse(model_name="Qdrant/bm25")
         vector_store = QdrantVectorStore(
@@ -2132,16 +2293,20 @@ def run_cti_extraction(pdf_path: str) -> str:
             collection_name=collection_name,
             embedding=embeddings,
             sparse_embedding=sparse_embeddings,
-            retrieval_mode=RetrievalMode.HYBRID
+            retrieval_mode=RetrievalMode.HYBRID,
         )
     except Exception as e:
-        logger.error(f"[ERROR] Critical failure connecting to Qdrant or initializing DB. Is the container running? Error: {e}")
+        logger.error(
+            f"[ERROR] Critical failure connecting to Qdrant or initializing DB. Is the container running? Error: {e}"
+        )
         timing_metrics = {
             "phase1_ingestion_seconds": round(p1_time, 2),
             "phase3_retrieval_seconds": 0.0,
-            "phase4_inference_seconds": 0.0
+            "phase4_inference_seconds": 0.0,
         }
-        return [{"error": "Qdrant connection or initialization failure", "detail": str(e)}], timing_metrics
+        return [
+            {"error": "Qdrant connection or initialization failure", "detail": str(e)}
+        ], timing_metrics
 
     # ------------------------------------------------------------------
     # PHASE 3: Hybrid Retrieval y Cross-Encoder Reranking
@@ -2149,42 +2314,49 @@ def run_cti_extraction(pdf_path: str) -> str:
     logger.info("[INFO] Phase 3: Retrieving and re-evaluating MITRE candidates...")
     retriever = CandidateRetriever(vector_store=vector_store)
     t1 = time.time()
-    filtered_candidates = retriever.get_filtered_mitre_candidates(report_chunks, threshold=0.5)
+    filtered_candidates = retriever.get_filtered_mitre_candidates(
+        report_chunks, threshold=0.5
+    )
     p3_time = time.time() - t1
-    
+
     if not filtered_candidates:
-        logger.warning("[WARNING] Phase 3: No high-confidence candidates found. End of pipeline.")
+        logger.warning(
+            "[WARNING] Phase 3: No high-confidence candidates found. End of pipeline."
+        )
         timing_metrics = {
             "phase1_ingestion_seconds": round(p1_time, 2),
             "phase3_retrieval_seconds": round(p3_time, 2),
-            "phase4_inference_seconds": 0.0
+            "phase4_inference_seconds": 0.0,
         }
         return [], timing_metrics
-        
+
     # ------------------------------------------------------------------
     # PHASE 4: Inferencia LLM y Salida Estructurada
     # ------------------------------------------------------------------
     logger.info("[INFO] Phase 4: Querying LLM for structured confirmation...")
-    
+
     logger.info("[INFO] Phase 4: Configuring LLM for inference using llm_factory...")
     from src.core.llm_factory import get_llm
+
     llm = get_llm(temperature=0.0)
-            
+
     analyzer = TTPAnalyzer(llm=llm)
     t2 = time.time()
     confirmed_ttps, artificial_delay = analyzer.analyze_candidates(filtered_candidates)
     p4_time = (time.time() - t2) - artificial_delay
-    
+
     # ------------------------------------------------------------------
     # EXTRACCIÓN DE RESULTADOS
     # ------------------------------------------------------------------
-    output_dict_list = [ttp.model_dump(exclude={'is_present'}) for ttp in confirmed_ttps]
-    
+    output_dict_list = [
+        ttp.model_dump(exclude={"is_present"}) for ttp in confirmed_ttps
+    ]
+
     logger.info("[INFO] Pipeline execution completed successfully.")
     timing_metrics = {
         "phase1_ingestion_seconds": round(p1_time, 2),
         "phase3_retrieval_seconds": round(p3_time, 2),
-        "phase4_inference_seconds": round(p4_time, 2)
+        "phase4_inference_seconds": round(p4_time, 2),
     }
     return output_dict_list, timing_metrics
 
@@ -2193,50 +2365,50 @@ if __name__ == "__main__":
     if len(sys.argv) < 2:
         print("Usage: python -m src.langchain_pipeline.main_pipeline <path_to_pdf>")
         sys.exit(1)
-        
+
     target_pdf = sys.argv[1]
-    
+
     if not os.path.exists(target_pdf):
         print(f"Error: The file '{target_pdf}' does not exist or is not accessible.")
         sys.exit(1)
-        
+
     start_time = time.time()
-    
+
     # run_cti_extraction ahora devuelve una lista de diccionarios y métricas de tiempo
     resultados_lista, timing_metrics = run_cti_extraction(target_pdf)
-    
+
     end_time = time.time()
     execution_time = end_time - start_time
-    
+
     # Crear el JSON final incluyendo métricas
     output_data = {
         "source_file": target_pdf,
         "total_execution_time_seconds": round(execution_time, 2),
         "total_execution_time_minutes": round(execution_time / 60, 2),
         "timing_breakdown": timing_metrics,
-        "extracted_ttps": resultados_lista
+        "extracted_ttps": resultados_lista,
     }
-    
+
     resultados_json = json.dumps(output_data, indent=4, ensure_ascii=False)
-    
+
     # Asegurar que existe el directorio de salida
-    output_dir = os.path.join(os.path.dirname(__file__), '../../data/output')
+    output_dir = os.path.join(os.path.dirname(__file__), "../../data/output")
     os.makedirs(output_dir, exist_ok=True)
-    
+
     # Generar nombre de archivo basado en el PDF original
     base_name = os.path.basename(target_pdf)
     file_name_without_ext = os.path.splitext(base_name)[0]
     output_file_path = os.path.join(output_dir, f"{file_name_without_ext}_results.json")
-    
+
     with open(output_file_path, "w", encoding="utf-8") as f:
         f.write(resultados_json)
-    
-    print("\n" + "="*60)
+
+    print("\n" + "=" * 60)
     print("FINAL RESULTS: EXTRACTED TTPs")
-    print("="*60)
+    print("=" * 60)
     print(f"Execution time: {round(execution_time / 60, 2)} minutes")
     print(f"Results successfully saved to: {output_file_path}")
-    print("="*60)
+    print("=" * 60)
 
 
 
@@ -2247,13 +2419,19 @@ import os
 import re
 import fitz  # PyMuPDF
 import base64
+import logging
 from typing import List
+from langchain_google_genai import ChatGoogleGenerativeAI
+from docling.document_converter import DocumentConverter, PdfFormatOption
+from docling.datamodel.pipeline_options import PdfPipelineOptions
+from docling.datamodel.base_models import InputFormat
 
-from docling.document_converter import DocumentConverter
 from langchain_core.documents import Document
 from langchain_core.messages import HumanMessage
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_text_splitters import RecursiveCharacterTextSplitter, MarkdownHeaderTextSplitter
+from langchain_text_splitters import (
+    RecursiveCharacterTextSplitter,
+    MarkdownHeaderTextSplitter,
+)
 
 from src.core.ioc_masker import IoCMasker
 
@@ -2268,10 +2446,12 @@ class ReportIngestor:
     Al final, ofusca los IoCs (IPs, hashes) para evitar sesgos y trocea el texto.
     """
 
-    def __init__(self, chunk_size: int = 3500, chunk_overlap: int = 500, use_vlm: bool = False) -> None:
+    def __init__(
+        self, chunk_size: int = 3500, chunk_overlap: int = 500, use_vlm: bool = False
+    ) -> None:
         """
         Initializes the ReportIngestor with chunking parameters, IoC masker, and extraction mode.
-        
+
         Args:
             chunk_size (int): The maximum character size for each chunk.
             chunk_overlap (int): Overlap in characters to maintain context.
@@ -2281,46 +2461,52 @@ class ReportIngestor:
         self.chunk_overlap = chunk_overlap
         self.use_vlm = use_vlm
         self.ioc_masker = IoCMasker()
-        
+
         self.headers_to_split_on = [
             ("#", "Header 1"),
             ("##", "Header 2"),
             ("###", "Header 3"),
         ]
-        self.md_splitter = MarkdownHeaderTextSplitter(headers_to_split_on=self.headers_to_split_on, strip_headers=False)
-        
+        self.md_splitter = MarkdownHeaderTextSplitter(
+            headers_to_split_on=self.headers_to_split_on, strip_headers=False
+        )
+
         self.fallback_splitter = RecursiveCharacterTextSplitter(
             chunk_size=self.chunk_size,
             chunk_overlap=self.chunk_overlap,
-            separators=["\n\n", "\n", ".", " ", ""]
+            separators=["\n\n", "\n", ".", " ", ""],
         )
-        
+
         self.boilerplate_keywords = [
-            "subscribe", "share on", "copyright ©", "copyright c",
-            "all rights reserved", "manage cookies"
+            "subscribe",
+            "share on",
+            "copyright ©",
+            "copyright c",
+            "all rights reserved",
+            "manage cookies",
         ]
 
     def _load_pdf_vlm(self, file_path: str) -> List[Document]:
         """
-        Loads a PDF file by converting each page to an image and using a Vision-Language Model 
-        (Gemini 1.5 Flash) to transcribe it. This solves the issue of traditional OCR failing 
+        Loads a PDF file by converting each page to an image and using a Vision-Language Model
+        (Gemini 1.5 Flash) to transcribe it. This solves the issue of traditional OCR failing
         on dark terminal screenshots and code blocks.
         """
-        import logging
         logger = logging.getLogger(__name__)
-        
+
         if not os.path.exists(file_path):
             raise FileNotFoundError(f"The file {file_path} does not exist.")
-            
-        from langchain_google_genai import ChatGoogleGenerativeAI
-        logger.info(f"Loading PDF '{file_path}' using Multimodal VLM extraction (Gemini Flash)...")
+
+        logger.info(
+            f"Loading PDF '{file_path}' using Multimodal VLM extraction (Gemini Flash)..."
+        )
         # Por ahora forzamos Gemini siempre para VLM, ya que el cluster remoto vLLM no tiene modelo visual.
         gemini_model = os.getenv("GEMINI_MODEL", "gemini-flash-lite-latest")
         llm = ChatGoogleGenerativeAI(model=gemini_model, temperature=0.0, max_retries=3)
-        
+
         doc = fitz.open(file_path)
         documents = []
-        
+
         for page_num in range(len(doc)):
             logger.info(f"[VLM] Processing page {page_num + 1}/{len(doc)}...")
             page = doc.load_page(page_num)
@@ -2328,26 +2514,28 @@ class ReportIngestor:
             pix = page.get_pixmap(dpi=150)
             img_data = pix.tobytes("png")
             img_base64 = base64.b64encode(img_data).decode("utf-8")
-            
+
             prompt_text = (
-                "You are an expert Cyber Threat Intelligence parser.\n"
-                "Extract all text, terminal logs, and tables from this image perfectly.\n"
-                "Important: The document may be in any language (e.g., Spanish, Russian, Chinese). Transcribe it in its original language, do not translate it.\n"
-                "Do not add any commentary. Return only the raw extracted text formatted in Markdown."
-                "If you see any commands, URLs, or code inside an image, transcribe it exactly as it appears and wrap it in a markdown code block.\n"
-                "Do NOT summarize the page. Just provide the exact transcription."
+                "You are a specialized Vision-Language Model for cybersecurity.\n"
+                "Analyze this document page. Your ONLY task is to extract text that appears INSIDE images, diagrams, terminal windows (black backgrounds), or code blocks.\n"
+                "Do NOT transcribe the normal paragraphs of the document. Ignore standard text.\n"
+                "If you find terminal logs, commands, or code in an image, transcribe them exactly and wrap them in markdown code blocks.\n"
+                "If the page has no images, diagrams, or terminal blocks, reply EXACTLY with 'NO_IMAGE_DATA'."
             )
-            
+
             message = HumanMessage(
                 content=[
                     {"type": "text", "text": prompt_text},
-                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_base64}"}}
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/png;base64,{img_base64}"},
+                    },
                 ]
             )
-            
+
             try:
                 response = llm.invoke([message])
-                
+
                 # Extracción robusta del contenido
                 if isinstance(response.content, str):
                     page_text = response.content
@@ -2361,21 +2549,25 @@ class ReportIngestor:
                     page_text = "\n".join(text_parts)
                 else:
                     page_text = str(response.content)
-                    
+
             except Exception as e:
-                logger.error(f"[VLM] Error processing page {page_num + 1}: {e}. Falling back to basic text extraction.")
+                logger.error(
+                    f"[VLM] Error processing page {page_num + 1}: {e}. Falling back to basic text extraction."
+                )
                 page_text = page.get_text()
-                
+
             # Forzar cast a string por si acaso (Pydantic ValidationError protection)
             if not isinstance(page_text, str):
                 page_text = str(page_text)
-                
+
             # Simulate the Unstructured format so the rest of the pipeline works seamlessly
-            documents.append(Document(
-                page_content=page_text,
-                metadata={"page_number": page_num + 1, "category": "NarrativeText"}
-            ))
-            
+            documents.append(
+                Document(
+                    page_content=page_text,
+                    metadata={"page_number": page_num + 1, "category": "NarrativeText"},
+                )
+            )
+
         doc.close()
         return documents
 
@@ -2386,49 +2578,48 @@ class ReportIngestor:
         """
         if not os.path.exists(file_path):
             raise FileNotFoundError(f"The file {file_path} does not exist.")
-            
-        import logging
+
         logger = logging.getLogger(__name__)
-        
+
         # Optional: fast page check using PyMuPDF to validate extraction later
         try:
-            import fitz
             pdf_doc = fitz.open(file_path)
             num_pages = len(pdf_doc)
             pdf_doc.close()
         except Exception:
             num_pages = 1
-            
-        logger.info(f"Loading PDF '{file_path}' using Docling (Pages detected: {num_pages})...")
-        
+
+        logger.info(
+            f"Loading PDF '{file_path}' using Docling (Pages detected: {num_pages})..."
+        )
+
         try:
-            from docling.document_converter import DocumentConverter, PdfFormatOption
-            from docling.datamodel.pipeline_options import PdfPipelineOptions
-            from docling.datamodel.base_models import InputFormat
-            
             # Quitamos EasyOCR por completo porque es demasiado restrictivo.
             # Docling tiene integrado RapidOCR por defecto que procesa de forma universal
             # ruso, chino, árabe, japonés e inglés simultáneamente con un único modelo global sin crashear.
             pipeline_options = PdfPipelineOptions(do_ocr=True)
-            
+
             converter = DocumentConverter(
                 allowed_formats=[InputFormat.PDF],
-                format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options)}
+                format_options={
+                    InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options)
+                },
             )
         except ImportError:
-            logger.warning("[WARNING] EasyOCR options failed to import. Falling back to default Docling converter.")
-            from docling.document_converter import DocumentConverter
+            logger.warning(
+                "[WARNING] EasyOCR options failed to import. Falling back to default Docling converter."
+            )
             converter = DocumentConverter()
-            
+
         result = converter.convert(file_path)
         doc = result.document
-        
+
         elements = []
         for item, level in doc.iterate_items():
             text = ""
             cat = "NarrativeText"
             html = None
-            
+
             # Extract the string representation of the enum label
             label = getattr(item, "label", "text")
             if hasattr(label, "name"):
@@ -2437,7 +2628,7 @@ class ReportIngestor:
                 label_str = label.lower()
             else:
                 label_str = "text"
-                
+
             # Map Docling labels to our expected categories
             if label_str in ["title", "section_header", "page_header"]:
                 cat = "Title"
@@ -2451,26 +2642,26 @@ class ReportIngestor:
                 cat = "Table"
                 if hasattr(item, "export_to_html"):
                     html = item.export_to_html()
-                    
+
             if hasattr(item, "text"):
                 text = item.text
-                
+
             # Ignore empty elements or images without text/html
             if not text and not html:
                 continue
-                
+
             # Try to fetch provenance for page number
             page_num = "?"
             if hasattr(item, "prov") and item.prov:
                 page_num = str(item.prov[0].page_no)
-                
+
             metadata = {"category": cat, "page_number": page_num}
             if html:
                 metadata["text_as_html"] = html
                 text = html  # Use HTML representation for the chunk content
-                
+
             elements.append(Document(page_content=text, metadata=metadata))
-            
+
         # Validation Logic: Suspiciously short extraction
         total_text_len = sum(len(el.page_content) for el in elements)
         if num_pages >= 3 and total_text_len < (num_pages * 50):
@@ -2478,7 +2669,7 @@ class ReportIngestor:
                 f"[WARNING] Extracted text is suspiciously short ({total_text_len} chars across {num_pages} pages). "
                 "The PDF might be a pure scanned image requiring forced full-page OCR or it's heavily obfuscated."
             )
-            
+
         return elements
 
     def process_report(self, file_path: str) -> List[Document]:
@@ -2490,29 +2681,30 @@ class ReportIngestor:
         4. Masks IoCs.
         5. Splits the text logically using Markdown headers & Recursive fallback.
         """
-        import logging
         logger = logging.getLogger(__name__)
-        
-        # SELECTOR: VLM vs Traditional OCR
-        if self.use_vlm:
-            raw_elements = self._load_pdf_vlm(file_path)
-        else:
-            raw_elements = self.load_pdf(file_path)
-        
-        logger.info("[INFO] Phase 1: Cleaning noise and reconstructing Markdown structure...")
+
+        # 1. SIEMPRE usamos Docling para extraer el texto base perfecto
+        logger.info("[INFO] Extracting base text using Docling (OCR)...")
+        raw_elements = self.load_pdf(file_path)
+
+        # VLM integration moved to the end as independent chunks.
+
+        logger.info(
+            "[INFO] Phase 1: Cleaning noise and reconstructing Markdown structure..."
+        )
         md_lines = []
         for el in raw_elements:
             cat = el.metadata.get("category", "NarrativeText")
             text = el.page_content.strip()
             page_num = el.metadata.get("page_number", "?")
-            
+
             if not text:
                 continue
-                
+
             # Filter Headers and Footers
             if cat in ["Header", "Footer"]:
                 continue
-                
+
             # Filter Boilerplate and short NarrativeText
             if cat == "NarrativeText":
                 lower_text = text.lower()
@@ -2520,11 +2712,11 @@ class ReportIngestor:
                     continue
                 if len(text.split()) < 5:
                     continue
-                    
+
             # Handle Tables
             if cat == "Table":
                 text = el.metadata.get("text_as_html", text)
-                
+
             # Format as Markdown and inject hidden page tracker
             if cat == "Title":
                 md_lines.append(f"\n## {text} <!-- Page {page_num} -->\n")
@@ -2532,31 +2724,61 @@ class ReportIngestor:
                 md_lines.append(f"- {text} <!-- Page {page_num} -->")
             else:
                 md_lines.append(f"{text} <!-- Page {page_num} -->\n")
-                
+
         full_md = "\n".join(md_lines)
-        
-        logger.info("[INFO] Phase 1: Masking volatile Indicators of Compromise (IoCs)...")
+
+        logger.info(
+            "[INFO] Phase 1: Masking volatile Indicators of Compromise (IoCs)..."
+        )
         sanitized_md = self.ioc_masker.mask_text(full_md)
-        
+
         logger.info("[INFO] Phase 1: Applying semantic chunking by headers and size...")
         md_docs = self.md_splitter.split_text(sanitized_md)
-        
+
         # Fallback split for huge sections
         final_docs = self.fallback_splitter.split_documents(md_docs)
-        
+
+        # =====================================================================
+        # 2. ENRIQUECIMIENTO VLM: CHUNKS INDEPENDIENTES (NUEVO)
+        # =====================================================================
+        if self.use_vlm:
+            logger.info("[INFO] VLM is active. Appending independent visual chunks...")
+            vlm_elements = self._load_pdf_vlm(file_path)
+            for el in vlm_elements:
+                # Solo si encontró algo y no es ruido de 2 letras
+                if (
+                    "NO_IMAGE_DATA" not in el.page_content
+                    and len(el.page_content.strip()) > 10
+                ):
+                    vlm_text = f"### [Visual Evidence extracted from Image/Terminal] ###\n{el.page_content}"
+                    # Sanitizamos los IoCs que el VLM haya podido leer de la imagen
+                    vlm_text = self.ioc_masker.mask_text(vlm_text)
+
+                    final_docs.append(
+                        Document(
+                            page_content=vlm_text,
+                            metadata={
+                                "category": "VLM_Extraction",
+                                "page_number": el.metadata.get("page_number", "?"),
+                            },
+                        )
+                    )
+        # =====================================================================
+
         # Add metadata for traceability
         for i, doc in enumerate(final_docs):
-            doc.metadata['chunk_index'] = i
+            doc.metadata["chunk_index"] = i
             # Extract the first page number found in the chunk
-            match = re.search(r'<!-- Page (\d+) -->', doc.page_content)
+            match = re.search(r"<!-- Page (\d+) -->", doc.page_content)
             if match:
-                doc.metadata['page_number'] = match.group(1)
+                doc.metadata["page_number"] = match.group(1)
             else:
-                doc.metadata['page_number'] = "Unknown"
-                
+                # Fallback para los chunks del VLM que ya traen el page_number
+                doc.metadata["page_number"] = doc.metadata.get("page_number", "Unknown")
+
             # Clean up the HTML comments so the LLM isn't distracted
-            doc.page_content = re.sub(r' <!-- Page \d+ -->', '', doc.page_content)
-            
+            doc.page_content = re.sub(r" <!-- Page \d+ -->", "", doc.page_content)
+
         return final_docs
 
 
@@ -2566,17 +2788,20 @@ FILE: src/langchain_pipeline/phase2_indexer.py
 ================================================
 import json
 import logging
+import os
+import sys
+import urllib.request
 from typing import List, Dict, Any, Optional
+from src.core.embedding_factory import get_embeddings
 
 import torch
 from langchain_core.documents import Document
-from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_qdrant import QdrantVectorStore, FastEmbedSparse, RetrievalMode
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from qdrant_client import QdrantClient
-from qdrant_client.http.exceptions import UnexpectedResponse
 
 logger = logging.getLogger(__name__)
+
 
 class MitreIndexer:
     """
@@ -2585,17 +2810,21 @@ class MitreIndexer:
     and indexes them into a Qdrant vector database using HuggingFace embeddings.
     """
 
-    def __init__(self, qdrant_url: str = "http://localhost:6333", collection_name: str = "mitre_attack") -> None:
+    def __init__(
+        self,
+        qdrant_url: str = "http://localhost:6333",
+        collection_name: str = "mitre_attack",
+    ) -> None:
         """
         Initializes the indexer with Qdrant connection details.
-        
+
         Args:
             qdrant_url (str): The URL of the Qdrant instance.
             collection_name (str): The name of the Qdrant collection to store vectors.
         """
         self.qdrant_url = qdrant_url
         self.collection_name = collection_name
-        
+
         # Automatically select the best available device
         if torch.cuda.is_available():
             self.device = "cuda"
@@ -2603,37 +2832,45 @@ class MitreIndexer:
             self.device = "mps"
         else:
             self.device = "cpu"
-            
-        from src.core.embedding_factory import get_embeddings
+
         self.embeddings = get_embeddings()
 
     def load_mitre_data(self, file_path: str) -> List[Dict[str, Any]]:
         try:
-            with open(file_path, 'r', encoding='utf-8') as f:
+            with open(file_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
         except Exception as e:
             logger.error(f"Failed to load MITRE data from {file_path}: {e}")
             raise
-            
+
         objects = data.get("objects", []) if isinstance(data, dict) else data
         if not isinstance(objects, list):
-            logger.warning("Unexpected JSON structure. Expected a list or a STIX bundle with 'objects'.")
+            logger.warning(
+                "Unexpected JSON structure. Expected a list or a STIX bundle with 'objects'."
+            )
             return []
-            
+
         # 1. Extraer nombres de herramientas y malware
         entity_names = {}
         for obj in objects:
             if obj.get("type") in ["malware", "tool", "intrusion-set"]:
                 entity_names[obj.get("id")] = obj.get("name")
-                
+
         # 2. Resolver las relaciones "uses" (Herramienta -> usa -> Técnica)
         technique_examples = {}
         for obj in objects:
-            if obj.get("type") == "relationship" and obj.get("relationship_type") == "uses":
+            if (
+                obj.get("type") == "relationship"
+                and obj.get("relationship_type") == "uses"
+            ):
                 source_id = obj.get("source_ref")
                 target_id = obj.get("target_ref")
-                
-                if target_id and target_id.startswith("attack-pattern--") and source_id in entity_names:
+
+                if (
+                    target_id
+                    and target_id.startswith("attack-pattern--")
+                    and source_id in entity_names
+                ):
                     if target_id not in technique_examples:
                         technique_examples[target_id] = []
                     tool_name = entity_names[source_id]
@@ -2645,40 +2882,40 @@ class MitreIndexer:
         for obj in objects:
             if obj.get("type") != "attack-pattern":
                 continue
-                
+
             if obj.get("revoked", False) or obj.get("x_mitre_deprecated", False):
                 continue
-                
+
             external_refs = obj.get("external_references", [])
             technique_id = "Unknown"
             for ref in external_refs:
                 if ref.get("source_name") == "mitre-attack":
                     technique_id = ref.get("external_id", "Unknown")
                     break
-                    
+
             if not technique_id.startswith("T"):
-                continue  
-                
+                continue
+
             tactics = [
-                phase.get("phase_name", "") 
-                for phase in obj.get("kill_chain_phases", []) 
+                phase.get("phase_name", "")
+                for phase in obj.get("kill_chain_phases", [])
                 if phase.get("kill_chain_name") == "mitre-attack"
             ]
-            
+
             # Recuperar las herramientas asociadas a esta técnica
             stix_id = obj.get("id")
             examples = technique_examples.get(stix_id, [])
-            
+
             technique_dict = {
                 "technique_id": technique_id,
                 "name": obj.get("name", "Unknown"),
                 "description": obj.get("description", ""),
                 "tactics": tactics,
                 "platforms": obj.get("x_mitre_platforms", []),
-                "procedure_examples": examples
+                "procedure_examples": examples,
             }
             techniques.append(technique_dict)
-            
+
         logger.info(f"Loaded {len(techniques)} techniques from {file_path}.")
         return techniques
 
@@ -2686,24 +2923,24 @@ class MitreIndexer:
         """
         Enriches the technique's description with tactical keywords and procedure examples.
         This concatenation improves the semantic vector density, increasing the Recall of RAG.
-        
+
         Args:
             technique (Dict[str, Any]): The extracted technique dictionary.
-            
+
         Returns:
             str: The enriched text ready for vectorization.
         """
         base_desc = technique.get("description", "").strip()
-        
+
         keywords = []
         tactics = technique.get("tactics", [])
         if tactics:
             keywords.append(f"Tactics: {', '.join(tactics)}")
-            
+
         platforms = technique.get("platforms", [])
         if platforms:
             keywords.append(f"Platforms: {', '.join(platforms)}")
-            
+
         examples = technique.get("procedure_examples", [])
         if examples:
             if isinstance(examples, list):
@@ -2711,23 +2948,25 @@ class MitreIndexer:
             else:
                 examples_text = str(examples)
             keywords.append(f"Procedure Examples: {examples_text}")
-            
+
         # Combine base description with semantic keywords
         if keywords:
-            enriched_text = f"{base_desc}\n\nTechnical Keywords & Examples: {'; '.join(keywords)}"
+            enriched_text = (
+                f"{base_desc}\n\nTechnical Keywords & Examples: {'; '.join(keywords)}"
+            )
         else:
             enriched_text = base_desc
-            
+
         return enriched_text
 
     def build_vector_store(self, file_path: str) -> Optional[QdrantVectorStore]:
         """
         End-to-end method to load the JSON, enrich descriptions, create Document objects,
         and index them into Qdrant.
-        
+
         Args:
             file_path (str): Path to the MITRE JSON file.
-            
+
         Returns:
             Optional[QdrantVectorStore]: The initialized Qdrant vector store, or None if failed.
         """
@@ -2735,13 +2974,13 @@ class MitreIndexer:
         if not techniques:
             logger.error("No techniques extracted. Aborting vectorization.")
             return None
-            
+
         splitter = RecursiveCharacterTextSplitter(chunk_size=800, chunk_overlap=150)
-            
+
         documents = []
         for tech in techniques:
             enriched_content = self._enrich_description(tech)
-            
+
             # Metadata must be flat and use simple types for Qdrant compatibility
             metadata = {
                 "technique_id": tech.get("technique_id"),
@@ -2750,26 +2989,28 @@ class MitreIndexer:
                 "platforms": ", ".join(tech.get("platforms", [])),
                 # CRITICAL FIX: Pass the enriched content (which includes tools and malware names)
                 # to the metadata, so the LLM Validator can read the same evidence Qdrant used.
-                "full_description": enriched_content 
+                "full_description": enriched_content,
             }
-            
+
             # Chunk the enriched content for fast Cross-Encoder evaluation
             chunks = splitter.split_text(enriched_content)
             for chunk in chunks:
                 documents.append(Document(page_content=chunk, metadata=metadata))
-            
+
         logger.info(f"Prepared {len(documents)} Document objects for vectorization.")
-        
+
         try:
             # Initialize Qdrant Client explicitly to test connection
             client = QdrantClient(url=self.qdrant_url)
             # A lightweight query to verify the connection
             client.get_collections()
-            
+
             sparse_embeddings = FastEmbedSparse(model_name="Qdrant/bm25")
-            
+
             # Use LangChain's QdrantVectorStore to create the collection and embed documents
-            logger.info(f"Indexing documents into Qdrant using device: {self.device}...")
+            logger.info(
+                f"Indexing documents into Qdrant using device: {self.device}..."
+            )
             vector_store = QdrantVectorStore.from_documents(
                 documents=documents,
                 embedding=self.embeddings,
@@ -2781,25 +3022,29 @@ class MitreIndexer:
             )
             logger.info("Successfully built and indexed the MITRE ATT&CK vector store.")
             return vector_store
-            
+
         except Exception as e:
             # Catching general Exception handles both ConnectionError and UnexpectedResponse
-            logger.error(f"Qdrant Connection or Indexing Error: {e}. Ensure Qdrant is running.")
+            logger.error(
+                f"Qdrant Connection or Indexing Error: {e}. Ensure Qdrant is running."
+            )
             return None
 
-def setup_mitre_index(qdrant_url: str = "http://localhost:6333", collection_name: str = "mitre_attack"):
+
+def setup_mitre_index(
+    qdrant_url: str = "http://localhost:6333", collection_name: str = "mitre_attack"
+):
     """
     Helper function to automatically download the MITRE ATT&CK dataset
     and populate the Qdrant vector database if it hasn't been set up yet.
     """
-    import os
-    import urllib.request
-    
-    mitre_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../data/mitre_data'))
-    mitre_file = os.path.join(mitre_dir, 'enterprise-attack.json')
-    
+    mitre_dir = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "../../data/mitre_data")
+    )
+    mitre_file = os.path.join(mitre_dir, "enterprise-attack.json")
+
     os.makedirs(mitre_dir, exist_ok=True)
-    
+
     if not os.path.exists(mitre_file):
         url = "https://raw.githubusercontent.com/mitre-attack/attack-stix-data/master/enterprise-attack/enterprise-attack.json"
         logger.info(f"Descargando datos oficiales de MITRE ATT&CK desde {url}...")
@@ -2807,7 +3052,7 @@ def setup_mitre_index(qdrant_url: str = "http://localhost:6333", collection_name
         urllib.request.urlretrieve(url, mitre_file)
         logger.info("Descarga completada.")
         print("Descarga completada.")
-        
+
     logger.info("Iniciando Fase 2: Construcción de la Base Vectorial (Qdrant)...")
     print("Iniciando Fase 2: Construcción de la Base Vectorial (Qdrant)...")
     indexer = MitreIndexer(qdrant_url=qdrant_url, collection_name=collection_name)
@@ -2816,13 +3061,13 @@ def setup_mitre_index(qdrant_url: str = "http://localhost:6333", collection_name
         raise Exception("Fallo al construir el índice de MITRE en Qdrant.")
     return store
 
+
 if __name__ == "__main__":
-    import os
-    import sys
-    
     # Add project root to sys.path
-    sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
-    
+    sys.path.insert(
+        0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
+    )
+
     try:
         setup_mitre_index()
         print("¡Indexación finalizada con éxito! Ya puedes ejecutar main_pipeline.py")
@@ -2847,6 +3092,7 @@ from sentence_transformers import CrossEncoder
 
 logger = logging.getLogger(__name__)
 
+
 class CandidateRetriever:
     """
     Handles Phase 3 of the LangChain pipeline: Hybrid Retrieval and Cross-Encoder Reranking.
@@ -2857,14 +3103,14 @@ class CandidateRetriever:
     def __init__(self, vector_store: QdrantVectorStore, device: str = None) -> None:
         """
         Initializes the retriever with a vector database and a Cross-Encoder model.
-        
+
         Args:
             vector_store (QdrantVectorStore): The initialized Qdrant vector database from Phase 2.
             device (str, optional): The device to run the Cross-Encoder on ('cuda', 'mps', 'cpu').
                                     Auto-detects if None is provided.
         """
         self.vector_store = vector_store
-        
+
         if device is None:
             # Auto-detect the optimal device
             if torch.cuda.is_available():
@@ -2875,23 +3121,29 @@ class CandidateRetriever:
                 self.device = "cpu"
         else:
             self.device = device
-            
+
         use_remote = os.getenv("EXECUTION_PROFILE", "LOCAL").upper() == "REMOTE"
-        if use_remote:
+        use_local_reranker = os.getenv("USE_LOCAL_RERANKER", "False").lower() in ("true", "1", "yes")
+        
+        if use_remote and not use_local_reranker:
             logger.info("Using remote reranker. Local CrossEncoder will not be loaded.")
             self.reranker = None
         else:
-            logger.info(f"Loading Cross-Encoder model (BAAI/bge-reranker-base) on {self.device}...")
-            self.reranker = CrossEncoder('BAAI/bge-reranker-base', device=self.device)
+            logger.info(
+                f"Loading Cross-Encoder model (BAAI/bge-reranker-base) on {self.device}..."
+            )
+            self.reranker = CrossEncoder("BAAI/bge-reranker-base", device=self.device)
 
-    def _get_initial_candidates(self, chunk: Document, top_k: int = 35) -> List[Document]:
+    def _get_initial_candidates(
+        self, chunk: Document, top_k: int = 25
+    ) -> List[Document]:
         """
         Retrieves the initial set of candidate MITRE techniques from Qdrant.
-        
+
         Args:
             chunk (Document): A chunk of text from the parsed CTI report.
             top_k (int): The number of candidates to retrieve.
-            
+
         Returns:
             List[Document]: The top K MITRE techniques retrieved via semantic search.
         """
@@ -2899,40 +3151,54 @@ class CandidateRetriever:
         candidates = self.vector_store.similarity_search(chunk.page_content, k=top_k)
         return candidates
 
-    def get_filtered_mitre_candidates(self, report_chunks: List[Document], threshold: float = None) -> List[Dict[str, Any]]:
+    def get_filtered_mitre_candidates(
+        self, report_chunks: List[Document], threshold: float = None
+    ) -> List[Dict[str, Any]]:
         # Si no se provee por argumento, se lee de .env (por defecto 0.20 para ser permisivos)
         if threshold is None:
             threshold = float(os.getenv("RERANKER_THRESHOLD", "0.20"))
-        
-        logger.info(f"Starting retrieval and reranking for {len(report_chunks)} chunks (Threshold: {threshold})...")
-        
+
+        logger.info(
+            f"Starting retrieval and reranking for {len(report_chunks)} chunks (Threshold: {threshold})..."
+        )
+
         all_initial_candidates = []
-        
+
         for chunk in report_chunks:
             candidates = self._get_initial_candidates(chunk, top_k=25)
             all_initial_candidates.append((chunk, candidates))
-            
+
         use_remote = os.getenv("EXECUTION_PROFILE", "LOCAL").upper() == "REMOTE"
+        use_local_reranker = os.getenv("USE_LOCAL_RERANKER", "False").lower() in ("true", "1", "yes")
         reranker_url = os.getenv("RERANKER_URL")
-        reranker_model = os.getenv("RERANKER_MODEL_NAME", "jina-reranker-v2-base-multilingual")
-        
-        if use_remote and not reranker_url:
-            raise ValueError("RERANKER_URL must be defined in .env for REMOTE execution profile")
+        reranker_model = os.getenv(
+            "RERANKER_MODEL_NAME", "jina-reranker-v2-base-multilingual"
+        )
+
+        if use_remote and not use_local_reranker and not reranker_url:
+            raise ValueError(
+                "RERANKER_URL must be defined in .env for REMOTE execution profile"
+            )
 
         chunk_results = []
         for chunk, candidates in all_initial_candidates:
             valid_candidates = []
-            if use_remote:
+            if use_remote and not use_local_reranker:
                 # Le mandamos los candidatos en texto crudo a TEI/Jina para que haga un
                 # cross-encoding real contra la query y nos devuelva un score ajustado.
                 docs_text = [doc.page_content for doc in candidates]
                 payload = {
                     "model": reranker_model,
                     "query": chunk.page_content,
-                    "documents": docs_text
+                    "documents": docs_text,
                 }
                 try:
-                    response = requests.post(reranker_url, json=payload, headers={"Authorization": "Bearer EMPTY"}, timeout=60)
+                    response = requests.post(
+                        reranker_url,
+                        json=payload,
+                        headers={"Authorization": "Bearer EMPTY"},
+                        timeout=60,
+                    )
                     response.raise_for_status()
                     if response.status_code == 200:
                         res_data = response.json()
@@ -2948,44 +3214,72 @@ class CandidateRetriever:
                                 score = 1 / (1 + math.exp(-raw_score))
                             if score >= threshold:
                                 doc = candidates[idx]
-                                valid_candidates.append({
-                                    "technique_id": doc.metadata.get("technique_id", "Unknown"),
-                                    "name": doc.metadata.get("name", "Unknown"),
-                                    "tactics": [t.strip() for t in doc.metadata.get("tactics", "").split(",") if t.strip()],
-                                    "description": doc.metadata.get("full_description", ""),
-                                    "score": round(score, 4)
-                                })
+                                valid_candidates.append(
+                                    {
+                                        "technique_id": doc.metadata.get(
+                                            "technique_id", "Unknown"
+                                        ),
+                                        "name": doc.metadata.get("name", "Unknown"),
+                                        "tactics": [
+                                            t.strip()
+                                            for t in doc.metadata.get(
+                                                "tactics", ""
+                                            ).split(",")
+                                            if t.strip()
+                                        ],
+                                        "description": doc.metadata.get(
+                                            "full_description", ""
+                                        ),
+                                        "score": round(score, 4),
+                                    }
+                                )
                 except Exception as e:
                     logger.error(f"Error calling remote reranker: {e}")
             else:
                 # Fallback Local original
                 pairs = [[chunk.page_content, doc.page_content] for doc in candidates]
                 if pairs:
-                    scores = self.reranker.predict(pairs, batch_size=32, activation_fn=torch.nn.Sigmoid())
+                    scores = self.reranker.predict(
+                        pairs, batch_size=32, activation_fn=torch.nn.Sigmoid()
+                    )
                     for doc, score in zip(candidates, scores):
                         if score >= threshold:
-                            valid_candidates.append({
-                                "technique_id": doc.metadata.get("technique_id", "Unknown"),
-                                "name": doc.metadata.get("name", "Unknown"),
-                                "tactics": [t.strip() for t in doc.metadata.get("tactics", "").split(",") if t.strip()],
-                                "description": doc.metadata.get("full_description", ""),
-                                "score": round(float(score), 4)
-                            })
-            
+                            valid_candidates.append(
+                                {
+                                    "technique_id": doc.metadata.get(
+                                        "technique_id", "Unknown"
+                                    ),
+                                    "name": doc.metadata.get("name", "Unknown"),
+                                    "tactics": [
+                                        t.strip()
+                                        for t in doc.metadata.get("tactics", "").split(
+                                            ","
+                                        )
+                                        if t.strip()
+                                    ],
+                                    "description": doc.metadata.get(
+                                        "full_description", ""
+                                    ),
+                                    "score": round(float(score), 4),
+                                }
+                            )
+
                 if valid_candidates:
-                    logger.debug(f"[DEBUG] Chunk {chunk.page_content[:30]}... Max valid score: {max(c['score'] for c in valid_candidates)}")
+                    logger.debug(
+                        f"[DEBUG] Chunk {chunk.page_content[:30]}... Max valid score: {max(c['score'] for c in valid_candidates)}"
+                    )
                 else:
-                    logger.debug(f"[DEBUG] Chunk {chunk.page_content[:30]}... 0 candidates passed threshold {threshold}. Max score was: {max(scores) if len(scores) > 0 else 'N/A'}")
-                
+                    logger.debug(
+                        f"[DEBUG] Chunk {chunk.page_content[:30]}... 0 candidates passed threshold {threshold}. Max score was: {max(scores) if len(scores) > 0 else 'N/A'}"
+                    )
+
             if valid_candidates:
                 valid_candidates.sort(key=lambda x: x["score"], reverse=True)
-                for i in range(0, len(valid_candidates), 10):
-                    chunk_results.append({
-                        "chunk": chunk,
-                        "candidates": valid_candidates[i:i+10]
-                    })
-                
-        logger.info(f"Retrieval complete. {len(chunk_results)} chunk inference tasks prepared.")
+                chunk_results.append({"chunk": chunk, "candidates": valid_candidates})
+
+        logger.info(
+            f"Retrieval complete. {len(chunk_results)} chunk inference tasks prepared."
+        )
         return chunk_results
 
 
@@ -2995,18 +3289,20 @@ FILE: src/langchain_pipeline/phase4_inference.py
 ================================================
 import os
 import logging
+import time
 from typing import Dict, List, Any
+from src.core.schemas import ChunkExtraction, TTPDetection, Evidence
 
 from dotenv import load_dotenv
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.language_models.chat_models import BaseChatModel
 
-from src.core.schemas import TTPDetection
 
 logger = logging.getLogger(__name__)
 
 # Cargar variables de entorno (ej. USE_PROMPT_REPETITION, ENVIRONMENT_PROFILE)
 load_dotenv()
+
 
 class TTPAnalyzer:
     """
@@ -3018,17 +3314,23 @@ class TTPAnalyzer:
     def __init__(self, llm: BaseChatModel) -> None:
         """
         Initializes the TTP Analyzer.
-        
+
         Args:
             llm: A configured LangChain ChatModel (e.g., ChatOllama).
         """
         self.llm = llm
-        
+
         # Determine environment settings
-        self.use_prompt_repetition = os.getenv("USE_PROMPT_REPETITION", "False").lower() in ("true", "1", "yes")
-        self.execution_profile = os.getenv("EXECUTION_PROFILE", os.getenv("ENVIRONMENT_PROFILE", "LOCAL")).upper()
-        
-        logger.info(f"TTPAnalyzer started. Profile: {self.execution_profile}, Prompt Repetition: {self.use_prompt_repetition}")
+        self.use_prompt_repetition = os.getenv(
+            "USE_PROMPT_REPETITION", "False"
+        ).lower() in ("true", "1", "yes")
+        self.execution_profile = os.getenv(
+            "EXECUTION_PROFILE", os.getenv("ENVIRONMENT_PROFILE", "LOCAL")
+        ).upper()
+
+        logger.info(
+            f"TTPAnalyzer started. Profile: {self.execution_profile}, Prompt Repetition: {self.use_prompt_repetition}"
+        )
 
     def _build_prompt_template(self) -> ChatPromptTemplate:
         system_instruction = (
@@ -3044,8 +3346,10 @@ class TTPAnalyzer:
             "6. Exclusion Criteria: Strictly map observable, technical intrusion activity. Exclude geopolitical context or attribution theories."
         )
         if self.use_prompt_repetition:
-            system_instruction = f"{system_instruction}\n\nReminder of Rules:\n{system_instruction}"
-            
+            system_instruction = (
+                f"{system_instruction}\n\nReminder of Rules:\n{system_instruction}"
+            )
+
         user_message = (
             "<candidate_techniques>\n{candidates_str}\n</candidate_techniques>\n\n"
             "<chunk_text>\n{chunk_text}\n</chunk_text>\n\n"
@@ -3053,8 +3357,10 @@ class TTPAnalyzer:
         )
         if self.use_prompt_repetition:
             user_message = f"{user_message}\n\n{user_message}"
-            
-        return ChatPromptTemplate.from_messages([("system", system_instruction), ("user", user_message)])
+
+        return ChatPromptTemplate.from_messages(
+            [("system", system_instruction), ("user", user_message)]
+        )
 
     def analyze_candidates(self, chunk_results: List[Dict[str, Any]]):
         if not chunk_results:
@@ -3062,54 +3368,72 @@ class TTPAnalyzer:
             return [], 0.0
 
         prompt = self._build_prompt_template()
-        from src.core.schemas import ChunkExtraction, TTPDetection, Evidence
         chain = prompt | self.llm.with_structured_output(ChunkExtraction)
-        
+
         inputs = []
         for data in chunk_results:
             chunk = data["chunk"]
             candidates = data["candidates"]
-            
+
             cand_strings = []
             tech_metadata_map = {}
             for c in candidates:
                 tech_id = str(c.get("technique_id", "Unknown")).strip().upper()
-                cand_strings.append(f"ID: {tech_id} | Name: {c['name']} | Tactics: {', '.join(c['tactics'])}\nDescription: {c['description']}")
-                tech_metadata_map[tech_id] = {"tactics": c["tactics"], "score": c["score"], "name": c["name"]}
-                
+                cand_strings.append(
+                    f"ID: {tech_id} | Name: {c['name']} | Tactics: {', '.join(c['tactics'])}\nDescription: {c['description']}"
+                )
+                tech_metadata_map[tech_id] = {
+                    "tactics": c["tactics"],
+                    "score": c["score"],
+                    "name": c["name"],
+                }
+
             page_val = chunk.metadata.get("page")
-            page_num = int(page_val) + 1 if page_val is not None else chunk.metadata.get("page_number", "Unknown")
+            page_num = (
+                int(page_val) + 1
+                if page_val is not None
+                else chunk.metadata.get("page_number", "Unknown")
+            )
             chunk_idx = chunk.metadata.get("chunk_index", "Unknown")
-            
-            inputs.append({
-                "chunk_text": chunk.page_content,
-                "candidates_str": "\n\n".join(cand_strings),
-                "_location": f"Page {page_num}, Chunk {chunk_idx}",
-                "_meta_map": tech_metadata_map
-            })
-            
-        logger.info(f"Prepared {len(inputs)} chunks for LLM inference (Chunk-by-Chunk).")
+
+            inputs.append(
+                {
+                    "chunk_text": chunk.page_content,
+                    "candidates_str": "\n\n".join(cand_strings),
+                    "_location": f"Page {page_num}, Chunk {chunk_idx}",
+                    "_meta_map": tech_metadata_map,
+                }
+            )
+
+        logger.info(
+            f"Prepared {len(inputs)} chunks for LLM inference (Chunk-by-Chunk)."
+        )
         batch_responses = []
         artificial_delay = 0.0
-        
+
         max_workers = int(os.getenv("MAX_CONCURRENT_CHUNKS", "2"))
-        
+
         if self.execution_profile == "REMOTE" or max_workers > 1:
-            logger.info(f"Parallel batching enabled: Running LangChain inference concurrently (max_concurrency={max_workers})...")
+            logger.info(
+                f"Parallel batching enabled: Running LangChain inference concurrently (max_concurrency={max_workers})..."
+            )
             try:
-                batch_responses = chain.batch(inputs, config={"max_concurrency": max_workers})
+                batch_responses = chain.batch(
+                    inputs, config={"max_concurrency": max_workers}
+                )
             except Exception as e:
                 logger.error(f"Error during parallel batching: {e}")
         else:
             logger.info("LOCAL Profile detected: Running chain sequentially...")
-            import time
             is_gemini = "google" in str(type(self.llm)).lower()
             for i, inp in enumerate(inputs, 1):
                 try:
-                    logger.info(f"[{i}/{len(inputs)}] Querying LLM for Chunk {inp['_location']}...")
+                    logger.info(
+                        f"[{i}/{len(inputs)}] Querying LLM for Chunk {inp['_location']}..."
+                    )
                     res = chain.invoke(inp)
                     batch_responses.append(res)
-                    
+
                     if is_gemini and i < len(inputs):
                         sleep_time = 4.5
                         time.sleep(sleep_time)
@@ -3117,48 +3441,71 @@ class TTPAnalyzer:
                 except Exception as e:
                     logger.error(f"Error processing chunk {inp['_location']}: {e}")
                     batch_responses.append(None)
-                    
+
         # Reducer: Consolidar ChunkExtraction de vuelta a List[TTPDetection]
         global_ttps = {}
         for inp, res in zip(inputs, batch_responses):
-            if not res or not hasattr(res, 'extracted_ttps') or not res.extracted_ttps:
+            if not res or not hasattr(res, "extracted_ttps") or not res.extracted_ttps:
                 continue
-                
+
             for ext in res.extracted_ttps:
                 tech_id = str(ext.technique_id).strip().upper()
-                
+
                 # ANTI-HALLUCINATION GUARD: Reject if LLM bypassed RAG and invented an ID
                 if tech_id not in inp["_meta_map"]:
-                    logger.warning(f"Descartando TTP alucinado/inventado por el LLM: {tech_id}")
+                    logger.warning(
+                        f"Descartando TTP alucinado/inventado por el LLM: {tech_id}"
+                    )
                     continue
-                    
+
                 meta = inp["_meta_map"][tech_id]
-                
+
                 if tech_id not in global_ttps:
                     global_ttps[tech_id] = TTPDetection(
                         technique_id=tech_id,
                         tactic=meta["tactics"],
                         technique_name=meta["name"],
                         is_present=True,
-                        occurrences=[]
+                        occurrences=[],
                     )
-                    
-                global_ttps[tech_id].occurrences.append(Evidence(
-                    location=inp["_location"],
-                    procedure=ext.procedure,
-                    justification=ext.justification,
-                    confidence_score=meta["score"]
-                ))
-                
+
+                global_ttps[tech_id].occurrences.append(
+                    Evidence(
+                        location=inp["_location"],
+                        procedure=ext.procedure,
+                        justification=ext.justification,
+                        confidence_score=meta["score"],
+                    )
+                )
+
         final_ttps = list(global_ttps.values())
-        logger.info(f"Inference complete. {len(final_ttps)} global techniques confirmed.")
-        return final_ttps, artificial_delay
+
+        # Limpieza de redundancia jerárquica (padres e hijos)
+        ids_presentes = [t.technique_id for t in final_ttps]
+        final_ttps_limpios = []
+        for ttp in final_ttps:
+            if "." not in ttp.technique_id and any(
+                child.startswith(f"{ttp.technique_id}.") for child in ids_presentes
+            ):
+                logger.info(
+                    f"Descartando TTP padre {ttp.technique_id} porque existe una sub-técnica más precisa."
+                )
+                continue
+            final_ttps_limpios.append(ttp)
+
+        logger.info(
+            f"Inference complete. {len(final_ttps_limpios)} global techniques confirmed."
+        )
+        return final_ttps_limpios, artificial_delay
 
 
 
 ================================================
 FILE: src/langgraph_agents/graph_builder.py
 ================================================
+import os
+import time
+import concurrent.futures
 from typing import List, Dict, Any
 from langgraph.graph import StateGraph, START, END
 
@@ -3169,15 +3516,17 @@ from .nodes import triage_node, extractor_node, validator_node
 # ROUTING FUNCTIONS (CONDITIONAL EDGES)
 # ==============================================================================
 
+
 def triage_router(state: ChunkState) -> str:
     """
     Router: Decide el siguiente paso tras el Triage.
-    Si el chunk es basura (is_relevant=False), matamos el proceso (END). 
+    Si el chunk es basura (is_relevant=False), matamos el proceso (END).
     Si hay contexto útil, pasamos al nodo Extractor.
     """
     if not state.get("is_relevant", True):
         return "end"
     return "extractor_node"
+
 
 def extractor_router(state: ChunkState) -> str:
     """
@@ -3188,9 +3537,10 @@ def extractor_router(state: ChunkState) -> str:
         return "end"
     return "validator_node"
 
+
 def validator_router(state: ChunkState) -> str:
     """
-    ALWAYS loop back to the extractor to find more TTPs, 
+    ALWAYS loop back to the extractor to find more TTPs,
     unless we hit the safety loop limit (e.g., 4 loops max).
     """
     loop_count = state.get("loop_count", 0)
@@ -3203,6 +3553,7 @@ def validator_router(state: ChunkState) -> str:
 # BUILD THE SUB-GRAPH (THE "MAP" PROCESS)
 # ==============================================================================
 
+
 def build_chunk_graph():
     """
     Builds and compiles the per-chunk sub-graph.
@@ -3210,45 +3561,34 @@ def build_chunk_graph():
     """
     # Initialize the state graph
     builder = StateGraph(ChunkState)
-    
+
     # Add the nodes
     builder.add_node("triage_node", triage_node)
     builder.add_node("extractor_node", extractor_node)
     builder.add_node("validator_node", validator_node)
-    
+
     # Add normal edge from START
     builder.add_edge(START, "triage_node")
-    
+
     # Add conditional edge from triage node
     builder.add_conditional_edges(
-        "triage_node",
-        triage_router,
-        {
-            "end": END,
-            "extractor_node": "extractor_node"
-        }
+        "triage_node", triage_router, {"end": END, "extractor_node": "extractor_node"}
     )
-    
+
     # Add conditional edge from extractor to validator
     builder.add_conditional_edges(
         "extractor_node",
         extractor_router,
-        {
-            "end": END,
-            "validator_node": "validator_node"
-        }
+        {"end": END, "validator_node": "validator_node"},
     )
-    
+
     # Add conditional edge from validator node (the feedback loop)
     builder.add_conditional_edges(
         "validator_node",
         validator_router,
-        {
-            "end": END,
-            "extractor_node": "extractor_node"
-        }
+        {"end": END, "extractor_node": "extractor_node"},
     )
-    
+
     # Compile and return the graph
     return builder.compile()
 
@@ -3257,46 +3597,79 @@ def build_chunk_graph():
 # THE CONSOLIDATOR NODE (THE "REDUCE" PROCESS)
 # ==============================================================================
 
+
+def limpiar_redundancia_jerarquica(
+    ttps_aprobados: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """
+    Si en la lista final de un chunk tengo una técnica padre (TXXXX) y también una
+    sub-técnica hija (TXXXX.YYY), elimino la técnica padre porque la hija es más precisa.
+    """
+    ids_presentes = [ttp.get("technique_id", "") for ttp in ttps_aprobados]
+    ttps_limpios = []
+
+    for ttp in ttps_aprobados:
+        tech_id = ttp.get("technique_id", "")
+        # Si es un padre (no tiene punto) y alguna subtecnica suya está en la lista
+        if "." not in tech_id and any(
+            child.startswith(f"{tech_id}.") for child in ids_presentes
+        ):
+            continue  # Lo descartamos
+        ttps_limpios.append(ttp)
+
+    return ttps_limpios
+
+
 def consolidator_node(state: GlobalState) -> dict:
     """
     Objetivo: Fase de "Reduce" del pipeline.
-    Recoge todos los TTPs aprobados de todos los chunks procesados en paralelo, 
-    elimina duplicados (fusionando evidencias de distintas páginas) y devuelve 
+    Recoge todos los TTPs aprobados de todos los chunks procesados en paralelo,
+    elimina duplicados (fusionando evidencias de distintas páginas) y devuelve
     un JSON limpio y consolidado con el reporte final.
     matching the standard JSON schema.
     """
     all_ttps = state.get("all_approved_ttps", [])
+
+    # 1. Limpieza Algorítmica de redundancia jerárquica
+    all_ttps = limpiar_redundancia_jerarquica(all_ttps)
+
     deduplicated: Dict[str, Dict[str, Any]] = {}
-    
+
     for ttp in all_ttps:
         tech_id = ttp.get("technique_id")
-        if not tech_id: continue
+        if not tech_id:
+            continue
         tech_id_upper = tech_id.upper()
-        
+
         if tech_id_upper not in deduplicated:
             deduplicated[tech_id_upper] = {
                 "technique_id": tech_id_upper,
                 "tactic": ttp.get("tactic", []),
                 "technique_name": ttp.get("name", "Unknown"),
-                "occurrences": []
+                "occurrences": [],
             }
-        
+
         proc_text = ttp.get("procedure", "").strip()
         loc_text = ttp.get("location", "Unknown")
         justification = ttp.get("justification", "Verified by Validator Agent")
         conf_score = ttp.get("confidence_score", 0.95)
-        
-        is_duplicate = any(o["procedure"] == proc_text for o in deduplicated[tech_id_upper]["occurrences"])
+
+        is_duplicate = any(
+            o["procedure"] == proc_text
+            for o in deduplicated[tech_id_upper]["occurrences"]
+        )
         if proc_text and not is_duplicate:
-            deduplicated[tech_id_upper]["occurrences"].append({
-                "location": loc_text,
-                "procedure": proc_text,
-                "justification": justification,
-                "confidence_score": conf_score
-            })
-            
+            deduplicated[tech_id_upper]["occurrences"].append(
+                {
+                    "location": loc_text,
+                    "procedure": proc_text,
+                    "justification": justification,
+                    "confidence_score": conf_score,
+                }
+            )
+
     final_ttps = list(deduplicated.values())
-    
+
     # Return ONLY the list of TTPs, the main script will build the outer shell
     return {"final_json": final_ttps}
 
@@ -3305,35 +3678,36 @@ def consolidator_node(state: GlobalState) -> dict:
 # THE MAIN ORCHESTRATOR (MAP-REDUCE EXECUTION)
 # ==============================================================================
 
-import time
 
-def process_full_report(source_file: str, global_context: str, sanitized_chunks: List[Dict[str, Any]]) -> dict:
+def process_full_report(
+    source_file: str, global_context: str, sanitized_chunks: List[Dict[str, Any]]
+) -> dict:
     """
     Main orchestrator that executes the Map-Reduce flow.
     Returns both the extracted TTPs and the internal timing metrics for Phase 3.
     """
     print(f"[*] Starting LangGraph Map-Reduce execution for: {source_file}")
-    
+
     # Initialize the compiled chunk graph (Map Phase)
     chunk_graph = build_chunk_graph()
     master_ttp_list = []
-    
+
     # Acumuladores de tiempo
     triage_time_total = 0.0
     extraction_time_total = 0.0
     validation_time_total = 0.0
-    
+
     # 1. MAP: Loop over sanitized_chunks using ThreadPoolExecutor for parallelism
-    import os
-    import concurrent.futures
     max_workers = int(os.getenv("MAX_CONCURRENT_CHUNKS", "2"))
-    print(f"[*] Starting MAP phase across {len(sanitized_chunks)} chunks (Concurrent workers: {max_workers})...")
-    
+    print(
+        f"[*] Starting MAP phase across {len(sanitized_chunks)} chunks (Concurrent workers: {max_workers})..."
+    )
+
     def _process_single_chunk(args):
         i, chunk_data = args
         chunk_text = chunk_data.get("text", str(chunk_data))
         chunk_metadata = chunk_data.get("metadata", {})
-        
+
         initial_chunk_state: ChunkState = {
             "chunk_text": chunk_text,
             "chunk_metadata": chunk_metadata,
@@ -3345,50 +3719,52 @@ def process_full_report(source_file: str, global_context: str, sanitized_chunks:
             "loop_count": 0,
             "triage_time": 0.0,
             "extractor_time": 0.0,
-            "validator_time": 0.0
+            "validator_time": 0.0,
         }
-        
+
         try:
             chunk_result = chunk_graph.invoke(initial_chunk_state)
             return i, chunk_result
         except Exception as e:
-            print(f"     [!] Error processing chunk {i+1}: {str(e)}")
+            print(f"     [!] Error processing chunk {i + 1}: {str(e)}")
             return i, None
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
         args_list = [(i, chunk) for i, chunk in enumerate(sanitized_chunks)]
         results = list(executor.map(_process_single_chunk, args_list))
-        
+
     for i, chunk_result in results:
         if chunk_result is None:
             continue
-            
+
         triage_time_total += chunk_result.get("triage_time", 0.0)
         extraction_time_total += chunk_result.get("extractor_time", 0.0)
         validation_time_total += chunk_result.get("validator_time", 0.0)
-            
+
         approved = chunk_result.get("approved_ttps", [])
         if approved:
-            print(f"     [+] Found {len(approved)} valid TTP(s) in chunk {i+1}")
+            print(f"     [+] Found {len(approved)} valid TTP(s) in chunk {i + 1}")
             master_ttp_list.extend(approved)
-            
-    print(f"[*] Map phase complete. Consolidating {len(master_ttp_list)} total TTP(s)...")
-    
+
+    print(
+        f"[*] Map phase complete. Consolidating {len(master_ttp_list)} total TTP(s)..."
+    )
+
     # 2. REDUCE: Instantiate GlobalState and run consolidator
     global_state: GlobalState = {
         "source_file": source_file,
         "global_context": global_context,
         "chunks": sanitized_chunks,
         "all_approved_ttps": master_ttp_list,
-        "final_json": {}
+        "final_json": {},
     }
-    
+
     t0_red = time.time()
     final_state_update = consolidator_node(global_state)
     consolidator_time = time.time() - t0_red
-    
+
     print("[*] Reduce phase complete. Report ready.")
-    
+
     # Devolver estructura empaquetada con TTPs y Tiempos
     return {
         "extracted_ttps": final_state_update.get("final_json", []),
@@ -3396,8 +3772,8 @@ def process_full_report(source_file: str, global_context: str, sanitized_chunks:
             "triage_node_seconds": round(triage_time_total, 2),
             "extraction_oracle_node_seconds": round(extraction_time_total, 2),
             "validator_node_seconds": round(validation_time_total, 2),
-            "consolidator_seconds": round(consolidator_time, 2)
-        }
+            "consolidator_seconds": round(consolidator_time, 2),
+        },
     }
 
 
@@ -3409,38 +3785,48 @@ import os
 import sys
 import time
 import json
-from typing import List, Dict, Any
+from typing import List, Any
 
 # Add project root to sys.path so we can run this as a standalone script
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
 import subprocess
+
 
 def bootstrap_environment():
     """Instala dependencias e inicia los servicios requeridos (Ollama y Qdrant)."""
     print("[INFO] Configuring execution environment...")
-    
+
     print("[INFO] Installing dependencies from requirements.txt...")
     try:
-        subprocess.run([sys.executable, "-m", "pip", "install", "-r", "requirements.txt"], check=True)
+        subprocess.run(
+            [sys.executable, "-m", "pip", "install", "-r", "requirements.txt"],
+            check=True,
+        )
     except Exception as e:
         print(f"[ERROR] Error installing dependencies: {e}")
 
     llm_provider = os.environ.get("LLM_PROVIDER", "ollama").lower()
-    
+
     if llm_provider == "ollama":
         print("[INFO] Initializing Ollama service...")
         try:
-            subprocess.Popen(["ollama", "serve"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.Popen(
+                ["ollama", "serve"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
         except FileNotFoundError:
             print("[WARNING] 'ollama' is not installed or not in PATH.")
 
     print("[INFO] Waiting 5 seconds for services to be ready...\n")
     time.sleep(5)
 
+
 bootstrap_environment()
 
 from dotenv import load_dotenv
+
 load_dotenv(override=True)
 
 from langchain_core.language_models.chat_models import BaseChatModel
@@ -3448,40 +3834,47 @@ from langchain_core.prompts import ChatPromptTemplate
 
 from src.langchain_pipeline.phase1_ingestion import ReportIngestor
 from src.langgraph_agents.graph_builder import process_full_report
+from src.core.llm_factory import get_llm
+
 
 def generate_global_context(chunks: List[Any], llm: BaseChatModel) -> str:
     """
-    Objetivo: Generar un resumen de alto nivel (Threat Actor, Malware, Target) a partir de la 
-    introducción del reporte. Este "contexto global" se inyectará después en todos los nodos 
-    de extracción para ayudar al LLM a resolver pronombres (ej: "ellos" -> APT29) y no perder 
+    Objetivo: Generar un resumen de alto nivel (Threat Actor, Malware, Target) a partir de la
+    introducción del reporte. Este "contexto global" se inyectará después en todos los nodos
+    de extracción para ayudar al LLM a resolver pronombres (ej: "ellos" -> APT29) y no perder
     el hilo conductor de la narrativa durante el procesamiento paralelo por chunks.
     """
     # Extract text from the first 4 chunks
     # Phase1_ingestion chunks are LangChain Document objects
     intro_texts = []
     for chunk in chunks[:4]:
-        if hasattr(chunk, 'page_content'):
+        if hasattr(chunk, "page_content"):
             intro_texts.append(chunk.page_content)
         elif isinstance(chunk, dict) and "text" in chunk:
             intro_texts.append(chunk["text"])
         else:
             intro_texts.append(str(chunk))
-            
+
     combined_intro = "\n\n".join(intro_texts)
-    
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", "You are an expert Cyber Threat Intelligence analyst."),
-        ("human", "Read the following introductory sections of a CTI report.\n"
-                  "Write a 3-sentence summary identifying the Threat Actor, the primary Malware, and the Target industry/country. "
-                  "If unknown, state it explicitly.\n\n"
-                  "Text:\n{text}")
-    ])
-    
+
+    prompt = ChatPromptTemplate.from_messages(
+        [
+            ("system", "You are an expert Cyber Threat Intelligence analyst."),
+            (
+                "human",
+                "Read the following introductory sections of a CTI report.\n"
+                "Write a 3-sentence summary identifying the Threat Actor, the primary Malware, and the Target industry/country. "
+                "If unknown, state it explicitly.\n\n"
+                "Text:\n{text}",
+            ),
+        ]
+    )
+
     chain = prompt | llm
     print("[*] Generating Global Context...")
     try:
         response = chain.invoke({"text": combined_intro})
-        
+
         # Extracción robusta del contenido
         if isinstance(response.content, str):
             context = response.content
@@ -3495,12 +3888,13 @@ def generate_global_context(chunks: List[Any], llm: BaseChatModel) -> str:
             context = " ".join(text_parts)
         else:
             context = str(response.content)
-            
+
         print(f"[INFO] Global Context Generated:\n{context}\n")
         return context
     except Exception as e:
         print(f"[ERROR] Generating global context: {e}")
         return "Global context could not be generated."
+
 
 def run_langgraph_extraction(pdf_path: str):
     """
@@ -3508,95 +3902,105 @@ def run_langgraph_extraction(pdf_path: str):
     sobre un PDF. Orquesta la Fase 1 (ingesta), extrae el contexto global y lanza el grafo.
     Devuelve los TTPs consolidados y las métricas de tiempo para la evaluación.
     """
-    import time
     t0 = time.time()
-    
-    use_vlm_env = os.getenv("USE_VLM_EXTRACTION", "False").lower() in ("true", "1", "yes")
+
+    use_vlm_env = os.getenv("USE_VLM_EXTRACTION", "False").lower() in (
+        "true",
+        "1",
+        "yes",
+    )
     ingestor = ReportIngestor(chunk_size=3500, chunk_overlap=500, use_vlm=use_vlm_env)
-    
+
     raw_chunks = ingestor.process_report(pdf_path)
     p1_time = time.time() - t0
-    
+
     sanitized_chunks = []
     for c in raw_chunks:
-        if hasattr(c, 'page_content'):
+        if hasattr(c, "page_content"):
             sanitized_chunks.append({"text": c.page_content, "metadata": c.metadata})
         elif isinstance(c, dict) and "text" in c:
             sanitized_chunks.append(c)
         else:
             sanitized_chunks.append({"text": str(c), "metadata": {}})
-            
+
     if not sanitized_chunks:
         return [], {"error": "No text extracted"}
 
     t1 = time.time()
-    from src.core.llm_factory import get_llm
+    t1 = time.time()
     llm = get_llm(temperature=0.0)
     global_context = generate_global_context(sanitized_chunks, llm)
     p2_time = time.time() - t1
-    
+
     t2 = time.time()
     result_dict = process_full_report(pdf_path, global_context, sanitized_chunks)
     p3_time = time.time() - t2
     extracted_ttps = result_dict.get("extracted_ttps", [])
-    
+
     timing_metrics = {
         "phase1_ingestion_seconds": round(p1_time, 2),
-        "phase3_retrieval_seconds": round(p2_time, 2), # Using Context Generation as setup/retrieval equivalent
+        "phase3_retrieval_seconds": round(
+            p2_time, 2
+        ),  # Using Context Generation as setup/retrieval equivalent
         "phase4_inference_seconds": round(p3_time, 2),
-        "langgraph_internal_breakdown": result_dict.get("timing_breakdown_phase3", {})
+        "langgraph_internal_breakdown": result_dict.get("timing_breakdown_phase3", {}),
     }
-    
+
     return extracted_ttps, timing_metrics
+
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
         print("Usage: python -m src.langgraph_agents.main_langgraph <path_to_pdf>")
         sys.exit(1)
-        
+
     pdf_path = sys.argv[1]
-    
+
     if not os.path.exists(pdf_path):
         print(f"Error: The file '{pdf_path}' does not exist.")
         sys.exit(1)
-        
-    print(f"\n{'='*60}")
-    print(f"LANGGRAPH MULTI-AGENT CTI EXTRACTION PIPELINE")
-    print(f"{'='*60}\n")
-    
+
+    print(f"\n{'=' * 60}")
+    print("LANGGRAPH MULTI-AGENT CTI EXTRACTION PIPELINE")
+    print(f"{'=' * 60}\n")
+
     total_start_time = time.time()
-    
+
     print(f"[*] [INFO] Phase 1: Ingesting PDF: {pdf_path}")
     t0 = time.time()
-    
-    use_vlm_env = os.getenv("USE_VLM_EXTRACTION", "False").lower() in ("true", "1", "yes")
+
+    use_vlm_env = os.getenv("USE_VLM_EXTRACTION", "False").lower() in (
+        "true",
+        "1",
+        "yes",
+    )
     ingestor = ReportIngestor(chunk_size=3500, chunk_overlap=500, use_vlm=use_vlm_env)
-    
+
     raw_chunks = ingestor.process_report(pdf_path)
     p1_time = time.time() - t0
     print(f"[+] [INFO] Phase 1: Extracted {len(raw_chunks)} chunks.\n")
-    
+
     sanitized_chunks = []
     for c in raw_chunks:
-        if hasattr(c, 'page_content'):
+        if hasattr(c, "page_content"):
             sanitized_chunks.append({"text": c.page_content, "metadata": c.metadata})
         elif isinstance(c, dict) and "text" in c:
             sanitized_chunks.append(c)
         else:
             sanitized_chunks.append({"text": str(c), "metadata": {}})
-    
+
     if not sanitized_chunks:
         print("[-] No text could be extracted from the PDF. Exiting.")
         sys.exit(1)
-    
+
     # 2. Global Context Generation Phase
     print("[*] [INFO] Phase 2: Generating Global Context...")
     t1 = time.time()
-    from src.core.llm_factory import get_llm
+    t1 = time.time()
     llm = get_llm(temperature=0.0)
     global_context = generate_global_context(sanitized_chunks, llm)
     p2_time = time.time() - t1
-    
+
     # 3. Execution Phase (Map-Reduce)
     print("\n[*] [INFO] Phase 4: Starting Graph Execution (Map-Reduce Inference)...")
     t2 = time.time()
@@ -3604,15 +4008,15 @@ if __name__ == "__main__":
     result_dict = process_full_report(pdf_path, global_context, sanitized_chunks)
     p3_time = time.time() - t2
     print("[+] [INFO] Phase 4: Graph Execution Completed.")
-    
+
     # Extraer variables
     extracted_ttps = result_dict.get("extracted_ttps", [])
     p3_breakdown = result_dict.get("timing_breakdown_phase3", {})
     # ===================
-    
+
     # 4. Construct Final JSON matching LangChain standard
     total_execution_time = time.time() - total_start_time
-    
+
     output_data = {
         "source_file": pdf_path,
         "total_execution_time_seconds": round(total_execution_time, 2),
@@ -3621,28 +4025,32 @@ if __name__ == "__main__":
             "phase1_ingestion_seconds": round(p1_time, 2),
             "phase3_retrieval_seconds": round(p2_time, 2),
             "phase4_inference_seconds": round(p3_time, 2),
-            "langgraph_internal_breakdown": p3_breakdown
+            "langgraph_internal_breakdown": p3_breakdown,
         },
-        "extracted_ttps": extracted_ttps
+        "extracted_ttps": extracted_ttps,
     }
-    
+
     # 5. Save Output
-    output_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../data/output'))
+    output_dir = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "../../data/output")
+    )
     os.makedirs(output_dir, exist_ok=True)
-    
+
     base_name = os.path.basename(pdf_path)
     file_name_without_ext = os.path.splitext(base_name)[0]
-    output_file_path = os.path.join(output_dir, f"{file_name_without_ext}_langgraph_results.json")
-    
+    output_file_path = os.path.join(
+        output_dir, f"{file_name_without_ext}_langgraph_results.json"
+    )
+
     try:
         with open(output_file_path, "w", encoding="utf-8") as f:
             json.dump(output_data, f, indent=4, ensure_ascii=False)
-            
-        print(f"\n{'='*60}")
-        print(f"EXTRACTION SUCCESSFUL")
+
+        print(f"\n{'=' * 60}")
+        print("EXTRACTION SUCCESSFUL")
         print(f"Time Taken: {round(total_execution_time / 60.0, 2)} minutes")
         print(f"Results saved to: {output_file_path}")
-        print(f"{'='*60}")
+        print(f"{'=' * 60}")
     except Exception as e:
         print(f"[!] Error saving output file: {e}")
 
@@ -3651,46 +4059,71 @@ if __name__ == "__main__":
 ================================================
 FILE: src/langgraph_agents/nodes.py
 ================================================
-from typing import List, Any
+from typing import List
 from pydantic import BaseModel, Field
 
 import os
 import json
+import time
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 
 from .state import ChunkState
-from .tools import mitre_oracle, get_mitre_candidates
+from .tools import get_mitre_candidates, load_mitre_json
+from src.core.llm_factory import get_llm as factory_get_llm
 
 # ==============================================================================
 # LLM FACTORY
 # ==============================================================================
 
+
 def get_llm(tier="pro", temperature=0.0):
-    from src.core.llm_factory import get_llm as factory_get_llm
     return factory_get_llm(temperature=temperature)
+
 
 # ==============================================================================
 # PYDANTIC SCHEMAS
 # ==============================================================================
+
 
 class TriageDecision(BaseModel):
     is_relevant: bool = Field(
         description="True if the text contains any cyber threat intelligence, attacker behavior, or technical indicators. False otherwise."
     )
 
+
 class DraftTTP(BaseModel):
-    technique_id: str = Field(description="The MITRE ATT&CK Technique ID (e.g., T1059.001)")
-    tactic: List[str] = Field(default_factory=list, description="List of associated MITRE tactics (e.g. ['initial-access', 'execution'])")
+    technique_id: str = Field(
+        description="The MITRE ATT&CK Technique ID (e.g., T1059.001)"
+    )
+    tactic: List[str] = Field(
+        default_factory=list,
+        description="List of associated MITRE tactics (e.g. ['initial-access', 'execution'])",
+    )
     name: str = Field(description="The name of the MITRE ATT&CK Technique")
-    procedure: str = Field(description="The specific procedure or behavior observed in the text")
-    justification: str = Field(default="Verified by Validator", description="Technical explanation of why this chunk demonstrates the technique.")
-    mitre_description: str = Field(default="", description="The official MITRE ATT&CK description for this technique provided in the candidates")
-    confidence_score: float = Field(description="The numeric score provided in the Candidate Techniques list.")
-    location: str = Field(default="Unknown", description="The document page and chunk location of the evidence.")
+    procedure: str = Field(
+        description="The specific procedure or behavior observed in the text"
+    )
+    justification: str = Field(
+        default="Verified by Validator",
+        description="Technical explanation of why this chunk demonstrates the technique.",
+    )
+    mitre_description: str = Field(
+        default="",
+        description="The official MITRE ATT&CK description for this technique provided in the candidates",
+    )
+    confidence_score: float = Field(
+        description="The numeric score provided in the Candidate Techniques list."
+    )
+    location: str = Field(
+        default="Unknown",
+        description="The document page and chunk location of the evidence.",
+    )
+
 
 class DraftTTPList(BaseModel):
     ttps: List[DraftTTP] = Field(description="A list of drafted TTPs from the text.")
+
 
 class ValidationResult(BaseModel):
     valid_ttps: List[DraftTTP] = Field(
@@ -3700,9 +4133,11 @@ class ValidationResult(BaseModel):
         description="A list of feedback notes explaining what was hallucinated or missing."
     )
 
+
 # ==============================================================================
 # NODE FUNCTIONS
 # ==============================================================================
+
 
 def safe_invoke(callable_chain, input_data):
     """Safely invokes a chain or agent, returning None on failure."""
@@ -3712,109 +4147,171 @@ def safe_invoke(callable_chain, input_data):
         print(f"[ERROR] Model Invocation Error: {e}")
         return None
 
+
 def triage_node(state: ChunkState) -> dict:
     """
     Objetivo: Actuar como un filtro rápido de bajo coste.
-    Este agente lee el chunk y decide si contiene Inteligencia de Amenazas (TTPs, atacantes) 
-    o si es pura paja (índices, bibliografía, relleno). Si es irrelevante, cortamos la ejecución 
+    Este agente lee el chunk y decide si contiene Inteligencia de Amenazas (TTPs, atacantes)
+    o si es pura paja (índices, bibliografía, relleno). Si es irrelevante, cortamos la ejecución
     del chunk aquí mismo y ahorramos tokens en los agentes pesados.
     """
-    import time
     t0 = time.time()
     chunk_text = state["chunk_text"]
-    
+
     llm = get_llm(tier="lite")
     structured_llm = llm.with_structured_output(TriageDecision)
-    
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", "Role: Cyber Threat Intelligence Analyst.\n"
-                   "Task: Perform a binary classification on text chunks.\n"
-                   "Condition: Return True if the text contains cybersecurity threat intelligence, attacker behavior, or technical indicators. Return False otherwise.\n"
-                   "Note: The text may be in any language (Spanish, Russian, etc.). Analyze it natively."),
-        ("human", "<text>\n{chunk_text}\n</text>")
-    ])
-    
+
+    use_prompt_repetition = os.getenv("USE_PROMPT_REPETITION", "False").lower() in (
+        "true",
+        "1",
+        "yes",
+    )
+
+    sys_prompt = (
+        "Role: Cyber Threat Intelligence Analyst.\n"
+        "Task: Perform a binary classification on text chunks.\n"
+        "Condition: Return True if the text contains cybersecurity threat intelligence, attacker behavior, or technical indicators. Return False otherwise.\n"
+        "Note: The text may be in any language (Spanish, Russian, etc.). Analyze it natively."
+    )
+    if use_prompt_repetition:
+        sys_prompt = f"{sys_prompt}\n\nReminder of Rules:\n{sys_prompt}"
+
+    user_prompt = "<text>\n{chunk_text}\n</text>"
+    if use_prompt_repetition:
+        user_prompt = f"{user_prompt}\n\n{user_prompt}"
+
+    prompt = ChatPromptTemplate.from_messages(
+        [
+            ("system", sys_prompt),
+            ("human", user_prompt),
+        ]
+    )
+
     chain = prompt | structured_llm
-    
+
     result = safe_invoke(chain, {"chunk_text": chunk_text})
-    
+
     if result is None:
         is_relevant = True
     else:
         is_relevant = result.is_relevant
-        
+
     c_idx = state.get("chunk_metadata", {}).get("chunk_index", "?")
     print(f"[DEBUG] [Chunk {c_idx}] Triage - Is Relevant: {is_relevant}")
     return {"is_relevant": is_relevant, "triage_time": time.time() - t0}
 
+
 def extractor_node(state: ChunkState) -> dict:
     """
     Objetivo: El corazón del sistema. Analiza el chunk, extrae comportamientos tácticos,
-    consulta a la base de datos vectorial (MITRE_Oracle) para anclar el comportamiento a 
+    consulta a la base de datos vectorial (MITRE_Oracle) para anclar el comportamiento a
     una técnica oficial de MITRE ATT&CK, y genera un borrador del TTP.
     Si viene rebotado del Validator con feedback, intenta buscar técnicas alternativas.
     """
-    import time
     t0 = time.time()
     chunk_text = state["chunk_text"]
     val_feedback = state.get("validation_feedback", "")
     approved_ttps = state.get("approved_ttps", [])
     approved_ids = [t.get("technique_id") for t in approved_ttps]
-    
+
     # 1. QUERY TRANSFORMATION: Abstract Keywords Only
     c_idx = state.get("chunk_metadata", {}).get("chunk_index", "?")
-    if state.get("abstract_keywords"):
+    if state.get("abstract_keywords") and not val_feedback:
         abstract_keywords = state["abstract_keywords"]
-        print(f"[DEBUG] [Chunk {c_idx}] Extractor - Abstract Keywords (Cached): {abstract_keywords}")
+        print(
+            f"[DEBUG] [Chunk {c_idx}] Extractor - Abstract Keywords (Cached): {abstract_keywords}"
+        )
     else:
         translator_llm = get_llm(tier="lite")
-        translator_prompt = ChatPromptTemplate.from_messages([
-            ("system", "Role: Cyber Threat Intelligence Analyst.\n"
-                       "Task: Extract a comma-separated list of abstract cybersecurity behaviors, tactics, and mechanisms from the text.\n"
-                       "Instructions: The text may be in any language. Translate specific tools into their tactical purpose (e.g., 'Ngrok' -> 'Protocol Tunneling'). Output ONLY the keywords in English."),
-            ("human", "<text>\n{chunk_text}\n</text>")
-        ])
-        
+        sys_prompt = (
+            "Role: Cyber Threat Intelligence Analyst.\n"
+            "Task: Extract a comma-separated list of abstract cybersecurity behaviors, tactics, and mechanisms from the text.\n"
+            "Instructions: The text may be in any language. Translate specific tools into their tactical purpose (e.g., 'Ngrok' -> 'Protocol Tunneling'). Output ONLY the keywords in English."
+        )
+
+        if val_feedback:
+            sys_prompt += (
+                "\n\nCRITICAL FEEDBACK FROM PREVIOUS ATTEMPT:\n"
+                "The previous extraction failed or was incomplete. Review the validator's feedback and generate NEW, DIFFERENT abstract keywords to find better techniques.\n"
+                f"Feedback: {val_feedback}"
+            )
+
+        use_prompt_repetition = os.getenv("USE_PROMPT_REPETITION", "False").lower() in (
+            "true",
+            "1",
+            "yes",
+        )
+        if use_prompt_repetition:
+            sys_prompt = f"{sys_prompt}\n\nReminder of Rules:\n{sys_prompt}"
+
+        user_prompt = "<text>\n{chunk_text}\n</text>"
+        if use_prompt_repetition:
+            user_prompt = f"{user_prompt}\n\n{user_prompt}"
+
+        translator_prompt = ChatPromptTemplate.from_messages(
+            [
+                ("system", sys_prompt),
+                ("human", user_prompt),
+            ]
+        )
+
         translation_chain = translator_prompt | translator_llm | StrOutputParser()
-        
+
         try:
             abstract_keywords = translation_chain.invoke({"chunk_text": chunk_text})
         except Exception as e:
             print(f"[ERROR] [Chunk {c_idx}] Translation Error: {e}")
             abstract_keywords = ""
-            
-        print(f"[DEBUG] [Chunk {c_idx}] Extractor - Abstract Keywords: {abstract_keywords}")
-    
+
+        print(
+            f"[DEBUG] [Chunk {c_idx}] Extractor - Abstract Keywords: {abstract_keywords}"
+        )
+
     # 2. DYNAMIC MECHANICAL RETRIEVAL
     # Pass the RAW TEXT plus the keywords to the Oracle so no context is lost.
     # We DO NOT include val_feedback in the vector query to avoid polluting the semantic search.
     search_query = f"Raw Text: {chunk_text}\nKeywords: {abstract_keywords}"
-    
+
     # Expanding Window mechanism: Use Pagination
     # Iter 0 -> Offset 0 (Top 1-25)
     # Iter 1 -> Offset 25 (Top 26-50)
     # Iter 2 -> Offset 50 (Top 51-75)
-    loop = state.get("loop_count", 0)
-    
+    state.get("loop_count", 0)
+
     current_meta_map = state.get("metadata_map", {})
-    if state.get("candidates_list"):
+    if state.get("candidates_list") and not val_feedback:
         candidates_list = state["candidates_list"]
-        print(f"[DEBUG] [Chunk {c_idx}] Extractor - Using cached candidates_list ({len(candidates_list)} candidates).")
+        print(
+            f"[DEBUG] [Chunk {c_idx}] Extractor - Using cached candidates_list ({len(candidates_list)} candidates)."
+        )
     else:
-        # Recuperamos la bolsa de 50 y el extractor procesará TODOS los que superen el threshold, de 10 en 10
-        candidates_list, meta_map = get_mitre_candidates(search_query, top_k=50, offset=0)
+        # Recuperamos la bolsa de 25
+        candidates_list, meta_map = get_mitre_candidates(
+            search_query, top_k=25, offset=0
+        )
         # Fusionamos con el metadata_map previo por si hay varias iteraciones
         current_meta_map.update(meta_map)
-    
+
     if not candidates_list:
-        print(f"[DEBUG] [Chunk {c_idx}] Extractor - No candidates found via Mechanical Retrieval. Returning empty drafts.")
-        return {"draft_ttps": [], "metadata_map": current_meta_map, "loop_count": state.get("loop_count", 0) + 1, "extractor_time": state.get("extractor_time", 0.0) + (time.time() - t0)}
-    
+        print(
+            f"[DEBUG] [Chunk {c_idx}] Extractor - No candidates found via Mechanical Retrieval. Returning empty drafts."
+        )
+        return {
+            "draft_ttps": [],
+            "metadata_map": current_meta_map,
+            "loop_count": state.get("loop_count", 0) + 1,
+            "extractor_time": state.get("extractor_time", 0.0) + (time.time() - t0),
+        }
+
     # 3. EXTRACTION (BRAINSTORMER)
     llm = get_llm(tier="pro")
     structured_llm = llm.with_structured_output(DraftTTPList)
-    
-    use_prompt_repetition = os.getenv("USE_PROMPT_REPETITION", "False").lower() in ("true", "1", "yes")
+
+    use_prompt_repetition = os.getenv("USE_PROMPT_REPETITION", "False").lower() in (
+        "true",
+        "1",
+        "yes",
+    )
     sys_prompt = (
         "Role: Cyber Threat Intelligence Analyst.\n"
         "Task: Extract applicable MITRE ATT&CK techniques from the provided candidate list based on the source text.\n\n"
@@ -3827,94 +4324,98 @@ def extractor_node(state: ChunkState) -> dict:
     )
     if use_prompt_repetition:
         sys_prompt = f"{sys_prompt}\n\nReminder of Rules:\n{sys_prompt}"
-        
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", sys_prompt),
-        ("human", "{prompt_text}")
-    ])
-    
-    # Chunk the candidates into blocks of 10 to avoid context overload
-    candidates_batches = [candidates_list[i:i+10] for i in range(0, len(candidates_list), 10)]
+
+    prompt = ChatPromptTemplate.from_messages(
+        [("system", sys_prompt), ("human", "{prompt_text}")]
+    )
+
     all_drafts = []
-    
-    for batch in candidates_batches:
-        candidates_str = "CANDIDATE TECHNIQUES:\n" + "\n\n".join(batch)
-        
-        prompt_text = f"Global Context: {state.get('global_context', '')}\n\n"
-        
-        if approved_ids:
-            prompt_text += f"ALREADY APPROVED TTPs FOR THIS CHUNK: {approved_ids}\n"
-            prompt_text += "Do NOT propose these exact technique IDs again. Search the text for OTHER distinct malicious behaviors.\n"
-            prompt_text += "If you cannot find any NEW behaviors, you MUST return an empty list.\n\n"
-            
-        if val_feedback:
-            prompt_text += f"PAST VALIDATOR REJECTIONS (CRITICAL: DO NOT PROPOSE THESE REJECTED TTPs AGAIN):\n{val_feedback}\n\n"
-            
-        prompt_text += f"Candidate MITRE Techniques:\n{candidates_str}\n\n"
-        prompt_text += f"Source Text:\n{chunk_text}"
-        
-        parsed_result = safe_invoke(prompt | structured_llm, {"prompt_text": prompt_text})
-        
-        if parsed_result is not None:
-            loc = f"Page {state.get('chunk_metadata', {}).get('page_number', '?')}, Chunk {state.get('chunk_metadata', {}).get('chunk_index', '?')}"
-            for ttp in parsed_result.ttps:
-                draft = ttp.model_dump()
-                tech_id = str(draft.get("technique_id", "")).strip().upper()
-                
-                # ANTI-HALLUCINATION GUARD: Reject if LLM invented an ID, but be permissive if it exists in the full DB
-                if tech_id not in current_meta_map:
-                    from .tools import load_mitre_json
-                    mitre_db = load_mitre_json()
-                    if tech_id in mitre_db:
-                        print(f"[DEBUG] [Chunk {c_idx}] Extractor - Aceptando TTP 'alucinado' pero valido: {tech_id}")
-                        draft["technique_id"] = tech_id
-                        draft["name"] = mitre_db[tech_id]["name"]
-                        draft["tactic"] = mitre_db[tech_id]["tactics"]
-                        draft["confidence_score"] = 0.0 # Not retrieved by Oracle
-                        draft["location"] = loc
-                        all_drafts.append(draft)
-                    else:
-                        print(f"[DEBUG] [Chunk {c_idx}] Descartando TTP alucinado: {tech_id}")
-                    continue
-                
-                # FORZAR METADATA OFICIAL DE LA BASE DE DATOS
-                draft["technique_id"] = tech_id
-                draft["name"] = current_meta_map[tech_id]["name"]
-                draft["tactic"] = current_meta_map[tech_id]["tactics"]
-                draft["confidence_score"] = current_meta_map[tech_id]["score"]
-                    
-                draft["location"] = loc
-                all_drafts.append(draft)
-        
+    candidates_str = "CANDIDATE TECHNIQUES:\n" + "\n\n".join(candidates_list)
+
+    prompt_text = f"Global Context: {state.get('global_context', '')}\n\n"
+
+    if approved_ids:
+        prompt_text += f"ALREADY APPROVED TTPs FOR THIS CHUNK: {approved_ids}\n"
+        prompt_text += "Do NOT propose these exact technique IDs again. Search the text for OTHER distinct malicious behaviors.\n"
+        prompt_text += (
+            "If you cannot find any NEW behaviors, you MUST return an empty list.\n\n"
+        )
+
+    if val_feedback:
+        prompt_text += f"PAST VALIDATOR REJECTIONS (CRITICAL: DO NOT PROPOSE THESE REJECTED TTPs AGAIN):\n{val_feedback}\n\n"
+
+    prompt_text += f"Candidate MITRE Techniques:\n{candidates_str}\n\n"
+    prompt_text += f"Source Text:\n{chunk_text}"
+
+    if use_prompt_repetition:
+        prompt_text = f"{prompt_text}\n\n{prompt_text}"
+
+    parsed_result = safe_invoke(prompt | structured_llm, {"prompt_text": prompt_text})
+
+    if parsed_result is not None:
+        loc = f"Page {state.get('chunk_metadata', {}).get('page_number', '?')}, Chunk {state.get('chunk_metadata', {}).get('chunk_index', '?')}"
+        for ttp in parsed_result.ttps:
+            draft = ttp.model_dump()
+            tech_id = str(draft.get("technique_id", "")).strip().upper()
+
+            # ANTI-HALLUCINATION GUARD: Strict Rejection
+            if tech_id not in current_meta_map:
+                print(
+                    f"[DEBUG] Descartando TTP inventado por el modelo local: {tech_id}"
+                )
+                continue
+
+            # FORZAR METADATA OFICIAL DE LA BASE DE DATOS
+            draft["technique_id"] = tech_id
+            draft["name"] = current_meta_map[tech_id]["name"]
+            draft["tactic"] = current_meta_map[tech_id]["tactics"]
+            draft["confidence_score"] = current_meta_map[tech_id]["score"]
+
+            draft["location"] = loc
+            all_drafts.append(draft)
+
     draft_ids = [d.get("technique_id", "Unknown") for d in all_drafts]
-    print(f"[DEBUG] [Chunk {c_idx}] Extractor - Draft TTPs found: {len(all_drafts)} {draft_ids}")
+    print(
+        f"[DEBUG] [Chunk {c_idx}] Extractor - Draft TTPs found: {len(all_drafts)} {draft_ids}"
+    )
     return {
-        "draft_ttps": all_drafts, 
-        "metadata_map": current_meta_map, 
-        "loop_count": state.get("loop_count", 0) + 1, 
+        "draft_ttps": all_drafts,
+        "metadata_map": current_meta_map,
+        "loop_count": state.get("loop_count", 0) + 1,
         "extractor_time": state.get("extractor_time", 0.0) + (time.time() - t0),
         "candidates_list": candidates_list,
-        "abstract_keywords": abstract_keywords
+        "abstract_keywords": abstract_keywords,
     }
+
 
 def validator_node(state: ChunkState) -> dict:
     """
     Goal: Perform a 'Line-Item Veto'. Strict verification of drafted TTPs against the source text.
     """
-    import time
     t0 = time.time()
     c_idx = state.get("chunk_metadata", {}).get("chunk_index", "?")
-    
+
     draft_ttps_list = state.get("draft_ttps", [])
     if not draft_ttps_list:
-        print(f"[DEBUG] [Chunk {c_idx}] Validator - No drafts to validate. Skipping LLM call.")
-        return {"approved_ttps": [], "validation_feedback": "", "draft_ttps": [], "validator_time": state.get("validator_time", 0.0) + (time.time() - t0)}
+        print(
+            f"[DEBUG] [Chunk {c_idx}] Validator - No drafts to validate. Skipping LLM call."
+        )
+        return {
+            "approved_ttps": [],
+            "validation_feedback": "",
+            "draft_ttps": [],
+            "validator_time": state.get("validator_time", 0.0) + (time.time() - t0),
+        }
 
     llm = get_llm(tier="pro", temperature=0.2)
     structured_llm = llm.with_structured_output(ValidationResult)
-    
-    use_prompt_repetition = os.getenv("USE_PROMPT_REPETITION", "False").lower() in ("true", "1", "yes")
-    
+
+    use_prompt_repetition = os.getenv("USE_PROMPT_REPETITION", "False").lower() in (
+        "true",
+        "1",
+        "yes",
+    )
+
     sys_prompt = (
         "Role: Cyber Threat Intelligence Analyst.\n"
         "Task: Validate drafted MITRE ATT&CK techniques against the source text.\n\n"
@@ -3926,27 +4427,37 @@ def validator_node(state: ChunkState) -> dict:
         "5. Provide specific feedback for rejected techniques to improve extraction accuracy.\n"
         "6. Validate each technique independently."
     )
-    
+
     if use_prompt_repetition:
         sys_prompt = f"{sys_prompt}\n\nReminder of Rules:\n{sys_prompt}"
-        
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", sys_prompt),
-        ("human", "<context>\n{global_context}\n</context>\n\n<source_text>\n{chunk_text}\n</source_text>\n\n<drafted_techniques>\n{draft_ttps}\n</drafted_techniques>\n\nValidate these techniques and provide the approved list and feedback notes.")
-    ])
-    
+
+    user_prompt = "<context>\n{global_context}\n</context>\n\n<source_text>\n{chunk_text}\n</source_text>\n\n<drafted_techniques>\n{draft_ttps}\n</drafted_techniques>\n\nValidate these techniques and provide the approved list and feedback notes."
+
+    if use_prompt_repetition:
+        user_prompt = f"{user_prompt}\n\n{user_prompt}"
+
+    prompt = ChatPromptTemplate.from_messages(
+        [
+            ("system", sys_prompt),
+            ("human", user_prompt),
+        ]
+    )
+
     chain = prompt | structured_llm
-    
-    result = safe_invoke(chain, {
-        "global_context": state.get("global_context", "None provided."),
-        "chunk_text": state["chunk_text"],
-        "draft_ttps": json.dumps(draft_ttps_list, indent=2)
-    })
-    
+
+    result = safe_invoke(
+        chain,
+        {
+            "global_context": state.get("global_context", "None provided."),
+            "chunk_text": state["chunk_text"],
+            "draft_ttps": json.dumps(draft_ttps_list, indent=2),
+        },
+    )
+
     if result is None:
         print(f"[DEBUG] [Chunk {c_idx}] Validator - Validation failed gracefully.")
         return {"approved_ttps": [], "validation_feedback": "", "draft_ttps": []}
-        
+
     current_meta_map = state.get("metadata_map", {})
     new_approved = []
     if result and result.valid_ttps:
@@ -3954,17 +4465,9 @@ def validator_node(state: ChunkState) -> dict:
             ttp_dict = ttp.model_dump()
             tech_id = str(ttp_dict["technique_id"]).strip().upper()
             if tech_id not in current_meta_map:
-                from .tools import load_mitre_json
-                mitre_db = load_mitre_json()
-                if tech_id in mitre_db:
-                    print(f"[DEBUG] [Chunk {c_idx}] Validator - Aceptando TTP 'alucinado' pero valido: {tech_id}")
-                    ttp_dict["technique_id"] = tech_id
-                    ttp_dict["name"] = mitre_db[tech_id]["name"]
-                    ttp_dict["tactic"] = mitre_db[tech_id]["tactics"]
-                    ttp_dict["confidence_score"] = 0.0
-                    new_approved.append(ttp_dict)
-                else:
-                    print(f"[DEBUG] [Chunk {c_idx}] Validator - Descartando TTP alucinado/modificado: {tech_id}")
+                print(
+                    f"[DEBUG] [Chunk {c_idx}] Validator - Descartando TTP inventado por el modelo local: {tech_id}"
+                )
                 continue
             # Force metadata
             ttp_dict["technique_id"] = tech_id
@@ -3972,20 +4475,24 @@ def validator_node(state: ChunkState) -> dict:
             ttp_dict["tactic"] = current_meta_map[tech_id]["tactics"]
             ttp_dict["confidence_score"] = current_meta_map[tech_id]["score"]
             new_approved.append(ttp_dict)
-    
+
     # Set feedback to current loop's rejections only
     if len(new_approved) == len(draft_ttps_list):
         feedback = ""
     else:
-        feedback = "\n".join(result.feedback_notes) if result and result.feedback_notes else ""
-        
-    print(f"[DEBUG] [Chunk {c_idx}] Validator - Approved {len(new_approved)}/{len(draft_ttps_list)} drafts.")
-    
+        feedback = (
+            "\n".join(result.feedback_notes) if result and result.feedback_notes else ""
+        )
+
+    print(
+        f"[DEBUG] [Chunk {c_idx}] Validator - Approved {len(new_approved)}/{len(draft_ttps_list)} drafts."
+    )
+
     return {
         "approved_ttps": new_approved,
         "validation_feedback": feedback,
-        "draft_ttps": [], # Limpiamos los drafts para la siguiente iteración
-        "validator_time": state.get("validator_time", 0.0) + (time.time() - t0)
+        "draft_ttps": [],  # Limpiamos los drafts para la siguiente iteración
+        "validator_time": state.get("validator_time", 0.0) + (time.time() - t0),
     }
 
 
@@ -3996,12 +4503,14 @@ FILE: src/langgraph_agents/state.py
 import operator
 from typing import TypedDict, Annotated, List, Dict, Any
 
+
 class GlobalState(TypedDict):
     source_file: str
     global_context: str
     chunks: List[Dict[str, Any]]
     all_approved_ttps: Annotated[List[Any], operator.add]
     final_json: Dict[str, Any]
+
 
 class ChunkState(TypedDict):
     chunk_text: str
@@ -4016,10 +4525,10 @@ class ChunkState(TypedDict):
     triage_time: float
     extractor_time: float
     validator_time: float
-    
+
     # Official Metadata map injected by Oracle
     metadata_map: dict
-    
+
     # Cached items to prevent re-running tools on loops
     candidates_list: List[str]
     abstract_keywords: str
@@ -4032,18 +4541,20 @@ FILE: src/langgraph_agents/tools.py
 import os
 import json
 import math
+import torch
 import requests
 from functools import lru_cache
-from langchain_core.tools import tool
 
 from langchain_qdrant import QdrantVectorStore, FastEmbedSparse, RetrievalMode
-from langchain_huggingface import HuggingFaceEmbeddings
 from qdrant_client import QdrantClient
 from src.langchain_pipeline.phase3_retriever import CandidateRetriever
+from src.core.embedding_factory import get_embeddings
+
 
 # ==============================================================================
 # GLOBALS & CACHING
 # ==============================================================================
+
 
 @lru_cache(maxsize=1)
 def get_retriever() -> CandidateRetriever:
@@ -4056,152 +4567,168 @@ def get_retriever() -> CandidateRetriever:
         qdrant_port = os.getenv("QDRANT_PORT", "6333")
         qdrant_url = f"http://{qdrant_host}:{qdrant_port}"
         collection_name = "mitre_attack"
-        
+
         # Connect to Qdrant
         client = QdrantClient(url=qdrant_url)
         # Validate connection
         client.get_collections()
-        
+
         # Initialize Embeddings
-        from src.core.embedding_factory import get_embeddings
+        # Initialize Embeddings
         embeddings = get_embeddings()
         sparse_embeddings = FastEmbedSparse(model_name="Qdrant/bm25")
-        
+
         # Create LangChain VectorStore
         vector_store = QdrantVectorStore(
             client=client,
             collection_name=collection_name,
             embedding=embeddings,
             sparse_embedding=sparse_embeddings,
-            retrieval_mode=RetrievalMode.HYBRID
+            retrieval_mode=RetrievalMode.HYBRID,
         )
-        
+
         return CandidateRetriever(vector_store=vector_store)
-        
+
     except Exception as e:
         print(f"[ERROR] Tool Initialization Error (Qdrant): {e}")
         return None
 
+
 @lru_cache(maxsize=1)
 def load_mitre_json() -> dict:
     """
-    Loads the raw MITRE STIX JSON file and builds a dictionary mapping 
-    Technique IDs (e.g., 'T1059.001') to their official descriptions, 
+    Loads the raw MITRE STIX JSON file and builds a dictionary mapping
+    Technique IDs (e.g., 'T1059.001') to their official descriptions,
     enriched with known tools/malware that use the technique.
     """
-    mitre_file = os.path.abspath(os.path.join(
-        os.path.dirname(__file__), 
-        '../../data/mitre_data/enterprise-attack.json'
-    ))
-    
+    mitre_file = os.path.abspath(
+        os.path.join(
+            os.path.dirname(__file__), "../../data/mitre_data/enterprise-attack.json"
+        )
+    )
+
     if not os.path.exists(mitre_file):
-        print(f"[ERROR] Tool Initialization Error: MITRE JSON not found at {mitre_file}")
+        print(
+            f"[ERROR] Tool Initialization Error: MITRE JSON not found at {mitre_file}"
+        )
         return {}
-        
+
     try:
-        with open(mitre_file, 'r', encoding='utf-8') as f:
+        with open(mitre_file, "r", encoding="utf-8") as f:
             data = json.load(f)
-            
+
         objects = data.get("objects", []) if isinstance(data, dict) else data
         if not isinstance(objects, list):
             return {}
-            
+
         entity_names = {}
         for obj in objects:
             if obj.get("type") in ["malware", "tool", "intrusion-set"]:
                 entity_names[obj.get("id")] = obj.get("name")
-                
+
         technique_tools = {}
         for obj in objects:
-            if obj.get("type") == "relationship" and obj.get("relationship_type") == "uses":
+            if (
+                obj.get("type") == "relationship"
+                and obj.get("relationship_type") == "uses"
+            ):
                 source_id = obj.get("source_ref")
                 target_id = obj.get("target_ref")
-                
-                if target_id and target_id.startswith("attack-pattern--") and source_id in entity_names:
+
+                if (
+                    target_id
+                    and target_id.startswith("attack-pattern--")
+                    and source_id in entity_names
+                ):
                     if target_id not in technique_tools:
                         technique_tools[target_id] = []
                     tool_name = entity_names[source_id]
                     if tool_name not in technique_tools[target_id]:
                         technique_tools[target_id].append(tool_name)
-            
+
         lookup_dict = {}
         for obj in objects:
             if obj.get("type") != "attack-pattern":
                 continue
-                
+
             external_refs = obj.get("external_references", [])
             tech_id = None
             for ref in external_refs:
                 if ref.get("source_name") == "mitre-attack":
                     tech_id = ref.get("external_id")
                     break
-                    
+
             if tech_id:
                 base_desc = obj.get("description", "No description available.")
                 stix_id = obj.get("id")
                 tools_used = technique_tools.get(stix_id, [])
-                
+
                 if tools_used:
                     enriched_desc = f"{base_desc}\n\nKNOWN ASSOCIATED TOOLS/MALWARE: {', '.join(tools_used)}"
                 else:
                     enriched_desc = base_desc
-                    
+
                 lookup_dict[tech_id.upper()] = {
                     "description": enriched_desc,
                     "name": obj.get("name", "Unknown"),
-                    "tactics": [kc.get("phase_name") for kc in obj.get("kill_chain_phases", [])]
+                    "tactics": [
+                        kc.get("phase_name") for kc in obj.get("kill_chain_phases", [])
+                    ],
                 }
-                
+
         return lookup_dict
     except Exception as e:
         print(f"[ERROR] Tool Initialization Error (JSON): {e}")
         return {}
 
+
 # ==============================================================================
 # LANGCHAIN TOOLS
 # ==============================================================================
+
 
 def get_mitre_candidates(query: str, top_k: int = 25, offset: int = 0) -> tuple:
     """Semantic search for node use. Returns a tuple: (list_of_formatted_strings, metadata_map)"""
     retriever = get_retriever()
     if not retriever:
         return [], {}
-        
+
     try:
-        import os
-        import requests
         # 1. Hybrid Search
-        # Recuperamos una bolsa profunda (50) para balancear seguridad y velocidad
-        deep_k = 50
-        candidates = retriever.vector_store.similarity_search(query, k=deep_k)
+        candidates = retriever.vector_store.similarity_search(query, k=top_k)
         if not candidates:
             return [], {}
-            
+
         # 2. Rerank
         # Reevaluamos los candidatos devueltos por Qdrant para tener scores más finos.
         # En producción usamos Jina (remoto), y en local tiramos del CrossEncoder por defecto.
         use_remote = os.getenv("EXECUTION_PROFILE", "LOCAL").upper() == "REMOTE"
+        use_local_reranker = os.getenv("USE_LOCAL_RERANKER", "False").lower() in ("true", "1", "yes")
         reranker_url = os.getenv("RERANKER_URL")
-        reranker_model = os.getenv("RERANKER_MODEL_NAME", "jina-reranker-v2-base-multilingual")
-        
-        if use_remote and not reranker_url:
-            raise ValueError("RERANKER_URL must be defined in .env for REMOTE execution profile")
-        
+        reranker_model = os.getenv(
+            "RERANKER_MODEL_NAME", "jina-reranker-v2-base-multilingual"
+        )
+
+        if use_remote and not use_local_reranker and not reranker_url:
+            raise ValueError(
+                "RERANKER_URL must be defined in .env for REMOTE execution profile"
+            )
+
         scores = []
-        if use_remote and candidates:
+        if use_remote and not use_local_reranker and candidates:
             docs_text = [doc.page_content for doc in candidates]
-            payload = {
-                "model": reranker_model,
-                "query": query,
-                "documents": docs_text
-            }
+            payload = {"model": reranker_model, "query": query, "documents": docs_text}
             try:
-                response = requests.post(reranker_url, json=payload, headers={"Authorization": "Bearer EMPTY"}, timeout=60)
+                response = requests.post(
+                    reranker_url,
+                    json=payload,
+                    headers={"Authorization": "Bearer EMPTY"},
+                    timeout=60,
+                )
                 response.raise_for_status()
                 if response.status_code == 200:
                     res_data = response.json()
                     scores = [0.0] * len(candidates)
-                    import math
                     for item in res_data.get("results", []):
                         idx = item["index"]
                         raw_score = float(item["relevance_score"])
@@ -4212,146 +4739,58 @@ def get_mitre_candidates(query: str, top_k: int = 25, offset: int = 0) -> tuple:
                 print(f"Error calling remote reranker: {e}")
                 scores = [0.0] * len(candidates)
         else:
-            import torch
             pairs = [[query, doc.page_content] for doc in candidates]
-            scores = retriever.reranker.predict(pairs, batch_size=32, activation_fn=torch.nn.Sigmoid()) if pairs else []
-        
+            scores = (
+                retriever.reranker.predict(
+                    pairs, batch_size=32, activation_fn=torch.nn.Sigmoid()
+                )
+                if pairs
+                else []
+            )
+
         # 3. Filter (Threshold)
-        # Bajamos el threshold de 0.50 a 0.20 porque las queries generadas por el Agente 
-        # (lista de keywords abstractas) tienen menos similitud léxica con los TTPs largos,
-        # lo que causaba falsos negativos tempranos. Dejamos que el LLM valide.
-        threshold = float(os.getenv("RERANKER_THRESHOLD", "0.30"))
+        # Bajamos el threshold por defecto a 0.20
+        threshold = float(os.getenv("RERANKER_THRESHOLD", "0.20"))
         if len(scores) > 0:
-            print(f"[DEBUG] get_mitre_candidates - Max Reranker Score before filtering: {max(scores):.4f}")
-            
+            print(
+                f"[DEBUG] get_mitre_candidates - Max Reranker Score before filtering: {max(scores):.4f}"
+            )
+
         results = []
         for doc, score in zip(candidates, scores):
             if float(score) >= threshold:
-                tech_id = str(doc.metadata.get("technique_id", "Unknown")).strip().upper()
+                tech_id = (
+                    str(doc.metadata.get("technique_id", "Unknown")).strip().upper()
+                )
                 name = doc.metadata.get("name", "Unknown")
                 tactics_str = doc.metadata.get("tactics", "")
                 tactics = [t.strip() for t in tactics_str.split(",") if t.strip()]
-                desc = doc.metadata.get("full_description", "No description available.")[:500]
-                
-                results.append((float(score), tech_id, name, tactics_str, tactics, desc))
-                
+                desc = doc.metadata.get(
+                    "full_description", "No description available."
+                )[:500]
+
+                results.append(
+                    (float(score), tech_id, name, tactics_str, tactics, desc)
+                )
+
         results.sort(key=lambda x: x[0], reverse=True)
-        
+
         # Tal y como has pedido, nos quedamos con TODOS los que superen el threshold sin cortes artificiales
         top_results = results
-        
+
         metadata_map = {}
         formatted_list = []
         for score, tech_id, name, tactics_str, tactics, desc in top_results:
-            formatted_list.append(f"- {tech_id}: {name} (Tactics: {tactics_str})\n  Description: {desc}...")
+            formatted_list.append(
+                f"- {tech_id}: {name} (Tactics: {tactics_str})\n  Description: {desc}..."
+            )
             metadata_map[tech_id] = {"name": name, "tactics": tactics, "score": score}
-                
+
         return formatted_list, metadata_map
-        
+
     except Exception as e:
         print(f"Error during search: {str(e)}")
         return [], {}
-
-@tool("MITRE_Oracle")
-def mitre_oracle(query: str) -> str:
-    """Use this tool to search the MITRE ATT&CK database using semantic search."""
-    retriever = get_retriever()
-    if not retriever:
-        return "Error: Could not connect to Qdrant."
-        
-    try:
-        import torch
-        
-        # 1. Hybrid Search
-        # OPTIMIZACIÓN: Aumentado de 15 a 25 para dar mayor cobertura de TTPs
-        candidates = retriever.vector_store.similarity_search(query, k=25)
-        if not candidates:
-            return "No matching MITRE techniques found."
-            
-        # 2. Rerank
-        import os
-        import requests
-        use_remote = os.getenv("EXECUTION_PROFILE", "LOCAL").upper() == "REMOTE"
-        reranker_url = os.getenv("RERANKER_URL")
-        reranker_model = os.getenv("RERANKER_MODEL_NAME", "jina-reranker-v2-base-multilingual")
-        
-        if use_remote and not reranker_url:
-            raise ValueError("RERANKER_URL must be defined in .env for REMOTE execution profile")
-        
-        scores = []
-        if use_remote and candidates:
-            docs_text = [doc.page_content for doc in candidates]
-            payload = {
-                "model": reranker_model,
-                "query": query,
-                "documents": docs_text
-            }
-            try:
-                response = requests.post(reranker_url, json=payload, headers={"Authorization": "Bearer EMPTY"}, timeout=60)
-                response.raise_for_status()
-                res_data = response.json()
-                scores = [0.0] * len(candidates)
-                import math
-                for item in res_data.get("results", []):
-                    idx = item["index"]
-                    raw_score = float(item["relevance_score"])
-                    
-                    if raw_score < -709:
-                        score = 0.0
-                    else:
-                        score = 1 / (1 + math.exp(-raw_score))
-                        
-                    scores[idx] = score
-            except Exception as e:
-                print(f"Error calling remote reranker: {e}")
-                scores = [0.0] * len(candidates)
-        else:
-            pairs = [[query, doc.page_content] for doc in candidates]
-            scores = retriever.reranker.predict(pairs, batch_size=32, activation_fn=torch.nn.Sigmoid()) if pairs else []
-        
-        # 3. Filter (Threshold)
-        # Bajar threshold por defecto para evitar truncar resultados buenos.
-        threshold = float(os.getenv("RERANKER_THRESHOLD", "0.20"))
-        if len(scores) > 0:
-            print(f"[DEBUG] mitre_oracle - Max Reranker Score before filtering: {max(scores):.4f}")
-            
-        results = []
-        for doc, score in zip(candidates, scores):
-            if float(score) >= threshold:
-                tech_id = doc.metadata.get("technique_id", "Unknown")
-                name = doc.metadata.get("name", "Unknown")
-                tactics = doc.metadata.get("tactics", "")
-                desc = doc.metadata.get("full_description", "No description available.")[:500]
-                results.append((float(score), f"- {tech_id}: {name} (Tactics: {tactics})\n  Description: {desc}..."))
-                
-        results.sort(key=lambda x: x[0], reverse=True)
-        top_results = [res[1] for res in results[:6]]
-        
-        if not top_results:
-            return "No highly confident MITRE techniques found after reranking."
-            
-        return "CANDIDATE TECHNIQUES:\n" + "\n\n".join(top_results)
-        
-    except Exception as e:
-        return f"Error during search: {str(e)}"
-
-
-@tool("MITRE_ID_Lookup")
-def mitre_id_lookup(technique_id: str) -> str:
-    """
-    Looks up the official MITRE ATT&CK description for a specific Technique ID (e.g., 'T1059.001').
-    """
-    lookup_dict = load_mitre_json()
-    if not lookup_dict:
-        return "Error: Local MITRE knowledge base could not be loaded."
-        
-    tech_id_upper = technique_id.strip().upper()
-    
-    if tech_id_upper in lookup_dict:
-        # Return the official description
-        return lookup_dict[tech_id_upper]["description"]
-    else:
-        return "Technique ID not found. The LLM must not use this ID."
 
 
 

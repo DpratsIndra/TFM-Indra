@@ -22,7 +22,8 @@ def get_llm(temperature: float = 0.0) -> BaseChatModel:
             base_url=vllm_base_url,
             api_key="EMPTY",
             temperature=temperature,
-            max_retries=3,
+            max_retries=2, # Bajamos un poco los reintentos para no eternizar el cuelgue
+            timeout=120.0  # <--- AÑADIDO: Si en 2 minutos no responde, lanza TimeoutError
         )
     else:
         model_name = os.getenv("GEMINI_MODEL", "gemini-flash-lite-latest")

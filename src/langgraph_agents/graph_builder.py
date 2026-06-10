@@ -219,9 +219,14 @@ def process_full_report(
 
         try:
             chunk_result = chunk_graph.invoke(initial_chunk_state)
+            
+            # LATIDO: Solo imprimimos si extrajo algo útil o si terminó bien
+            aprobados = len(chunk_result.get("approved_ttps", []))
+            print(f"     [✓] Chunk {i + 1}/{len(sanitized_chunks)} procesado. TTPs válidos: {aprobados}")
+            
             return i, chunk_result
         except Exception as e:
-            print(f"     [!] Error processing chunk {i + 1}: {str(e)}")
+            print(f"     [!] Error/Timeout procesando chunk {i + 1}: {str(e)}")
             return i, None
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
