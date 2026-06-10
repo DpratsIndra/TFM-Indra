@@ -134,8 +134,7 @@ def run_evaluation():
             
         except Exception as e:
             tqdm.write(f" [!] ERROR crítico en {pdf_name}: {e}")
-            predicted_ids = []
-            detailed_results.append({"source_file": pdf_path, "error": str(e)})
+            sys.exit(1)
         
         predicted_labels.append(predicted_ids)
         

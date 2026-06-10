@@ -153,15 +153,15 @@ class TTPAnalyzer:
                         artificial_delay += sleep_time
                 except Exception as e:
                     logger.error(f"Error processing chunk {inp['_location']}: {e}")
-                    batch_responses.append(None)
+                    raise RuntimeError(f"Ejecución abortada por fallo en chunk {inp['_location']}: {e}") from e
 
         # Reducer: Consolidar ChunkExtraction de vuelta a List[TTPDetection]
         global_ttps = {}
         for inp, res in zip(inputs, batch_responses):
             # AÑADIDO: Controlar si el resultado fue una excepción (ej. Timeout)
             if isinstance(res, Exception):
-                logger.error(f"  [!] Fallo/Timeout en chunk {inp['_location']}: {res}")
-                continue
+                logger.error(f"  [!] Fallo/Timeout crítico en chunk {inp['_location']}: {res}")
+                raise RuntimeError(f"Ejecución abortada por fallo en chunk {inp['_location']}: {res}") from res
 
             if not res or not hasattr(res, "extracted_ttps") or not res.extracted_ttps:
                 continue

@@ -226,8 +226,8 @@ def process_full_report(
             
             return i, chunk_result
         except Exception as e:
-            print(f"     [!] Error/Timeout procesando chunk {i + 1}: {str(e)}")
-            return i, None
+            print(f"     [!] Error Crítico/Timeout procesando chunk {i + 1}: {str(e)}")
+            raise RuntimeError(f"Ejecución abortada por fallo en chunk {i + 1}: {str(e)}") from e
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
         args_list = [(i, chunk) for i, chunk in enumerate(sanitized_chunks)]

@@ -122,7 +122,8 @@ def run_tram_evaluation(file_path: str, sample_size: int = None, pipeline_type: 
                         extracted = result.get("extracted_ttps", [])
                         predicted_ids = [ttp.get("technique_id") for ttp in extracted]
                     except Exception as e:
-                        predicted_ids = []
+                        print(f"\n[FATAL] Error crítico procesando la sentencia {idx}: {e}")
+                        sys.exit(1)
 
         # Serializar las detecciones de LangChain (Pydantic objects a dict) si es necesario
         extracted_payload = []
