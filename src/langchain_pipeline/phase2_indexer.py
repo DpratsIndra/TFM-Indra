@@ -4,6 +4,10 @@ import os
 import sys
 import urllib.request
 from typing import List, Dict, Any, Optional
+
+# Add the project root to sys.path so imports from src work when running the file directly.
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
+
 from src.core.embedding_factory import get_embeddings
 
 import torch
