@@ -37,5 +37,5 @@ def get_llm(temperature: float = 0.0) -> BaseChatModel:
     else:
         model_name = os.getenv("GEMINI_MODEL", "gemini-flash-lite-latest")
         return ChatGoogleGenerativeAI(
-            model=model_name, temperature=temperature, max_retries=3
+            model=model_name, temperature=temperature, max_retries=3, model_kwargs={"seed": 42}
         )
