@@ -39,7 +39,7 @@ def validator_router(state: ChunkState) -> str:
     unless we hit the safety loop limit (e.g., 4 loops max).
     """
     loop_count = state.get("loop_count", 0)
-    if loop_count >= 4:
+    if loop_count >= 3:
         return "end"
     return "extractor_node"
 
@@ -263,7 +263,8 @@ def process_full_report(
     final_state_update = consolidator_node(global_state)
     consolidator_time = time.time() - t0_red
 
-    print("[*] Reduce phase complete. Report ready.")
+    final_count = len(final_state_update.get("final_json", []))
+    print(f"[*] Reduce phase complete. Consolidated {len(master_ttp_list)} raw extractions into {final_count} distinct TTPs. Report ready.")
 
     # Devolver estructura empaquetada con TTPs y Tiempos
     return {

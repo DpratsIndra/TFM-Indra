@@ -310,6 +310,11 @@ def extractor_node(state: ChunkState) -> dict:
                 if tech_id in global_mitre_db:
                     print(f"[DEBUG] Model deduced {tech_id} natively. Accepted for validation.")
                     # Inyectamos la metadata oficial para que el Validator no se confunda
+                    current_meta_map[tech_id] = {
+                        "name": global_mitre_db[tech_id]["name"],
+                        "tactics": global_mitre_db[tech_id]["tactics"],
+                        "score": 0.0
+                    }
                     draft["technique_id"] = tech_id
                     draft["name"] = global_mitre_db[tech_id]["name"]
                     draft["tactic"] = global_mitre_db[tech_id]["tactics"]
@@ -335,7 +340,7 @@ def extractor_node(state: ChunkState) -> dict:
     )
     return {
         "draft_ttps": all_drafts,
-        "metadata_map": current_meta_map,
+        "metadata_map": dict(current_meta_map), # Force a new dict copy so LangGraph updates state properly
         "loop_count": state.get("loop_count", 0) + 1,
         "extractor_time": state.get("extractor_time", 0.0) + (time.time() - t0),
         "candidates_list": candidates_list,

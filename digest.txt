@@ -21,7 +21,6 @@ Directory structure:
     ├── infrastructure/
     │   └── docker-compose.yml
     ├── src/
-    │   ├── debug_ngrok.py
     │   ├── core/
     │   │   ├── embedding_factory.py
     │   │   ├── ioc_masker.py
@@ -416,12 +415,8 @@ if uploaded_file is not None:
 FILE: evaluation/data_loaders.py
 ================================================
 import os
-import glob
-import re
-import difflib
 import json
 import pandas as pd
-from typing import List
 
 class BaseDataLoader:
     def load(self, file_path: str) -> pd.DataFrame:
@@ -617,7 +612,6 @@ class CtibenchDataLoader(BaseDataLoader):
 ================================================
 FILE: evaluation/generate_apt_mapping.py
 ================================================
-import urllib.request
 import json
 import os
 
@@ -678,7 +672,7 @@ def generate_mapping(output_path: str = "data/eval_datasets/APT_REPORT/mitre_gro
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(mapping, f, indent=4)
         
-    print(f"[*] ¡Éxito! Mapeo creado en {output_path} con {len(mapping)} alias de grupos APT resolubles.")
+    print(f"[*] Mapeo creado en {output_path} con {len(mapping)} alias de grupos APT resolubles.")
 
 if __name__ == "__main__":
     generate_mapping()
@@ -725,7 +719,7 @@ def main():
     out_df = pd.DataFrame(records)
     os.makedirs(os.path.dirname(csv_path), exist_ok=True)
     out_df.to_csv(csv_path, index=False)
-    print(f"[*] ¡Éxito! Generado {csv_path} con {len(out_df)} registros.")
+    print(f"[*] Generado {csv_path} con {len(out_df)} registros.")
 
 if __name__ == "__main__":
     main()
@@ -797,7 +791,7 @@ def generate_mapping_csv(base_path: str = "data/eval_datasets/ctihal"):
                     matched_md_path = override_full_path
                 break
                 
-        # Estrategia 1: Substring Matching (muy efectivo aquí)
+        # Estrategia 1: Substring Matching
         if not matched_md_path:
             sorted_indices = sorted(range(len(clean_md_bases)), key=lambda k: len(clean_md_bases[k]), reverse=True)
             for i in sorted_indices:
@@ -962,7 +956,7 @@ def get_langchain_engine():
 
 def get_academic_sample(df: pd.DataFrame, total_size: int = 1000) -> pd.DataFrame:
     """
-    Objetivo: Balancear el dataset TRAM artificialmente. Como el 90% de las oraciones en 
+    Balancear el dataset TRAM artificialmente. Como el 90% de las oraciones en 
     reportes CTI no contienen TTPs, si evaluamos todo en crudo el accuracy sería engañoso.
     Forzamos un split ~50/50 entre oraciones positivas y negativas para obtener 
     métricas de F1-Score realistas y comparar con papers académicos.
@@ -1020,7 +1014,7 @@ def run_tram_evaluation(file_path: str, sample_size: int = None, pipeline_type: 
         
         if pipeline_type == "langchain":
             doc = Document(page_content=text, metadata={"chunk_index": idx, "page_number": 1})
-            candidates = retriever.get_filtered_mitre_candidates([doc], threshold=0.8)
+            candidates = retriever.get_filtered_mitre_candidates([doc], threshold=0.2)
             if candidates:
                 detections, artificial_delay = analyzer.analyze_candidates(candidates)
                 predicted_ids = [d.technique_id for d in detections if d.is_present]
@@ -1040,7 +1034,8 @@ def run_tram_evaluation(file_path: str, sample_size: int = None, pipeline_type: 
                         extracted = result.get("extracted_ttps", [])
                         predicted_ids = [ttp.get("technique_id") for ttp in extracted]
                     except Exception as e:
-                        predicted_ids = []
+                        print(f"\n[FATAL] Error crítico procesando la sentencia {idx}: {e}")
+                        sys.exit(1)
 
         # Serializar las detecciones de LangChain (Pydantic objects a dict) si es necesario
         extracted_payload = []
@@ -1143,8 +1138,8 @@ def run_tram_evaluation(file_path: str, sample_size: int = None, pipeline_type: 
                 "text": row['text'],
                 "human_ground_truth": list(true_set),
                 "llm_prediction": list(pred_set),
-                "false_negatives_missed_by_llm": list(true_set - pred_set),
-                "false_positives_hallucinated_by_llm": list(pred_set - true_set)
+                "false_negatives_missed": list(true_set - pred_set),
+                "false_positives_hallucinated": list(pred_set - true_set)
             })
     
     use_vlm = os.getenv("USE_VLM_EXTRACTION", "False").lower() in ("true", "1", "yes")
@@ -1202,7 +1197,6 @@ import sys
 import json
 import time
 import argparse
-import contextlib
 from datetime import datetime
 from tqdm import tqdm
 
@@ -1220,7 +1214,7 @@ load_dotenv(override=True)
 
 def run_evaluation():
     """
-    Objetivo: Ejecutar una evaluación End-to-End sobre el dataset APT_REPORT.
+    Ejecutar una evaluación End-to-End sobre el dataset APT_REPORT.
     Se utiliza el nombre de la carpeta (ej. APT28) para obtener las técnicas de MITRE como Ground Truth.
     """
     parser = argparse.ArgumentParser(description="Run single-config E2E evaluation on APT_REPORT dataset")
@@ -1235,7 +1229,7 @@ def run_evaluation():
     pipeline = args.pipeline
 
     print("\n" + "="*80)
-    print(f"🚀 INICIANDO EVALUACIÓN APT_REPORT (CROSS-REFERENCE WITH MITRE GROUPS)")
+    print("🚀 INICIANDO EVALUACIÓN APT_REPORT (CROSS-REFERENCE WITH MITRE GROUPS)")
     print(f"   Pipeline:           {pipeline.upper()}")
     print(f"   VLM Extraction:     {vlm_mode}")
     print(f"   Prompt Repetition:  {rep_mode}")
@@ -1268,13 +1262,11 @@ def run_evaluation():
         pdf_name = os.path.basename(pdf_path)
         
         try:
-            # Silenciar prints internos de las tuberías para que no rompan la barra de progreso
-            with open(os.devnull, 'w') as devnull:
-                with contextlib.redirect_stdout(devnull), contextlib.redirect_stderr(devnull):
-                    if pipeline == "langchain":
-                        results_list, timing = run_cti_extraction(pdf_path)
-                    else:
-                        results_list, timing = run_langgraph_extraction(pdf_path)
+            # Ejecución limpia: Dejamos que los logs de Fase pasen (INFO/ERROR)
+            if pipeline == "langchain":
+                results_list, timing = run_cti_extraction(pdf_path)
+            else:
+                results_list, timing = run_langgraph_extraction(pdf_path)
                         
             # Normalización y Trazabilidad Jerárquica
             normalized_preds = []
@@ -1459,7 +1451,7 @@ def run_evaluation():
     pipeline_type = args.pipeline
 
     print("\n" + "="*80)
-    print(f"🚀 INICIANDO EVALUACIÓN CTIBENCH (TEXT-LEVEL)")
+    print("🚀 INICIANDO EVALUACIÓN CTIBENCH (TEXT-LEVEL)")
     print(f"   Pipeline:           {pipeline_type.upper()}")
     print("="*80)
 
@@ -1492,7 +1484,7 @@ def run_evaluation():
         try:
             if pipeline_type == "langchain":
                 doc = Document(page_content=text, metadata={"chunk_index": idx, "page_number": 1})
-                candidates = retriever.get_filtered_mitre_candidates([doc], threshold=0.8)
+                candidates = retriever.get_filtered_mitre_candidates([doc], threshold=0.2)
                 if candidates:
                     detections, _ = analyzer.analyze_candidates(candidates)
                     predicted_ids = [d.technique_id for d in detections if d.is_present]
@@ -1615,7 +1607,6 @@ import sys
 import json
 import time
 import argparse
-import contextlib
 from datetime import datetime
 from tqdm import tqdm
 
@@ -1633,7 +1624,7 @@ load_dotenv(override=True)
 
 def run_evaluation():
     """
-    Objetivo: Ejecutar una evaluación End-to-End (E2E) sobre el dataset CTI-HAL.
+    Ejecutar una evaluación End-to-End (E2E) sobre el dataset CTI-HAL.
     A diferencia de TRAM (que evalúa oraciones sueltas), este script procesa PDFs enteros,
     lanzando el pipeline completo (ingesta, vector store, inferencia) y comparando
     las técnicas extraídas contra los ficheros markdown (ground truth) reales.
@@ -1650,7 +1641,7 @@ def run_evaluation():
     pipeline = args.pipeline
 
     print("\n" + "="*80)
-    print(f"🚀 INICIANDO EVALUACIÓN CTI-HAL")
+    print("🚀 INICIANDO EVALUACIÓN CTI-HAL")
     print(f"   Pipeline:           {pipeline.upper()}")
     print(f"   VLM Extraction:     {vlm_mode}")
     print(f"   Prompt Repetition:  {rep_mode}")
@@ -1682,13 +1673,11 @@ def run_evaluation():
         pdf_name = os.path.basename(pdf_path)
         
         try:
-            # Silenciar prints internos de las tuberías para que no rompan la barra de progreso
-            with open(os.devnull, 'w') as devnull:
-                with contextlib.redirect_stdout(devnull), contextlib.redirect_stderr(devnull):
-                    if pipeline == "langchain":
-                        results_list, timing = run_cti_extraction(pdf_path)
-                    else:
-                        results_list, timing = run_langgraph_extraction(pdf_path)
+            # Ejecución limpia: Dejamos que los logs de Fase pasen (INFO/ERROR)
+            if pipeline == "langchain":
+                results_list, timing = run_cti_extraction(pdf_path)
+            else:
+                results_list, timing = run_langgraph_extraction(pdf_path)
                         
             # Normalización y Trazabilidad Jerárquica
             normalized_preds = []
@@ -1748,8 +1737,7 @@ def run_evaluation():
             
         except Exception as e:
             tqdm.write(f" [!] ERROR crítico en {pdf_name}: {e}")
-            predicted_ids = []
-            detailed_results.append({"source_file": pdf_path, "error": str(e)})
+            sys.exit(1)
         
         predicted_labels.append(predicted_ids)
         
@@ -1817,118 +1805,6 @@ services:
 
 
 ================================================
-FILE: src/debug_ngrok.py
-================================================
-import torch
-from sentence_transformers import CrossEncoder
-from qdrant_client import QdrantClient
-from langchain_qdrant import QdrantVectorStore, FastEmbedSparse, RetrievalMode
-from langchain_huggingface import HuggingFaceEmbeddings
-
-
-def run_debug():
-    print("[*] Conectando a Qdrant y cargando modelos...")
-    qdrant_url = "http://localhost:6333"
-    client = QdrantClient(url=qdrant_url)
-
-    embeddings = HuggingFaceEmbeddings(model_name="BAAI/bge-m3")
-    sparse_embeddings = FastEmbedSparse(model_name="Qdrant/bm25")
-
-    vector_store = QdrantVectorStore(
-        client=client,
-        collection_name="mitre_attack",
-        embedding=embeddings,
-        sparse_embedding=sparse_embeddings,
-        retrieval_mode=RetrievalMode.HYBRID,
-    )
-
-    reranker = CrossEncoder("BAAI/bge-reranker-base", device="cpu")
-
-    # Textos extraídos de tus logs de LangSmith
-    chunk_text = """Figure.3 “DIPLOMATIC-CAR-FOR-SALE-BMW.pdf” lure document.
-Figure.4 PowerShell script deploying .pdf lure and downloading next-stage payload from <IoC_DOMAIN>.
-Ngrok, at its core, is an incredibly versatile and cross-platform tool designed to expose local network ports securely to the internet through a process known as tunneling. However, in the context of cyber adversaries, Ngrok has taken on a diﬀerent role. Instead of legitimate purposes, adversaries have begun leveraging Ngrok to store their next-stage PowerShell payloads and establish covert communication channels.
-In this nefarious tactic, they utilize Ngrok's services by utilizing free static domains provided by Ngrok, typically in the form of a subdomain under "<IoC_DOMAIN>." These subdomains act as discrete and inconspicuous rendezvous points for their malicious payloads. This clever adaptation allows the adversaries to obfuscate their activities and communicate with compromised systems while evading detection. By exploiting Ngrok's capabilities in this manner, threat actors can further complicate cybersecurity eﬀorts and remain under the radar, making defense and attribution more challenging.
-6: HKLUK"""
-
-    abstract_keywords = "Spearphishing Attachment, Remote File Download, Protocol Tunneling, Command and Control, Obfuscation, Payload Delivery, Living off the Land"
-
-    # Esta es la query exacta que tu Extractor está enviando a mitre_oracle
-    search_query = f"Raw Text: {chunk_text}\nKeywords: {abstract_keywords}"
-
-    print("\n" + "=" * 50)
-    print("1. BÚSQUEDA HÍBRIDA EN QDRANT (TOP 15)")
-    print("=" * 50)
-
-    # Obtenemos candidatos con su score de Qdrant
-    candidates_with_scores = vector_store.similarity_search_with_score(
-        search_query, k=15
-    )
-
-    t1572_found_in_qdrant = False
-
-    for i, (doc, score) in enumerate(candidates_with_scores):
-        tech_id = doc.metadata.get("technique_id", "Unknown")
-        name = doc.metadata.get("name", "Unknown")
-        print(f"{i + 1}. {tech_id} - {name} (Qdrant Score: {score:.4f})")
-        if tech_id == "T1572":
-            t1572_found_in_qdrant = True
-
-    if not t1572_found_in_qdrant:
-        print(
-            "\n[ERROR] T1572 (Protocol Tunneling) was not retrieved by Qdrant in the TOP 15."
-        )
-        print(
-            "[ERROR] This indicates an indexing failure in Qdrant or that the query text dilutes BM25."
-        )
-
-    print("\n" + "=" * 50)
-    print("2. EVALUACIÓN DEL CROSS-ENCODER (RERANKER)")
-    print("=" * 50)
-
-    all_pairs = [[search_query, doc.page_content] for doc, _ in candidates_with_scores]
-
-    if all_pairs:
-        # Extraemos logits brutos primero para ver qué está pensando el modelo matemáticamente
-        raw_logits = reranker.predict(all_pairs, batch_size=16)
-        # Extraemos probabilidades con Sigmoide
-        probabilities = reranker.predict(
-            all_pairs, batch_size=16, activation_fn=torch.nn.Sigmoid()
-        )
-
-        results = []
-        for i, (doc, _) in enumerate(candidates_with_scores):
-            tech_id = doc.metadata.get("technique_id", "Unknown")
-            name = doc.metadata.get("name", "Unknown")
-            results.append(
-                {
-                    "id": tech_id,
-                    "name": name,
-                    "logit": raw_logits[i],
-                    "prob": probabilities[i],
-                }
-            )
-
-        # Ordenar por probabilidad
-        results.sort(key=lambda x: x["prob"], reverse=True)
-
-        for res in results:
-            marker = (
-                "--> [PASA EL CORTE >= 0.15]"
-                if res["prob"] >= 0.15
-                else "    [RECHAZADO]"
-            )
-            print(
-                f"{marker} {res['id']} - {res['name']} | Logit: {res['logit']:.4f} | Prob(Sigmoid): {res['prob']:.4f}"
-            )
-
-
-if __name__ == "__main__":
-    run_debug()
-
-
-
-================================================
 FILE: src/core/embedding_factory.py
 ================================================
 import os
@@ -1969,7 +1845,7 @@ class IoCMasker:
     """
     A utility class to mask Indicators of Compromise (IoCs) in Cyber Threat Intelligence (CTI) reports.
     Replaces raw IPs, hashes, URLs, emails, and domains with typed semantic tags to prevent
-    data leakage or hallucination in embedding spaces and LLM prompts.
+    data leakage or hallucination in embedding spaces.
     """
 
     def __init__(self) -> None:
@@ -2080,21 +1956,31 @@ def get_llm(temperature: float = 0.0) -> BaseChatModel:
     profile = os.getenv("EXECUTION_PROFILE", "LOCAL").upper()
 
     if profile == "REMOTE":
-        vllm_base_url = os.getenv("VLLM_BASE_URL")
+        use_gemma = os.getenv("USE_GEMMA4", "False").lower() in ("true", "1", "yes")
+        
+        if use_gemma:
+            vllm_base_url = os.getenv("VLLM_BASE_URL_GEMMA", "http://10.0.152.198:8003/v1")
+            model_name = os.getenv("VLLM_MODEL_NAME_GEMMA", "gemma4")
+        else:
+            vllm_base_url = os.getenv("VLLM_BASE_URL")
+            model_name = os.getenv("VLLM_MODEL_NAME", "gpt-oss-20b")
+
         if not vllm_base_url:
             raise ValueError("VLLM_BASE_URL is not set in .env")
 
         return ChatOpenAI(
-            model=os.getenv("VLLM_MODEL_NAME", "gpt-oss-20b"),
+            model=model_name,
             base_url=vllm_base_url,
             api_key="EMPTY",
             temperature=temperature,
-            max_retries=3,
+            model_kwargs={"seed": 42},
+            max_retries=1,
+            timeout=600.0
         )
     else:
         model_name = os.getenv("GEMINI_MODEL", "gemini-flash-lite-latest")
         return ChatGoogleGenerativeAI(
-            model=model_name, temperature=temperature, max_retries=3
+            model=model_name, temperature=temperature, max_retries=3, model_kwargs={"seed": 42}
         )
 
 
@@ -2238,7 +2124,7 @@ logging.getLogger("httpx").setLevel(logging.CRITICAL)
 
 def run_cti_extraction(pdf_path: str) -> str:
     """
-    Objetivo: Ejecutar el flujo original y secuencial de LangChain (Fases 1 a 4).
+    Ejecutar el flujo original y secuencial de LangChain (Fases 1 a 4).
     A diferencia de LangGraph, aquí la inferencia (Fase 4) se hace chunk por chunk
     y se vuelca directamente en JSON, sin agentes de validación intermedios.
     Se utiliza como baseline para comparar el rendimiento con LangGraph en las evaluaciones.
@@ -2315,7 +2201,7 @@ def run_cti_extraction(pdf_path: str) -> str:
     retriever = CandidateRetriever(vector_store=vector_store)
     t1 = time.time()
     filtered_candidates = retriever.get_filtered_mitre_candidates(
-        report_chunks, threshold=0.5
+        report_chunks, threshold=0.2
     )
     p3_time = time.time() - t1
 
@@ -2439,11 +2325,10 @@ from src.core.ioc_masker import IoCMasker
 class ReportIngestor:
     """
     Fase 1: Ingesta y Particionado Semántico.
-    Objetivo: Transformar un PDF crudo en fragmentos de texto listos para el LLM.
-    - Modo Normal (Docling): Usa extracción tradicional para sacar texto y tablas.
-    - Modo VLM (Gemini): Convierte las páginas a imagen y le pide al LLM multimodal que transcriba
-      el texto. Muy útil para no perder info vital oculta en pantallazos negros de terminales.
-    Al final, ofusca los IoCs (IPs, hashes) para evitar sesgos y trocea el texto.
+    Transforma un PDF en fragmentos de texto.
+    - Modo Normal (Docling): Extracción tradicional.
+    - Modo VLM (Gemini): Convierte páginas a imagen y transcribe usando VLM.
+    Ofusca los IoCs y particiona el texto.
     """
 
     def __init__(
@@ -2500,7 +2385,6 @@ class ReportIngestor:
         logger.info(
             f"Loading PDF '{file_path}' using Multimodal VLM extraction (Gemini Flash)..."
         )
-        # Por ahora forzamos Gemini siempre para VLM, ya que el cluster remoto vLLM no tiene modelo visual.
         gemini_model = os.getenv("GEMINI_MODEL", "gemini-flash-lite-latest")
         llm = ChatGoogleGenerativeAI(model=gemini_model, temperature=0.0, max_retries=3)
 
@@ -2594,9 +2478,6 @@ class ReportIngestor:
         )
 
         try:
-            # Quitamos EasyOCR por completo porque es demasiado restrictivo.
-            # Docling tiene integrado RapidOCR por defecto que procesa de forma universal
-            # ruso, chino, árabe, japonés e inglés simultáneamente con un único modelo global sin crashear.
             pipeline_options = PdfPipelineOptions(do_ocr=True)
 
             converter = DocumentConverter(
@@ -2776,7 +2657,7 @@ class ReportIngestor:
                 # Fallback para los chunks del VLM que ya traen el page_number
                 doc.metadata["page_number"] = doc.metadata.get("page_number", "Unknown")
 
-            # Clean up the HTML comments so the LLM isn't distracted
+            # Clean up HTML comments.
             doc.page_content = re.sub(r" <!-- Page \d+ -->", "", doc.page_content)
 
         return final_docs
@@ -2792,6 +2673,10 @@ import os
 import sys
 import urllib.request
 from typing import List, Dict, Any, Optional
+
+# Add the project root to sys.path so imports from src work when running the file directly.
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
+
 from src.core.embedding_factory import get_embeddings
 
 import torch
@@ -3070,7 +2955,7 @@ if __name__ == "__main__":
 
     try:
         setup_mitre_index()
-        print("¡Indexación finalizada con éxito! Ya puedes ejecutar main_pipeline.py")
+        print("Indexación finalizada. Ejecuta main_pipeline.py")
     except Exception as e:
         print(f"Hubo un error durante la indexación: {e}")
 
@@ -3096,8 +2981,6 @@ logger = logging.getLogger(__name__)
 class CandidateRetriever:
     """
     Handles Phase 3 of the LangChain pipeline: Hybrid Retrieval and Cross-Encoder Reranking.
-    Acts as a high-precision funnel using the 'Retrieve-then-Rerank' pattern to reduce
-    the load and hallucinations in the subsequent LLM inference phase.
     """
 
     def __init__(self, vector_store: QdrantVectorStore, device: str = None) -> None:
@@ -3136,7 +3019,7 @@ class CandidateRetriever:
 
     def _get_initial_candidates(
         self, chunk: Document, top_k: int = 25
-    ) -> List[Document]:
+    ) -> List[tuple]:
         """
         Retrieves the initial set of candidate MITRE techniques from Qdrant.
 
@@ -3145,11 +3028,11 @@ class CandidateRetriever:
             top_k (int): The number of candidates to retrieve.
 
         Returns:
-            List[Document]: The top K MITRE techniques retrieved via semantic search.
+            List[tuple]: List of tuples containing (Document, score).
         """
         # Execute the vector similarity search
-        candidates = self.vector_store.similarity_search(chunk.page_content, k=top_k)
-        return candidates
+        candidates_with_score = self.vector_store.similarity_search_with_score(chunk.page_content, k=top_k)
+        return candidates_with_score
 
     def get_filtered_mitre_candidates(
         self, report_chunks: List[Document], threshold: float = None
@@ -3181,8 +3064,11 @@ class CandidateRetriever:
             )
 
         chunk_results = []
-        for chunk, candidates in all_initial_candidates:
+        for chunk, candidates_with_score in all_initial_candidates:
             valid_candidates = []
+            candidates = [doc for doc, _ in candidates_with_score]
+            qdrant_scores = [q_score for _, q_score in candidates_with_score]
+            
             if use_remote and not use_local_reranker:
                 # Le mandamos los candidatos en texto crudo a TEI/Jina para que haga un
                 # cross-encoding real contra la query y nos devuelva un score ajustado.
@@ -3203,36 +3089,37 @@ class CandidateRetriever:
                     if response.status_code == 200:
                         res_data = response.json()
                         # Jina/TEI suele devolver results: [{"index": X, "relevance_score": Y}]
+                        candidates_with_scores = []
                         for item in res_data.get("results", []):
                             idx = item["index"]
                             raw_score = float(item["relevance_score"])
                             # El endpoint TEI/Jina nos devuelve los logits en bruto (pueden ser negativos o > 1).
                             # Overflow-safe Sigmoid para forzarlos a rango [0, 1] y mantener compatibilidad.
                             if raw_score < -709:
-                                score = 0.0
+                                r_score = 0.0
                             else:
-                                score = 1 / (1 + math.exp(-raw_score))
-                            if score >= threshold:
-                                doc = candidates[idx]
-                                valid_candidates.append(
-                                    {
-                                        "technique_id": doc.metadata.get(
-                                            "technique_id", "Unknown"
-                                        ),
-                                        "name": doc.metadata.get("name", "Unknown"),
-                                        "tactics": [
-                                            t.strip()
-                                            for t in doc.metadata.get(
-                                                "tactics", ""
-                                            ).split(",")
-                                            if t.strip()
-                                        ],
-                                        "description": doc.metadata.get(
-                                            "full_description", ""
-                                        ),
-                                        "score": round(score, 4),
-                                    }
-                                )
+                                r_score = 1 / (1 + math.exp(-raw_score))
+                                
+                            doc = candidates[idx]
+                            q_score = qdrant_scores[idx]
+                            final_score = (0.7 * float(r_score)) + (0.3 * float(q_score))
+                            
+                            candidates_with_scores.append(
+                                {
+                                    "technique_id": doc.metadata.get("technique_id", "Unknown"),
+                                    "name": doc.metadata.get("name", "Unknown"),
+                                    "tactics": [t.strip() for t in doc.metadata.get("tactics", "").split(",") if t.strip()],
+                                    "description": doc.metadata.get("full_description", ""),
+                                    "score": round(final_score, 4),
+                                }
+                            )
+
+                        candidates_with_scores.sort(key=lambda x: x["score"], reverse=True)
+                        valid_candidates = [c for c in candidates_with_scores if c["score"] >= threshold]
+
+                        if len(valid_candidates) == 0 and len(candidates_with_scores) > 0:
+                            logger.debug("Adaptive reranking activated. Taking top 3 ignoring threshold.")
+                            valid_candidates = candidates_with_scores[:3]
                 except Exception as e:
                     logger.error(f"Error calling remote reranker: {e}")
             else:
@@ -3242,35 +3129,33 @@ class CandidateRetriever:
                     scores = self.reranker.predict(
                         pairs, batch_size=32, activation_fn=torch.nn.Sigmoid()
                     )
-                    for doc, score in zip(candidates, scores):
-                        if score >= threshold:
-                            valid_candidates.append(
-                                {
-                                    "technique_id": doc.metadata.get(
-                                        "technique_id", "Unknown"
-                                    ),
-                                    "name": doc.metadata.get("name", "Unknown"),
-                                    "tactics": [
-                                        t.strip()
-                                        for t in doc.metadata.get("tactics", "").split(
-                                            ","
-                                        )
-                                        if t.strip()
-                                    ],
-                                    "description": doc.metadata.get(
-                                        "full_description", ""
-                                    ),
-                                    "score": round(float(score), 4),
-                                }
-                            )
+                    candidates_with_scores = []
+                    for doc, r_score, q_score in zip(candidates, scores, qdrant_scores):
+                        final_score = (0.7 * float(r_score)) + (0.3 * float(q_score))
+                        candidates_with_scores.append(
+                            {
+                                "technique_id": doc.metadata.get("technique_id", "Unknown"),
+                                "name": doc.metadata.get("name", "Unknown"),
+                                "tactics": [t.strip() for t in doc.metadata.get("tactics", "").split(",") if t.strip()],
+                                "description": doc.metadata.get("full_description", ""),
+                                "score": round(final_score, 4),
+                            }
+                        )
+
+                    candidates_with_scores.sort(key=lambda x: x["score"], reverse=True)
+                    valid_candidates = [c for c in candidates_with_scores if c["score"] >= threshold]
+
+                    if len(valid_candidates) == 0 and len(candidates_with_scores) > 0:
+                        logger.debug("Adaptive reranking activated. Taking top 3 ignoring threshold.")
+                        valid_candidates = candidates_with_scores[:3]
 
                 if valid_candidates:
                     logger.debug(
-                        f"[DEBUG] Chunk {chunk.page_content[:30]}... Max valid score: {max(c['score'] for c in valid_candidates)}"
+                        f"Chunk {chunk.page_content[:30]}... Max valid score: {max(c['score'] for c in valid_candidates)}"
                     )
                 else:
                     logger.debug(
-                        f"[DEBUG] Chunk {chunk.page_content[:30]}... 0 candidates passed threshold {threshold}. Max score was: {max(scores) if len(scores) > 0 else 'N/A'}"
+                        f"Chunk {chunk.page_content[:30]}... 0 candidates passed threshold {threshold}. Max score was: {max(scores) if len(scores) > 0 else 'N/A'}"
                     )
 
             if valid_candidates:
@@ -3343,7 +3228,8 @@ class TTPAnalyzer:
             "3. Do not include techniques that are false positives, benign, or defensive mentions. If none are valid, return an empty list.\n"
             "4. Preserve the exact `location` and `Score` provided in the evidence tags.\n"
             "5. Map contextualized masked tags (e.g., <IoC_URL>) to their tactical intent.\n"
-            "6. Exclusion Criteria: Strictly map observable, technical intrusion activity. Exclude geopolitical context or attribution theories."
+            "6. Exclusion Criteria: Strictly map observable, technical intrusion activity. Exclude geopolitical context or attribution theories.\n"
+            "7. CRITICAL JSON FORMATTING: In the 'procedure' field, you MUST write a full descriptive sentence of what the attacker did (e.g., 'The attacker used Ngrok to establish a tunnel.'). DO NOT write single words or tactic names."
         )
         if self.use_prompt_repetition:
             system_instruction = (
@@ -3414,15 +3300,16 @@ class TTPAnalyzer:
         max_workers = int(os.getenv("MAX_CONCURRENT_CHUNKS", "2"))
 
         if self.execution_profile == "REMOTE" or max_workers > 1:
-            logger.info(
-                f"Parallel batching enabled: Running LangChain inference concurrently (max_concurrency={max_workers})..."
-            )
+            logger.info(f"Running LangChain inference concurrently (max_concurrency={max_workers})...")
             try:
+                # return_exceptions=True devuelve el error en la lista en lugar de bloquear el proceso
                 batch_responses = chain.batch(
-                    inputs, config={"max_concurrency": max_workers}
+                    inputs, 
+                    config={"max_concurrency": max_workers},
+                    return_exceptions=True 
                 )
             except Exception as e:
-                logger.error(f"Error during parallel batching: {e}")
+                logger.error(f"Error crítico en el orquestador de batch: {e}")
         else:
             logger.info("LOCAL Profile detected: Running chain sequentially...")
             is_gemini = "google" in str(type(self.llm)).lower()
@@ -3440,11 +3327,16 @@ class TTPAnalyzer:
                         artificial_delay += sleep_time
                 except Exception as e:
                     logger.error(f"Error processing chunk {inp['_location']}: {e}")
-                    batch_responses.append(None)
+                    raise RuntimeError(f"Ejecución abortada por fallo en chunk {inp['_location']}: {e}") from e
 
         # Reducer: Consolidar ChunkExtraction de vuelta a List[TTPDetection]
         global_ttps = {}
         for inp, res in zip(inputs, batch_responses):
+            # AÑADIDO: Controlar si el resultado fue una excepción (ej. Timeout)
+            if isinstance(res, Exception):
+                logger.error(f"  [!] Fallo/Timeout crítico en chunk {inp['_location']}: {res}")
+                raise RuntimeError(f"Ejecución abortada por fallo en chunk {inp['_location']}: {res}") from res
+
             if not res or not hasattr(res, "extracted_ttps") or not res.extracted_ttps:
                 continue
 
@@ -3544,7 +3436,7 @@ def validator_router(state: ChunkState) -> str:
     unless we hit the safety loop limit (e.g., 4 loops max).
     """
     loop_count = state.get("loop_count", 0)
-    if loop_count >= 4:
+    if loop_count >= 3:
         return "end"
     return "extractor_node"
 
@@ -3724,10 +3616,15 @@ def process_full_report(
 
         try:
             chunk_result = chunk_graph.invoke(initial_chunk_state)
+            
+            # LATIDO: Solo imprimimos si extrajo algo útil o si terminó bien
+            aprobados = len(chunk_result.get("approved_ttps", []))
+            print(f"     [✓] Chunk {i + 1}/{len(sanitized_chunks)} procesado. TTPs válidos: {aprobados}")
+            
             return i, chunk_result
         except Exception as e:
-            print(f"     [!] Error processing chunk {i + 1}: {str(e)}")
-            return i, None
+            print(f"     [!] Error Crítico/Timeout procesando chunk {i + 1}: {str(e)}")
+            raise RuntimeError(f"Ejecución abortada por fallo en chunk {i + 1}: {str(e)}") from e
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
         args_list = [(i, chunk) for i, chunk in enumerate(sanitized_chunks)]
@@ -4150,10 +4047,9 @@ def safe_invoke(callable_chain, input_data):
 
 def triage_node(state: ChunkState) -> dict:
     """
-    Objetivo: Actuar como un filtro rápido de bajo coste.
-    Este agente lee el chunk y decide si contiene Inteligencia de Amenazas (TTPs, atacantes)
-    o si es pura paja (índices, bibliografía, relleno). Si es irrelevante, cortamos la ejecución
-    del chunk aquí mismo y ahorramos tokens en los agentes pesados.
+    Filtro rápido.
+    Lee el chunk y decide si contiene Inteligencia de Amenazas (TTPs, atacantes)
+    o si es relleno. Si es irrelevante, corta la ejecución.
     """
     t0 = time.time()
     chunk_text = state["chunk_text"]
@@ -4203,10 +4099,9 @@ def triage_node(state: ChunkState) -> dict:
 
 def extractor_node(state: ChunkState) -> dict:
     """
-    Objetivo: El corazón del sistema. Analiza el chunk, extrae comportamientos tácticos,
-    consulta a la base de datos vectorial (MITRE_Oracle) para anclar el comportamiento a
+    Analiza el chunk, extrae comportamientos tácticos,
+    consulta a la base de datos vectorial para anclar el comportamiento a
     una técnica oficial de MITRE ATT&CK, y genera un borrador del TTP.
-    Si viene rebotado del Validator con feedback, intenta buscar técnicas alternativas.
     """
     t0 = time.time()
     chunk_text = state["chunk_text"]
@@ -4226,7 +4121,10 @@ def extractor_node(state: ChunkState) -> dict:
         sys_prompt = (
             "Role: Cyber Threat Intelligence Analyst.\n"
             "Task: Extract a comma-separated list of abstract cybersecurity behaviors, tactics, and mechanisms from the text.\n"
-            "Instructions: The text may be in any language. Translate specific tools into their tactical purpose (e.g., 'Ngrok' -> 'Protocol Tunneling'). Output ONLY the keywords in English."
+            "Instructions: Translate specific tools into their tactical purpose. Output ONLY the keywords in English.\n\n"
+            "EXAMPLE:\n"
+            "Source Text: 'The actors sent an email with a malicious PDF called invoice.pdf that executes a hidden macro.'\n"
+            "Output: Spearphishing Attachment, Malicious File, User Execution, Phishing, Social Engineering\n"
         )
 
         if val_feedback:
@@ -4287,7 +4185,7 @@ def extractor_node(state: ChunkState) -> dict:
     else:
         # Recuperamos la bolsa de 25
         candidates_list, meta_map = get_mitre_candidates(
-            search_query, top_k=25, offset=0
+            search_query, top_k=25
         )
         # Fusionamos con el metadata_map previo por si hay varias iteraciones
         current_meta_map.update(meta_map)
@@ -4316,11 +4214,12 @@ def extractor_node(state: ChunkState) -> dict:
         "Role: Cyber Threat Intelligence Analyst.\n"
         "Task: Extract applicable MITRE ATT&CK techniques from the provided candidate list based on the source text.\n\n"
         "Rules:\n"
-        "1. Multilingual: The source text may be in Spanish, Russian, Chinese, or any other language. Comprehend it natively but write your justification in English.\n"
+        "1. Multilingual: The source text may be in any language, but write your justification in English.\n"
         "2. Extract all applicable new techniques. Do not artificially limit the output.\n"
         "3. Ignore previously approved or rejected techniques.\n"
-        "4. Focus exclusively on observable actions (e.g., executing commands, dropping files). Do not map analytical context to techniques.\n"
-        "5. Output strictly according to the requested JSON schema."
+        "4. Focus exclusively on observable actions.\n"
+        "5. CRITICAL JSON FORMATTING: In the 'procedure' field, you MUST write a full descriptive sentence of what the attacker did (e.g., 'The attacker used Ngrok to establish a tunnel.'). DO NOT write single words or tactic names.\n"
+        "6. Output strictly according to the requested JSON schema."
     )
     if use_prompt_repetition:
         sys_prompt = f"{sys_prompt}\n\nReminder of Rules:\n{sys_prompt}"
@@ -4358,19 +4257,38 @@ def extractor_node(state: ChunkState) -> dict:
             draft = ttp.model_dump()
             tech_id = str(draft.get("technique_id", "")).strip().upper()
 
-            # ANTI-HALLUCINATION GUARD: Strict Rejection
+            # --- HYBRID GUARDIAN ---
             if tech_id not in current_meta_map:
-                print(
-                    f"[DEBUG] Descartando TTP inventado por el modelo local: {tech_id}"
-                )
-                continue
+                # 1. El LLM ha propuesto un ID que no le dio Qdrant.
+                # Vamos a comprobar si es una alucinación (T9999) o si es real (T1203).
+                
+                # Cargamos el diccionario global de MITRE (está cacheado, es instantáneo)
+                global_mitre_db = load_mitre_json() 
+                
+                if tech_id in global_mitre_db:
+                    print(f"[DEBUG] Model deduced {tech_id} natively. Accepted for validation.")
+                    # Inyectamos la metadata oficial para que el Validator no se confunda
+                    current_meta_map[tech_id] = {
+                        "name": global_mitre_db[tech_id]["name"],
+                        "tactics": global_mitre_db[tech_id]["tactics"],
+                        "score": 0.0
+                    }
+                    draft["technique_id"] = tech_id
+                    draft["name"] = global_mitre_db[tech_id]["name"]
+                    draft["tactic"] = global_mitre_db[tech_id]["tactics"]
+                    draft["confidence_score"] = 0.0 # Score 0.0 indica que viene de memoria, no de Qdrant
+                    draft["location"] = loc
+                    all_drafts.append(draft)
+                else:
+                    print(f"[DEBUG] Discarding hallucination: {tech_id} not in MITRE.")
+                
+                continue # Saltamos a la siguiente iteración
 
-            # FORZAR METADATA OFICIAL DE LA BASE DE DATOS
+            # 2. Si venía de Qdrant (Comportamiento normal)
             draft["technique_id"] = tech_id
             draft["name"] = current_meta_map[tech_id]["name"]
             draft["tactic"] = current_meta_map[tech_id]["tactics"]
             draft["confidence_score"] = current_meta_map[tech_id]["score"]
-
             draft["location"] = loc
             all_drafts.append(draft)
 
@@ -4380,7 +4298,7 @@ def extractor_node(state: ChunkState) -> dict:
     )
     return {
         "draft_ttps": all_drafts,
-        "metadata_map": current_meta_map,
+        "metadata_map": dict(current_meta_map), # Force a new dict copy so LangGraph updates state properly
         "loop_count": state.get("loop_count", 0) + 1,
         "extractor_time": state.get("extractor_time", 0.0) + (time.time() - t0),
         "candidates_list": candidates_list,
@@ -4466,7 +4384,7 @@ def validator_node(state: ChunkState) -> dict:
             tech_id = str(ttp_dict["technique_id"]).strip().upper()
             if tech_id not in current_meta_map:
                 print(
-                    f"[DEBUG] [Chunk {c_idx}] Validator - Descartando TTP inventado por el modelo local: {tech_id}"
+                    f"[DEBUG] [Chunk {c_idx}] Validator - Discarding hallucinated TTP: {tech_id}"
                 )
                 continue
             # Force metadata
@@ -4687,7 +4605,7 @@ def load_mitre_json() -> dict:
 # ==============================================================================
 
 
-def get_mitre_candidates(query: str, top_k: int = 25, offset: int = 0) -> tuple:
+def get_mitre_candidates(query: str, top_k: int = 25) -> tuple:
     """Semantic search for node use. Returns a tuple: (list_of_formatted_strings, metadata_map)"""
     retriever = get_retriever()
     if not retriever:
@@ -4695,9 +4613,12 @@ def get_mitre_candidates(query: str, top_k: int = 25, offset: int = 0) -> tuple:
 
     try:
         # 1. Hybrid Search
-        candidates = retriever.vector_store.similarity_search(query, k=top_k)
-        if not candidates:
+        candidates_with_score = retriever.vector_store.similarity_search_with_score(query, k=top_k)
+        if not candidates_with_score:
             return [], {}
+            
+        candidates = [doc for doc, _ in candidates_with_score]
+        qdrant_scores = [q_score for _, q_score in candidates_with_score]
 
         # 2. Rerank
         # Reevaluamos los candidatos devueltos por Qdrant para tener scores más finos.
@@ -4756,27 +4677,27 @@ def get_mitre_candidates(query: str, top_k: int = 25, offset: int = 0) -> tuple:
                 f"[DEBUG] get_mitre_candidates - Max Reranker Score before filtering: {max(scores):.4f}"
             )
 
-        results = []
-        for doc, score in zip(candidates, scores):
-            if float(score) >= threshold:
-                tech_id = (
-                    str(doc.metadata.get("technique_id", "Unknown")).strip().upper()
-                )
-                name = doc.metadata.get("name", "Unknown")
-                tactics_str = doc.metadata.get("tactics", "")
-                tactics = [t.strip() for t in tactics_str.split(",") if t.strip()]
-                desc = doc.metadata.get(
-                    "full_description", "No description available."
-                )[:500]
+        results_with_scores = []
+        for doc, r_score, q_score in zip(candidates, scores, qdrant_scores):
+            tech_id = str(doc.metadata.get("technique_id", "Unknown")).strip().upper()
+            name = doc.metadata.get("name", "Unknown")
+            tactics_str = doc.metadata.get("tactics", "")
+            tactics = [t.strip() for t in tactics_str.split(",") if t.strip()]
+            desc = doc.metadata.get("full_description", "No description available.")[:500]
 
-                results.append(
-                    (float(score), tech_id, name, tactics_str, tactics, desc)
-                )
+            final_score = (0.7 * float(r_score)) + (0.3 * float(q_score))
 
-        results.sort(key=lambda x: x[0], reverse=True)
+            results_with_scores.append((final_score, tech_id, name, tactics_str, tactics, desc))
 
-        # Tal y como has pedido, nos quedamos con TODOS los que superen el threshold sin cortes artificiales
-        top_results = results
+        # Ordenamos de mayor a menor
+        results_with_scores.sort(key=lambda x: x[0], reverse=True)
+
+        # Filtramos los que superan el threshold
+        top_results = [r for r in results_with_scores if r[0] >= threshold]
+
+        if len(top_results) == 0 and len(results_with_scores) > 0:
+            print("Adaptive reranking activated. Taking top 3 ignoring threshold.")
+            top_results = results_with_scores[:3]
 
         metadata_map = {}
         formatted_list = []
