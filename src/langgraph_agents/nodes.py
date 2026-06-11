@@ -89,10 +89,9 @@ def safe_invoke(callable_chain, input_data):
 
 def triage_node(state: ChunkState) -> dict:
     """
-    Objetivo: Actuar como un filtro rápido de bajo coste.
-    Este agente lee el chunk y decide si contiene Inteligencia de Amenazas (TTPs, atacantes)
-    o si es pura paja (índices, bibliografía, relleno). Si es irrelevante, cortamos la ejecución
-    del chunk aquí mismo y ahorramos tokens en los agentes pesados.
+    Filtro rápido.
+    Lee el chunk y decide si contiene Inteligencia de Amenazas (TTPs, atacantes)
+    o si es relleno. Si es irrelevante, corta la ejecución.
     """
     t0 = time.time()
     chunk_text = state["chunk_text"]
@@ -142,10 +141,9 @@ def triage_node(state: ChunkState) -> dict:
 
 def extractor_node(state: ChunkState) -> dict:
     """
-    Objetivo: El corazón del sistema. Analiza el chunk, extrae comportamientos tácticos,
-    consulta a la base de datos vectorial (MITRE_Oracle) para anclar el comportamiento a
+    Analiza el chunk, extrae comportamientos tácticos,
+    consulta a la base de datos vectorial para anclar el comportamiento a
     una técnica oficial de MITRE ATT&CK, y genera un borrador del TTP.
-    Si viene rebotado del Validator con feedback, intenta buscar técnicas alternativas.
     """
     t0 = time.time()
     chunk_text = state["chunk_text"]
@@ -229,7 +227,7 @@ def extractor_node(state: ChunkState) -> dict:
     else:
         # Recuperamos la bolsa de 25
         candidates_list, meta_map = get_mitre_candidates(
-            search_query, top_k=25, offset=0
+            search_query, top_k=25
         )
         # Fusionamos con el metadata_map previo por si hay varias iteraciones
         current_meta_map.update(meta_map)
@@ -301,7 +299,7 @@ def extractor_node(state: ChunkState) -> dict:
             draft = ttp.model_dump()
             tech_id = str(draft.get("technique_id", "")).strip().upper()
 
-            # --- EL GUARDIÁN HÍBRIDO (Tu idea) ---
+            # --- HYBRID GUARDIAN ---
             if tech_id not in current_meta_map:
                 # 1. El LLM ha propuesto un ID que no le dio Qdrant.
                 # Vamos a comprobar si es una alucinación (T9999) o si es real (T1203).
@@ -310,7 +308,7 @@ def extractor_node(state: ChunkState) -> dict:
                 global_mitre_db = load_mitre_json() 
                 
                 if tech_id in global_mitre_db:
-                    print(f"[DEBUG] Respaldo Paramétrico: El LLM dedujo {tech_id} sin ayuda de Qdrant. Aceptado para validación.")
+                    print(f"[DEBUG] Model deduced {tech_id} natively. Accepted for validation.")
                     # Inyectamos la metadata oficial para que el Validator no se confunda
                     draft["technique_id"] = tech_id
                     draft["name"] = global_mitre_db[tech_id]["name"]
@@ -319,7 +317,7 @@ def extractor_node(state: ChunkState) -> dict:
                     draft["location"] = loc
                     all_drafts.append(draft)
                 else:
-                    print(f"[DEBUG] Descartando alucinación pura: {tech_id} no existe en MITRE.")
+                    print(f"[DEBUG] Discarding hallucination: {tech_id} not in MITRE.")
                 
                 continue # Saltamos a la siguiente iteración
 
@@ -423,7 +421,7 @@ def validator_node(state: ChunkState) -> dict:
             tech_id = str(ttp_dict["technique_id"]).strip().upper()
             if tech_id not in current_meta_map:
                 print(
-                    f"[DEBUG] [Chunk {c_idx}] Validator - Descartando TTP inventado por el modelo local: {tech_id}"
+                    f"[DEBUG] [Chunk {c_idx}] Validator - Discarding hallucinated TTP: {tech_id}"
                 )
                 continue
             # Force metadata

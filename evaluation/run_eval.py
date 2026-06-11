@@ -44,7 +44,7 @@ def get_langchain_engine():
 
 def get_academic_sample(df: pd.DataFrame, total_size: int = 1000) -> pd.DataFrame:
     """
-    Objetivo: Balancear el dataset TRAM artificialmente. Como el 90% de las oraciones en 
+    Balancear el dataset TRAM artificialmente. Como el 90% de las oraciones en 
     reportes CTI no contienen TTPs, si evaluamos todo en crudo el accuracy sería engañoso.
     Forzamos un split ~50/50 entre oraciones positivas y negativas para obtener 
     métricas de F1-Score realistas y comparar con papers académicos.
@@ -102,7 +102,7 @@ def run_tram_evaluation(file_path: str, sample_size: int = None, pipeline_type: 
         
         if pipeline_type == "langchain":
             doc = Document(page_content=text, metadata={"chunk_index": idx, "page_number": 1})
-            candidates = retriever.get_filtered_mitre_candidates([doc], threshold=0.8)
+            candidates = retriever.get_filtered_mitre_candidates([doc], threshold=0.2)
             if candidates:
                 detections, artificial_delay = analyzer.analyze_candidates(candidates)
                 predicted_ids = [d.technique_id for d in detections if d.is_present]
@@ -226,8 +226,8 @@ def run_tram_evaluation(file_path: str, sample_size: int = None, pipeline_type: 
                 "text": row['text'],
                 "human_ground_truth": list(true_set),
                 "llm_prediction": list(pred_set),
-                "false_negatives_missed_by_llm": list(true_set - pred_set),
-                "false_positives_hallucinated_by_llm": list(pred_set - true_set)
+                "false_negatives_missed": list(true_set - pred_set),
+                "false_positives_hallucinated": list(pred_set - true_set)
             })
     
     use_vlm = os.getenv("USE_VLM_EXTRACTION", "False").lower() in ("true", "1", "yes")

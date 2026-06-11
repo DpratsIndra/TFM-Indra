@@ -286,6 +286,6 @@ if __name__ == "__main__":
 
     try:
         setup_mitre_index()
-        print("¡Indexación finalizada con éxito! Ya puedes ejecutar main_pipeline.py")
+        print("Indexación finalizada. Ejecuta main_pipeline.py")
     except Exception as e:
         print(f"Hubo un error durante la indexación: {e}")

@@ -147,7 +147,7 @@ def load_mitre_json() -> dict:
 # ==============================================================================
 
 
-def get_mitre_candidates(query: str, top_k: int = 25, offset: int = 0) -> tuple:
+def get_mitre_candidates(query: str, top_k: int = 25) -> tuple:
     """Semantic search for node use. Returns a tuple: (list_of_formatted_strings, metadata_map)"""
     retriever = get_retriever()
     if not retriever:
@@ -155,9 +155,12 @@ def get_mitre_candidates(query: str, top_k: int = 25, offset: int = 0) -> tuple:
 
     try:
         # 1. Hybrid Search
-        candidates = retriever.vector_store.similarity_search(query, k=top_k)
-        if not candidates:
+        candidates_with_score = retriever.vector_store.similarity_search_with_score(query, k=top_k)
+        if not candidates_with_score:
             return [], {}
+            
+        candidates = [doc for doc, _ in candidates_with_score]
+        qdrant_scores = [q_score for _, q_score in candidates_with_score]
 
         # 2. Rerank
         # Reevaluamos los candidatos devueltos por Qdrant para tener scores más finos.
@@ -217,14 +220,16 @@ def get_mitre_candidates(query: str, top_k: int = 25, offset: int = 0) -> tuple:
             )
 
         results_with_scores = []
-        for doc, score in zip(candidates, scores):
+        for doc, r_score, q_score in zip(candidates, scores, qdrant_scores):
             tech_id = str(doc.metadata.get("technique_id", "Unknown")).strip().upper()
             name = doc.metadata.get("name", "Unknown")
             tactics_str = doc.metadata.get("tactics", "")
             tactics = [t.strip() for t in tactics_str.split(",") if t.strip()]
             desc = doc.metadata.get("full_description", "No description available.")[:500]
 
-            results_with_scores.append((float(score), tech_id, name, tactics_str, tactics, desc))
+            final_score = (0.7 * float(r_score)) + (0.3 * float(q_score))
+
+            results_with_scores.append((final_score, tech_id, name, tactics_str, tactics, desc))
 
         # Ordenamos de mayor a menor
         results_with_scores.sort(key=lambda x: x[0], reverse=True)
@@ -232,9 +237,8 @@ def get_mitre_candidates(query: str, top_k: int = 25, offset: int = 0) -> tuple:
         # Filtramos los que superan el threshold
         top_results = [r for r in results_with_scores if r[0] >= threshold]
 
-        # SALVAVIDAS: Si el filtro fue demasiado estricto y eliminó todo, nos quedamos con los 3 mejores
         if len(top_results) == 0 and len(results_with_scores) > 0:
-            print(f"[DEBUG] Reranking adaptativo activado. Tomando Top 3 ignorando threshold.")
+            print("Adaptive reranking activated. Taking top 3 ignoring threshold.")
             top_results = results_with_scores[:3]
 
         metadata_map = {}

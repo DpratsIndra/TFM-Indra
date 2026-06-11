@@ -22,11 +22,10 @@ from src.core.ioc_masker import IoCMasker
 class ReportIngestor:
     """
     Fase 1: Ingesta y Particionado Semántico.
-    Objetivo: Transformar un PDF crudo en fragmentos de texto listos para el LLM.
-    - Modo Normal (Docling): Usa extracción tradicional para sacar texto y tablas.
-    - Modo VLM (Gemini): Convierte las páginas a imagen y le pide al LLM multimodal que transcriba
-      el texto. Muy útil para no perder info vital oculta en pantallazos negros de terminales.
-    Al final, ofusca los IoCs (IPs, hashes) para evitar sesgos y trocea el texto.
+    Transforma un PDF en fragmentos de texto.
+    - Modo Normal (Docling): Extracción tradicional.
+    - Modo VLM (Gemini): Convierte páginas a imagen y transcribe usando VLM.
+    Ofusca los IoCs y particiona el texto.
     """
 
     def __init__(
@@ -83,7 +82,6 @@ class ReportIngestor:
         logger.info(
             f"Loading PDF '{file_path}' using Multimodal VLM extraction (Gemini Flash)..."
         )
-        # Por ahora forzamos Gemini siempre para VLM, ya que el cluster remoto vLLM no tiene modelo visual.
         gemini_model = os.getenv("GEMINI_MODEL", "gemini-flash-lite-latest")
         llm = ChatGoogleGenerativeAI(model=gemini_model, temperature=0.0, max_retries=3)
 
@@ -177,9 +175,6 @@ class ReportIngestor:
         )
 
         try:
-            # Quitamos EasyOCR por completo porque es demasiado restrictivo.
-            # Docling tiene integrado RapidOCR por defecto que procesa de forma universal
-            # ruso, chino, árabe, japonés e inglés simultáneamente con un único modelo global sin crashear.
             pipeline_options = PdfPipelineOptions(do_ocr=True)
 
             converter = DocumentConverter(
@@ -359,7 +354,7 @@ class ReportIngestor:
                 # Fallback para los chunks del VLM que ya traen el page_number
                 doc.metadata["page_number"] = doc.metadata.get("page_number", "Unknown")
 
-            # Clean up the HTML comments so the LLM isn't distracted
+            # Clean up HTML comments.
             doc.page_content = re.sub(r" <!-- Page \d+ -->", "", doc.page_content)
 
         return final_docs

@@ -66,7 +66,7 @@ def run_evaluation():
     pipeline_type = args.pipeline
 
     print("\n" + "="*80)
-    print(f"🚀 INICIANDO EVALUACIÓN CTIBENCH (TEXT-LEVEL)")
+    print("🚀 INICIANDO EVALUACIÓN CTIBENCH (TEXT-LEVEL)")
     print(f"   Pipeline:           {pipeline_type.upper()}")
     print("="*80)
 
@@ -99,7 +99,7 @@ def run_evaluation():
         try:
             if pipeline_type == "langchain":
                 doc = Document(page_content=text, metadata={"chunk_index": idx, "page_number": 1})
-                candidates = retriever.get_filtered_mitre_candidates([doc], threshold=0.8)
+                candidates = retriever.get_filtered_mitre_candidates([doc], threshold=0.2)
                 if candidates:
                     detections, _ = analyzer.analyze_candidates(candidates)
                     predicted_ids = [d.technique_id for d in detections if d.is_present]

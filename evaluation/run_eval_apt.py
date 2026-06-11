@@ -3,7 +3,6 @@ import sys
 import json
 import time
 import argparse
-import contextlib
 from datetime import datetime
 from tqdm import tqdm
 
@@ -21,7 +20,7 @@ load_dotenv(override=True)
 
 def run_evaluation():
     """
-    Objetivo: Ejecutar una evaluación End-to-End sobre el dataset APT_REPORT.
+    Ejecutar una evaluación End-to-End sobre el dataset APT_REPORT.
     Se utiliza el nombre de la carpeta (ej. APT28) para obtener las técnicas de MITRE como Ground Truth.
     """
     parser = argparse.ArgumentParser(description="Run single-config E2E evaluation on APT_REPORT dataset")
@@ -36,7 +35,7 @@ def run_evaluation():
     pipeline = args.pipeline
 
     print("\n" + "="*80)
-    print(f"🚀 INICIANDO EVALUACIÓN APT_REPORT (CROSS-REFERENCE WITH MITRE GROUPS)")
+    print("🚀 INICIANDO EVALUACIÓN APT_REPORT (CROSS-REFERENCE WITH MITRE GROUPS)")
     print(f"   Pipeline:           {pipeline.upper()}")
     print(f"   VLM Extraction:     {vlm_mode}")
     print(f"   Prompt Repetition:  {rep_mode}")

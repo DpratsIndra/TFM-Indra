@@ -60,7 +60,7 @@ def generate_mapping_csv(base_path: str = "data/eval_datasets/ctihal"):
                     matched_md_path = override_full_path
                 break
                 
-        # Estrategia 1: Substring Matching (muy efectivo aquí)
+        # Estrategia 1: Substring Matching
         if not matched_md_path:
             sorted_indices = sorted(range(len(clean_md_bases)), key=lambda k: len(clean_md_bases[k]), reverse=True)
             for i in sorted_indices:

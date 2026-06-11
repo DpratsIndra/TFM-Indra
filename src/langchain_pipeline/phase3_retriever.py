@@ -15,8 +15,6 @@ logger = logging.getLogger(__name__)
 class CandidateRetriever:
     """
     Handles Phase 3 of the LangChain pipeline: Hybrid Retrieval and Cross-Encoder Reranking.
-    Acts as a high-precision funnel using the 'Retrieve-then-Rerank' pattern to reduce
-    the load and hallucinations in the subsequent LLM inference phase.
     """
 
     def __init__(self, vector_store: QdrantVectorStore, device: str = None) -> None:
@@ -55,7 +53,7 @@ class CandidateRetriever:
 
     def _get_initial_candidates(
         self, chunk: Document, top_k: int = 25
-    ) -> List[Document]:
+    ) -> List[tuple]:
         """
         Retrieves the initial set of candidate MITRE techniques from Qdrant.
 
@@ -64,11 +62,11 @@ class CandidateRetriever:
             top_k (int): The number of candidates to retrieve.
 
         Returns:
-            List[Document]: The top K MITRE techniques retrieved via semantic search.
+            List[tuple]: List of tuples containing (Document, score).
         """
         # Execute the vector similarity search
-        candidates = self.vector_store.similarity_search(chunk.page_content, k=top_k)
-        return candidates
+        candidates_with_score = self.vector_store.similarity_search_with_score(chunk.page_content, k=top_k)
+        return candidates_with_score
 
     def get_filtered_mitre_candidates(
         self, report_chunks: List[Document], threshold: float = None
@@ -100,8 +98,11 @@ class CandidateRetriever:
             )
 
         chunk_results = []
-        for chunk, candidates in all_initial_candidates:
+        for chunk, candidates_with_score in all_initial_candidates:
             valid_candidates = []
+            candidates = [doc for doc, _ in candidates_with_score]
+            qdrant_scores = [q_score for _, q_score in candidates_with_score]
+            
             if use_remote and not use_local_reranker:
                 # Le mandamos los candidatos en texto crudo a TEI/Jina para que haga un
                 # cross-encoding real contra la query y nos devuelva un score ajustado.
@@ -129,17 +130,21 @@ class CandidateRetriever:
                             # El endpoint TEI/Jina nos devuelve los logits en bruto (pueden ser negativos o > 1).
                             # Overflow-safe Sigmoid para forzarlos a rango [0, 1] y mantener compatibilidad.
                             if raw_score < -709:
-                                score = 0.0
+                                r_score = 0.0
                             else:
-                                score = 1 / (1 + math.exp(-raw_score))
+                                r_score = 1 / (1 + math.exp(-raw_score))
+                                
                             doc = candidates[idx]
+                            q_score = qdrant_scores[idx]
+                            final_score = (0.7 * float(r_score)) + (0.3 * float(q_score))
+                            
                             candidates_with_scores.append(
                                 {
                                     "technique_id": doc.metadata.get("technique_id", "Unknown"),
                                     "name": doc.metadata.get("name", "Unknown"),
                                     "tactics": [t.strip() for t in doc.metadata.get("tactics", "").split(",") if t.strip()],
                                     "description": doc.metadata.get("full_description", ""),
-                                    "score": round(score, 4),
+                                    "score": round(final_score, 4),
                                 }
                             )
 
@@ -147,7 +152,7 @@ class CandidateRetriever:
                         valid_candidates = [c for c in candidates_with_scores if c["score"] >= threshold]
 
                         if len(valid_candidates) == 0 and len(candidates_with_scores) > 0:
-                            logger.debug(f"[DEBUG] Reranking adaptativo activado. Tomando Top 3 ignorando threshold.")
+                            logger.debug("Adaptive reranking activated. Taking top 3 ignoring threshold.")
                             valid_candidates = candidates_with_scores[:3]
                 except Exception as e:
                     logger.error(f"Error calling remote reranker: {e}")
@@ -159,14 +164,15 @@ class CandidateRetriever:
                         pairs, batch_size=32, activation_fn=torch.nn.Sigmoid()
                     )
                     candidates_with_scores = []
-                    for doc, score in zip(candidates, scores):
+                    for doc, r_score, q_score in zip(candidates, scores, qdrant_scores):
+                        final_score = (0.7 * float(r_score)) + (0.3 * float(q_score))
                         candidates_with_scores.append(
                             {
                                 "technique_id": doc.metadata.get("technique_id", "Unknown"),
                                 "name": doc.metadata.get("name", "Unknown"),
                                 "tactics": [t.strip() for t in doc.metadata.get("tactics", "").split(",") if t.strip()],
                                 "description": doc.metadata.get("full_description", ""),
-                                "score": round(float(score), 4),
+                                "score": round(final_score, 4),
                             }
                         )
 
@@ -174,16 +180,16 @@ class CandidateRetriever:
                     valid_candidates = [c for c in candidates_with_scores if c["score"] >= threshold]
 
                     if len(valid_candidates) == 0 and len(candidates_with_scores) > 0:
-                        logger.debug(f"[DEBUG] Reranking adaptativo activado. Tomando Top 3 ignorando threshold.")
+                        logger.debug("Adaptive reranking activated. Taking top 3 ignoring threshold.")
                         valid_candidates = candidates_with_scores[:3]
 
                 if valid_candidates:
                     logger.debug(
-                        f"[DEBUG] Chunk {chunk.page_content[:30]}... Max valid score: {max(c['score'] for c in valid_candidates)}"
+                        f"Chunk {chunk.page_content[:30]}... Max valid score: {max(c['score'] for c in valid_candidates)}"
                     )
                 else:
                     logger.debug(
-                        f"[DEBUG] Chunk {chunk.page_content[:30]}... 0 candidates passed threshold {threshold}. Max score was: {max(scores) if len(scores) > 0 else 'N/A'}"
+                        f"Chunk {chunk.page_content[:30]}... 0 candidates passed threshold {threshold}. Max score was: {max(scores) if len(scores) > 0 else 'N/A'}"
                     )
 
             if valid_candidates:

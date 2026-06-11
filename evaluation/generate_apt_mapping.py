@@ -1,4 +1,3 @@
-import urllib.request
 import json
 import os
 
@@ -59,7 +58,7 @@ def generate_mapping(output_path: str = "data/eval_datasets/APT_REPORT/mitre_gro
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(mapping, f, indent=4)
         
-    print(f"[*] ¡Éxito! Mapeo creado en {output_path} con {len(mapping)} alias de grupos APT resolubles.")
+    print(f"[*] Mapeo creado en {output_path} con {len(mapping)} alias de grupos APT resolubles.")
 
 if __name__ == "__main__":
     generate_mapping()

@@ -5,7 +5,7 @@ class IoCMasker:
     """
     A utility class to mask Indicators of Compromise (IoCs) in Cyber Threat Intelligence (CTI) reports.
     Replaces raw IPs, hashes, URLs, emails, and domains with typed semantic tags to prevent
-    data leakage or hallucination in embedding spaces and LLM prompts.
+    data leakage or hallucination in embedding spaces.
     """
 
     def __init__(self) -> None:

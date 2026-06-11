@@ -35,7 +35,7 @@ def main():
     out_df = pd.DataFrame(records)
     os.makedirs(os.path.dirname(csv_path), exist_ok=True)
     out_df.to_csv(csv_path, index=False)
-    print(f"[*] ¡Éxito! Generado {csv_path} con {len(out_df)} registros.")
+    print(f"[*] Generado {csv_path} con {len(out_df)} registros.")
 
 if __name__ == "__main__":
     main()

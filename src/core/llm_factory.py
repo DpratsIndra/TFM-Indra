@@ -13,17 +13,26 @@ def get_llm(temperature: float = 0.0) -> BaseChatModel:
     profile = os.getenv("EXECUTION_PROFILE", "LOCAL").upper()
 
     if profile == "REMOTE":
-        vllm_base_url = os.getenv("VLLM_BASE_URL")
+        use_gemma = os.getenv("USE_GEMMA4", "False").lower() in ("true", "1", "yes")
+        
+        if use_gemma:
+            vllm_base_url = os.getenv("VLLM_BASE_URL_GEMMA", "http://10.0.152.198:8003/v1")
+            model_name = os.getenv("VLLM_MODEL_NAME_GEMMA", "gemma4")
+        else:
+            vllm_base_url = os.getenv("VLLM_BASE_URL")
+            model_name = os.getenv("VLLM_MODEL_NAME", "gpt-oss-20b")
+
         if not vllm_base_url:
             raise ValueError("VLLM_BASE_URL is not set in .env")
 
         return ChatOpenAI(
-            model=os.getenv("VLLM_MODEL_NAME", "gpt-oss-20b"),
+            model=model_name,
             base_url=vllm_base_url,
             api_key="EMPTY",
             temperature=temperature,
-            max_retries=1,  # Reducimos los reintentos. Si falla a los 10 min, mejor cortar.
-            timeout=600.0  # <--- 10 MINUTOS. Más que esto significa que el servidor vLLM está muerto.
+            model_kwargs={"seed": 42},
+            max_retries=1,
+            timeout=600.0
         )
     else:
         model_name = os.getenv("GEMINI_MODEL", "gemini-flash-lite-latest")

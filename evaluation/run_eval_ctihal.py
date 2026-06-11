@@ -3,7 +3,6 @@ import sys
 import json
 import time
 import argparse
-import contextlib
 from datetime import datetime
 from tqdm import tqdm
 
@@ -21,7 +20,7 @@ load_dotenv(override=True)
 
 def run_evaluation():
     """
-    Objetivo: Ejecutar una evaluación End-to-End (E2E) sobre el dataset CTI-HAL.
+    Ejecutar una evaluación End-to-End (E2E) sobre el dataset CTI-HAL.
     A diferencia de TRAM (que evalúa oraciones sueltas), este script procesa PDFs enteros,
     lanzando el pipeline completo (ingesta, vector store, inferencia) y comparando
     las técnicas extraídas contra los ficheros markdown (ground truth) reales.
@@ -38,7 +37,7 @@ def run_evaluation():
     pipeline = args.pipeline
 
     print("\n" + "="*80)
-    print(f"🚀 INICIANDO EVALUACIÓN CTI-HAL")
+    print("🚀 INICIANDO EVALUACIÓN CTI-HAL")
     print(f"   Pipeline:           {pipeline.upper()}")
     print(f"   VLM Extraction:     {vlm_mode}")
     print(f"   Prompt Repetition:  {rep_mode}")
