@@ -25,6 +25,8 @@ def get_llm(temperature: float = 0.0) -> BaseChatModel:
         if not vllm_base_url:
             raise ValueError("VLLM_BASE_URL is not set in .env")
 
+        llm_timeout = float(os.getenv("LLM_TIMEOUT_SECONDS", "120.0"))
+
         return ChatOpenAI(
             model=model_name,
             base_url=vllm_base_url,
@@ -32,7 +34,7 @@ def get_llm(temperature: float = 0.0) -> BaseChatModel:
             temperature=temperature,
             seed=42,
             max_retries=1,
-            timeout=600.0
+            timeout=llm_timeout
         )
     else:
         model_name = os.getenv("GEMINI_MODEL", "gemini-flash-lite-latest")

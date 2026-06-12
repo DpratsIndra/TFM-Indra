@@ -17,7 +17,8 @@ Directory structure:
     │   ├── run_eval.py
     │   ├── run_eval_apt.py
     │   ├── run_eval_ctibench.py
-    │   └── run_eval_ctihal.py
+    │   ├── run_eval_ctihal.py
+    │   └── run_eval_embeddings.py
     ├── infrastructure/
     │   └── docker-compose.yml
     ├── src/
@@ -1790,6 +1791,139 @@ if __name__ == "__main__":
 
 
 ================================================
+FILE: evaluation/run_eval_embeddings.py
+================================================
+import os
+import sys
+import argparse
+import logging
+from tqdm import tqdm
+import torch
+
+sys.path.insert(0, os.path.abspath("."))
+from evaluation.data_loaders import TramDataLoader
+from src.langgraph_agents.tools import get_retriever
+
+logging.basicConfig(level=logging.INFO, format="%(message)s")
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("urllib3").setLevel(logging.WARNING)
+logging.getLogger("qdrant_client").setLevel(logging.WARNING)
+logging.getLogger("sentence_transformers").setLevel(logging.WARNING)
+def evaluate_embeddings(use_reranker=False, qdrant_k=100, rerank_k=25, subset=None):
+    print("="*60)
+    print(f"TRAM EVALUATION")
+    print(f"Mode: {'Qdrant + Reranker' if use_reranker else 'Qdrant Only'}")
+    if subset:
+        print(f"Subset: {subset} random samples")
+    print("="*60)
+
+    # Load TRAM dataset
+    loader = TramDataLoader()
+    tram_file = "data/eval_datasets/tram2/multi_label.json"
+    
+    if not os.path.exists(tram_file):
+        print(f"[ERROR] TRAM dataset not found at {tram_file}")
+        return
+
+    df = loader.load(tram_file)
+    
+    # Filter out empty sentences first so the subset only contains useful data
+    df = df[df['true_labels'].map(lambda x: isinstance(x, list) and len(x) > 0)]
+    
+    if subset and subset < len(df):
+        df = df.sample(n=subset, random_state=42)
+        
+    print(f"[*] Loaded {len(df)} labeled sentences from TRAM.")
+
+    retriever = get_retriever()
+    if not retriever:
+        print("[ERROR] Could not connect to Qdrant.")
+        return
+
+    if use_reranker and not getattr(retriever, 'reranker', None):
+        print("[WARNING] Reranker is disabled or not loaded. Falling back to Qdrant only.")
+        use_reranker = False
+
+    # Metrics
+    if use_reranker:
+        top_k_thresholds = [1, 5, 10, 25] # No podemos evaluar > 25 si solo rerankeamos 25
+    else:
+        top_k_thresholds = [1, 5, 10, 25, 50, 100]
+        
+    hits_at_k = {k: 0 for k in top_k_thresholds}
+    labels_found_at_k = {k: 0 for k in top_k_thresholds}
+    total_samples = 0
+    total_true_labels = 0
+
+    print(f"[*] Running queries... (This may take a while{' on CPU' if use_reranker else ''})")
+    
+    for idx, row in tqdm(df.iterrows(), total=len(df)):
+        text = row['text']
+        true_labels = row['true_labels']
+        
+        if not true_labels:
+            continue
+            
+        total_samples += 1
+        total_true_labels += len(true_labels)
+
+        # 1. QDRANT RETRIEVAL
+        candidates_with_score = retriever.vector_store.similarity_search_with_score(text, k=qdrant_k)
+        
+        if use_reranker:
+            # Tomamos solo los top 25 de Qdrant para pasarlos por el Reranker (igual que en producción)
+            candidates_to_rerank = candidates_with_score[:rerank_k]
+            candidates = [doc for doc, _ in candidates_to_rerank]
+            qdrant_scores = [q_score for _, q_score in candidates_to_rerank]
+            
+            pairs = [[text, doc.page_content] for doc in candidates]
+            if pairs:
+                scores = retriever.reranker.predict(pairs, batch_size=32, activation_fn=torch.nn.Sigmoid())
+                
+                combined = []
+                for doc, r_score, q_score in zip(candidates, scores, qdrant_scores):
+                    # Usamos la misma fórmula 70/30 que tienes en producción
+                    final_score = (0.7 * float(r_score)) + (0.3 * float(q_score))
+                    tech_id = doc.metadata.get("technique_id", "Unknown").upper()
+                    combined.append((tech_id, final_score))
+                
+                combined.sort(key=lambda x: x[1], reverse=True)
+                retrieved_ids = [tech_id for tech_id, _ in combined]
+            else:
+                retrieved_ids = []
+        else:
+            retrieved_ids = [doc.metadata.get("technique_id", "Unknown").upper() for doc, _ in candidates_with_score]
+
+        # Evaluate Recall@K
+        for k in top_k_thresholds:
+            top_k_retrieved = set(retrieved_ids[:k])
+            found_labels = [label for label in true_labels if label in top_k_retrieved]
+            labels_found_at_k[k] += len(found_labels)
+            if len(found_labels) > 0:
+                hits_at_k[k] += 1
+
+    print("\n" + "="*60)
+    print(f"EVALUATION RESULTS: {'QDRANT + RERANKER (Top 25)' if use_reranker else 'QDRANT ONLY (Top 100)'}")
+    print("="*60)
+    print(f"Total Sentences Evaluated: {total_samples}")
+    print(f"Total True Labels to Find: {total_true_labels}\n")
+
+    for k in top_k_thresholds:
+        hit_rate = (hits_at_k[k] / total_samples) * 100
+        recall = (labels_found_at_k[k] / total_true_labels) * 100
+        print(f"Top-{k:<3} | Hit Rate (Sentence): {hit_rate:>5.2f}% | Recall (Labels): {recall:>5.2f}%")
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Evaluate Embeddings on TRAM")
+    parser.add_argument("--use-reranker", action="store_true", help="Enable Cross-Encoder Reranking")
+    parser.add_argument("--subset", type=int, default=None, help="Number of random samples to evaluate (for faster testing)")
+    args = parser.parse_args()
+    
+    evaluate_embeddings(use_reranker=args.use_reranker, subset=args.subset)
+
+
+
+================================================
 FILE: infrastructure/docker-compose.yml
 ================================================
 
@@ -1973,14 +2107,14 @@ def get_llm(temperature: float = 0.0) -> BaseChatModel:
             base_url=vllm_base_url,
             api_key="EMPTY",
             temperature=temperature,
-            model_kwargs={"seed": 42},
+            seed=42,
             max_retries=1,
             timeout=600.0
         )
     else:
         model_name = os.getenv("GEMINI_MODEL", "gemini-flash-lite-latest")
         return ChatGoogleGenerativeAI(
-            model=model_name, temperature=temperature, max_retries=3, model_kwargs={"seed": 42}
+            model=model_name, temperature=temperature, max_retries=3, seed=42
         )
 
 
@@ -2818,10 +2952,7 @@ class MitreIndexer:
         base_desc = technique.get("description", "").strip()
 
         keywords = []
-        tactics = technique.get("tactics", [])
-        if tactics:
-            keywords.append(f"Tactics: {', '.join(tactics)}")
-
+        
         platforms = technique.get("platforms", [])
         if platforms:
             keywords.append(f"Platforms: {', '.join(platforms)}")
@@ -2837,7 +2968,7 @@ class MitreIndexer:
         # Combine base description with semantic keywords
         if keywords:
             enriched_text = (
-                f"{base_desc}\n\nTechnical Keywords & Examples: {'; '.join(keywords)}"
+                f"{base_desc}\n\nMetadata:\n- " + "\n- ".join(keywords)
             )
         else:
             enriched_text = base_desc
@@ -2866,21 +2997,33 @@ class MitreIndexer:
         for tech in techniques:
             enriched_content = self._enrich_description(tech)
 
+            # Inyectamos la cabecera completa en el full_description para que el validador LLM la reciba
+            tech_id = tech.get("technique_id", "Unknown")
+            tech_name = tech.get("name", "Unknown")
+            tactics = ", ".join(tech.get("tactics", []))
+            
+            full_description_with_header = f"Technique: {tech_id} - {tech_name}\nTactics: {tactics}\n\n{enriched_content}"
+
             # Metadata must be flat and use simple types for Qdrant compatibility
             metadata = {
-                "technique_id": tech.get("technique_id"),
-                "name": tech.get("name"),
-                "tactics": ", ".join(tech.get("tactics", [])),
+                "technique_id": tech_id,
+                "name": tech_name,
+                "tactics": tactics,
                 "platforms": ", ".join(tech.get("platforms", [])),
-                # CRITICAL FIX: Pass the enriched content (which includes tools and malware names)
-                # to the metadata, so the LLM Validator can read the same evidence Qdrant used.
-                "full_description": enriched_content,
+                "full_description": full_description_with_header,
             }
 
             # Chunk the enriched content for fast Cross-Encoder evaluation
             chunks = splitter.split_text(enriched_content)
+            tech_id = tech.get("technique_id", "Unknown")
+            tech_name = tech.get("name", "Unknown")
+            tactics = ", ".join(tech.get("tactics", []))
+            
             for chunk in chunks:
-                documents.append(Document(page_content=chunk, metadata=metadata))
+                # CRITICAL FIX: Inject the technique name, ID and tactics into EVERY chunk.
+                # This prevents "Lost in the middle" amnesia for the Cross-Encoder.
+                chunk_with_context = f"Technique: {tech_id} - {tech_name}\nTactics: {tactics}\n\n{chunk}"
+                documents.append(Document(page_content=chunk_with_context, metadata=metadata))
 
         logger.info(f"Prepared {len(documents)} Document objects for vectorization.")
 
@@ -3185,7 +3328,8 @@ from langchain_core.language_models.chat_models import BaseChatModel
 
 logger = logging.getLogger(__name__)
 
-# Cargar variables de entorno (ej. USE_PROMPT_REPETITION, ENVIRONMENT_PROFILE)
+from tenacity import retry, stop_after_attempt, wait_exponential
+from src.core.schemas import ChunkExtraction, TTPDetection, Evidence
 load_dotenv()
 
 
@@ -3291,43 +3435,40 @@ class TTPAnalyzer:
                 }
             )
 
-        logger.info(
-            f"Prepared {len(inputs)} chunks for LLM inference (Chunk-by-Chunk)."
-        )
-        batch_responses = []
+        logger.info(f"Prepared {len(inputs)} chunks for LLM inference (Chunk-by-Chunk).")
+        batch_responses = [None] * len(inputs)
         artificial_delay = 0.0
-
         max_workers = int(os.getenv("MAX_CONCURRENT_CHUNKS", "2"))
+        is_gemini = "google" in str(type(self.llm)).lower()
 
-        if self.execution_profile == "REMOTE" or max_workers > 1:
-            logger.info(f"Running LangChain inference concurrently (max_concurrency={max_workers})...")
+        @retry(stop=stop_after_attempt(6), wait=wait_exponential(multiplier=2, min=5, max=60), reraise=True)
+        def _invoke_chain(inp):
+            return chain.invoke(inp)
+
+        def _process_chunk(idx, inp):
+            logger.info(f"[{idx+1}/{len(inputs)}] Querying LLM for Chunk {inp['_location']}...")
             try:
-                # return_exceptions=True devuelve el error en la lista en lugar de bloquear el proceso
-                batch_responses = chain.batch(
-                    inputs, 
-                    config={"max_concurrency": max_workers},
-                    return_exceptions=True 
-                )
+                res = _invoke_chain(inp)
+                return res
             except Exception as e:
-                logger.error(f"Error crítico en el orquestador de batch: {e}")
-        else:
-            logger.info("LOCAL Profile detected: Running chain sequentially...")
-            is_gemini = "google" in str(type(self.llm)).lower()
-            for i, inp in enumerate(inputs, 1):
-                try:
-                    logger.info(
-                        f"[{i}/{len(inputs)}] Querying LLM for Chunk {inp['_location']}..."
-                    )
-                    res = chain.invoke(inp)
-                    batch_responses.append(res)
+                logger.error(f"Error processing chunk {inp['_location']} after retries: {e}")
+                return e
 
-                    if is_gemini and i < len(inputs):
-                        sleep_time = 4.5
-                        time.sleep(sleep_time)
-                        artificial_delay += sleep_time
-                except Exception as e:
-                    logger.error(f"Error processing chunk {inp['_location']}: {e}")
-                    raise RuntimeError(f"Ejecución abortada por fallo en chunk {inp['_location']}: {e}") from e
+        import concurrent.futures
+
+        if max_workers > 1:
+            logger.info(f"Running LangChain inference concurrently (max_workers={max_workers})...")
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = [executor.submit(_process_chunk, i, inp) for i, inp in enumerate(inputs)]
+                for i, future in enumerate(futures):
+                    batch_responses[i] = future.result()
+        else:
+            logger.info("Running LangChain sequentially (max_workers=1)...")
+            for i, inp in enumerate(inputs):
+                batch_responses[i] = _process_chunk(i, inp)
+                if is_gemini and i < len(inputs) - 1:
+                    time.sleep(4.5)
+                    artificial_delay += 4.5
 
         # Reducer: Consolidar ChunkExtraction de vuelta a List[TTPDetection]
         global_ttps = {}
@@ -3591,9 +3732,13 @@ def process_full_report(
 
     # 1. MAP: Loop over sanitized_chunks using ThreadPoolExecutor for parallelism
     max_workers = int(os.getenv("MAX_CONCURRENT_CHUNKS", "2"))
-    print(
-        f"[*] Starting MAP phase across {len(sanitized_chunks)} chunks (Concurrent workers: {max_workers})..."
-    )
+    print(f"[*] Starting MAP phase across {len(sanitized_chunks)} chunks (Concurrent workers: {max_workers})...")
+
+    # FIX: Pre-warm the caches on the MAIN thread to prevent Race Conditions.
+    # If 2 threads try to load the models at the same time, it duplicates RAM usage and triggers the OOM Killer.
+    from src.langgraph_agents.tools import get_retriever, load_mitre_json
+    get_retriever()
+    load_mitre_json()
 
     def _process_single_chunk(args):
         i, chunk_data = args
@@ -3660,7 +3805,8 @@ def process_full_report(
     final_state_update = consolidator_node(global_state)
     consolidator_time = time.time() - t0_red
 
-    print("[*] Reduce phase complete. Report ready.")
+    final_count = len(final_state_update.get("final_json", []))
+    print(f"[*] Reduce phase complete. Consolidated {len(master_ttp_list)} raw extractions into {final_count} distinct TTPs. Report ready.")
 
     # Devolver estructura empaquetada con TTPs y Tiempos
     return {
@@ -4036,12 +4182,22 @@ class ValidationResult(BaseModel):
 # ==============================================================================
 
 
+from tenacity import retry, stop_after_attempt, wait_exponential
+
+@retry(
+    stop=stop_after_attempt(6), 
+    wait=wait_exponential(multiplier=2, min=5, max=60),
+    reraise=True
+)
+def _invoke_with_retry(callable_chain, input_data):
+    return callable_chain.invoke(input_data)
+
 def safe_invoke(callable_chain, input_data):
-    """Safely invokes a chain or agent, returning None on failure."""
+    """Safely invokes a chain or agent with exponential backoff, returning None only after all retries fail."""
     try:
-        return callable_chain.invoke(input_data)
+        return _invoke_with_retry(callable_chain, input_data)
     except Exception as e:
-        print(f"[ERROR] Model Invocation Error: {e}")
+        print(f"[ERROR] Model Invocation Error after retries: {e}")
         return None
 
 
@@ -4121,10 +4277,10 @@ def extractor_node(state: ChunkState) -> dict:
         sys_prompt = (
             "Role: Cyber Threat Intelligence Analyst.\n"
             "Task: Extract a comma-separated list of abstract cybersecurity behaviors, tactics, and mechanisms from the text.\n"
-            "Instructions: Translate specific tools into their tactical purpose. Output ONLY the keywords in English.\n\n"
+            "Instructions: Translate specific actions into their tactical purpose, BUT ALWAYS preserve specific technology and tool names (e.g., PowerShell, Ngrok, WinRAR, WMI). Output ONLY the keywords in English.\n\n"
             "EXAMPLE:\n"
-            "Source Text: 'The actors sent an email with a malicious PDF called invoice.pdf that executes a hidden macro.'\n"
-            "Output: Spearphishing Attachment, Malicious File, User Execution, Phishing, Social Engineering\n"
+            "Source Text: 'The actors used a PowerShell script to download a payload called invoice.pdf.'\n"
+            "Output: Spearphishing Attachment, PowerShell, Malicious File, Ingress Tool Transfer, Script Execution\n"
         )
 
         if val_feedback:
@@ -4155,10 +4311,9 @@ def extractor_node(state: ChunkState) -> dict:
 
         translation_chain = translator_prompt | translator_llm | StrOutputParser()
 
-        try:
-            abstract_keywords = translation_chain.invoke({"chunk_text": chunk_text})
-        except Exception as e:
-            print(f"[ERROR] [Chunk {c_idx}] Translation Error: {e}")
+        abstract_keywords = safe_invoke(translation_chain, {"chunk_text": chunk_text})
+        if abstract_keywords is None:
+            print(f"[ERROR] [Chunk {c_idx}] Translation Error: LLM failed after retries.")
             abstract_keywords = ""
 
         print(
@@ -4684,7 +4839,6 @@ def get_mitre_candidates(query: str, top_k: int = 25) -> tuple:
             tactics_str = doc.metadata.get("tactics", "")
             tactics = [t.strip() for t in tactics_str.split(",") if t.strip()]
             desc = doc.metadata.get("full_description", "No description available.")[:500]
-
             final_score = (0.7 * float(r_score)) + (0.3 * float(q_score))
 
             results_with_scores.append((final_score, tech_id, name, tactics_str, tactics, desc))

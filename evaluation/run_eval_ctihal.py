@@ -61,6 +61,15 @@ def run_evaluation():
     detailed_results = []
     hierarchy_stats = {"total_exact_matches": 0, "total_more_detailed": 0, "total_more_general": 0}
     
+    # Definir ruta de salida antes del bucle para auto-guardado
+    tag_vlm = "vlm_on" if str(vlm_mode).lower() in ["true", "1", "yes"] else "vlm_off"
+    tag_rep = "rep_on" if str(rep_mode).lower() in ["true", "1", "yes"] else "rep_off"
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M")
+    
+    output_filename = f"ctihal_eval_{pipeline}_{tag_vlm}_{tag_rep}_{timestamp}.json"
+    output_path = os.path.join("data", "output", "evaluations", output_filename)
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    
     # Bucle de inferencia E2E
     for idx, row in tqdm(df.iterrows(), total=len(df), desc=f"Eval: {pipeline}"):
         pdf_path = row['source_file']
@@ -133,9 +142,18 @@ def run_evaluation():
             
         except Exception as e:
             tqdm.write(f" [!] ERROR crítico en {pdf_name}: {e}")
-            sys.exit(1)
+            detailed_results.append({"source_file": pdf_path, "error": str(e)})
         
         predicted_labels.append(predicted_ids)
+        
+        # NUEVO: AUTO-GUARDADO (CHECKPOINT)
+        partial_output = {
+            "status": f"INCOMPLETE - Processed {idx + 1}/{len(df)}",
+            "hierarchy_analysis": hierarchy_stats,
+            "detailed_executions": detailed_results
+        }
+        with open(output_path, "w", encoding="utf-8") as f:
+            json.dump(partial_output, f, indent=4)
         
         # Cuidar el Rate Limit del Free Tier entre documentos pesados
         time.sleep(10)
@@ -159,15 +177,6 @@ def run_evaluation():
         "detailed_executions": detailed_results
     }
     
-    # Nombres de archivo dinámicos basados en la config actual
-    tag_vlm = "vlm_on" if str(vlm_mode).lower() in ["true", "1", "yes"] else "vlm_off"
-    tag_rep = "rep_on" if str(rep_mode).lower() in ["true", "1", "yes"] else "rep_off"
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M")
-    
-    output_filename = f"ctihal_eval_{pipeline}_{tag_vlm}_{tag_rep}_{timestamp}.json"
-    output_path = os.path.join("data", "output", "evaluations", output_filename)
-    
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(final_output, f, indent=4)
         

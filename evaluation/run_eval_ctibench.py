@@ -87,9 +87,16 @@ def run_evaluation():
     if pipeline_type == "langchain":
         retriever, analyzer = setup_langchain_components()
         
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M")
+    output_filename = f"ctibench_eval_{pipeline_type}_{timestamp}.json"
+    output_path = os.path.join("data", "output", "evaluations", output_filename)
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        
     predicted_labels = []
     detailed_results = []
     hierarchy_stats = {"total_exact_matches": 0, "total_more_detailed": 0, "total_more_general": 0}
+    
+    start_time = time.time()
     
     for idx, row in tqdm(df.iterrows(), total=len(df), desc=f"Eval: {pipeline_type}"):
         text = row['text']
@@ -165,38 +172,49 @@ def run_evaluation():
             
             detailed_results.append({
                 "sentence_id": idx,
+                "source_file": f"ctibench_doc_{idx}",
                 "text": text,
                 "true_labels": true_lbls,
                 "predicted_labels_raw": [r.get("technique_id") for r in extracted_payload if "technique_id" in r],
                 "predicted_labels_normalized": predicted_ids,
                 "metrics": {"TP": len(tp), "FP": len(fp), "FN": len(fn)},
                 "traceability_summary": traceability_summary,
+                "timing_breakdown": {},
                 "extracted_ttps": extracted_payload
             })
             
         except Exception as e:
             tqdm.write(f" [!] ERROR crítico en id {idx}: {e}")
             predicted_ids = []
-            detailed_results.append({"sentence_id": idx, "error": str(e)})
+            detailed_results.append({"sentence_id": idx, "source_file": f"ctibench_doc_{idx}", "error": str(e)})
             
         predicted_labels.append(predicted_ids)
+        
+        # NUEVO: AUTO-GUARDADO (CHECKPOINT)
+        partial_output = {
+            "status": f"INCOMPLETE - Processed {idx + 1}/{len(df)}",
+            "total_execution_minutes": round((time.time() - start_time) / 60.0, 2),
+            "hierarchy_analysis": hierarchy_stats,
+            "detailed_executions": detailed_results
+        }
+        with open(output_path, "w", encoding="utf-8") as f:
+            json.dump(partial_output, f, indent=4)
+            
         time.sleep(0.5)  # Breve pausa para no saturar APIs
         
     df['predicted_labels'] = predicted_labels
     evaluator = Evaluator(df)
     results = evaluator.evaluate()
     
+    total_execution_minutes = round((time.time() - start_time) / 60.0, 2)
+    
     final_output = {
+        "total_execution_minutes": total_execution_minutes,
         "global_metrics": results,
         "hierarchy_analysis": hierarchy_stats,
         "detailed_executions": detailed_results
     }
     
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M")
-    output_filename = f"ctibench_eval_{pipeline_type}_{timestamp}.json"
-    output_path = os.path.join("data", "output", "evaluations", output_filename)
-    
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(final_output, f, indent=4)
         
