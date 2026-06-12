@@ -10,22 +10,34 @@ from evaluation.data_loaders import TramDataLoader
 from src.langgraph_agents.tools import get_retriever
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
-
-def evaluate_embeddings(use_reranker=False, qdrant_k=100, rerank_k=25):
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("urllib3").setLevel(logging.WARNING)
+logging.getLogger("qdrant_client").setLevel(logging.WARNING)
+logging.getLogger("sentence_transformers").setLevel(logging.WARNING)
+def evaluate_embeddings(use_reranker=False, qdrant_k=100, rerank_k=25, subset=None):
     print("="*60)
     print(f"TRAM EVALUATION")
     print(f"Mode: {'Qdrant + Reranker' if use_reranker else 'Qdrant Only'}")
+    if subset:
+        print(f"Subset: {subset} random samples")
     print("="*60)
 
     # Load TRAM dataset
     loader = TramDataLoader()
-    tram_file = "data/eval_datasets/TRAM/multi_label.json"
+    tram_file = "data/eval_datasets/tram2/multi_label.json"
     
     if not os.path.exists(tram_file):
         print(f"[ERROR] TRAM dataset not found at {tram_file}")
         return
 
     df = loader.load(tram_file)
+    
+    # Filter out empty sentences first so the subset only contains useful data
+    df = df[df['true_labels'].map(lambda x: isinstance(x, list) and len(x) > 0)]
+    
+    if subset and subset < len(df):
+        df = df.sample(n=subset, random_state=42)
+        
     print(f"[*] Loaded {len(df)} labeled sentences from TRAM.")
 
     retriever = get_retriever()
@@ -109,6 +121,7 @@ def evaluate_embeddings(use_reranker=False, qdrant_k=100, rerank_k=25):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Evaluate Embeddings on TRAM")
     parser.add_argument("--use-reranker", action="store_true", help="Enable Cross-Encoder Reranking")
+    parser.add_argument("--subset", type=int, default=None, help="Number of random samples to evaluate (for faster testing)")
     args = parser.parse_args()
     
-    evaluate_embeddings(use_reranker=args.use_reranker)
+    evaluate_embeddings(use_reranker=args.use_reranker, subset=args.subset)
