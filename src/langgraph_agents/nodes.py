@@ -78,12 +78,22 @@ class ValidationResult(BaseModel):
 # ==============================================================================
 
 
+from tenacity import retry, stop_after_attempt, wait_exponential
+
+@retry(
+    stop=stop_after_attempt(6), 
+    wait=wait_exponential(multiplier=2, min=5, max=60),
+    reraise=True
+)
+def _invoke_with_retry(callable_chain, input_data):
+    return callable_chain.invoke(input_data)
+
 def safe_invoke(callable_chain, input_data):
-    """Safely invokes a chain or agent, returning None on failure."""
+    """Safely invokes a chain or agent with exponential backoff, returning None only after all retries fail."""
     try:
-        return callable_chain.invoke(input_data)
+        return _invoke_with_retry(callable_chain, input_data)
     except Exception as e:
-        print(f"[ERROR] Model Invocation Error: {e}")
+        print(f"[ERROR] Model Invocation Error after retries: {e}")
         return None
 
 
@@ -163,10 +173,10 @@ def extractor_node(state: ChunkState) -> dict:
         sys_prompt = (
             "Role: Cyber Threat Intelligence Analyst.\n"
             "Task: Extract a comma-separated list of abstract cybersecurity behaviors, tactics, and mechanisms from the text.\n"
-            "Instructions: Translate specific tools into their tactical purpose. Output ONLY the keywords in English.\n\n"
+            "Instructions: Translate specific actions into their tactical purpose, BUT ALWAYS preserve specific technology and tool names (e.g., PowerShell, Ngrok, WinRAR, WMI). Output ONLY the keywords in English.\n\n"
             "EXAMPLE:\n"
-            "Source Text: 'The actors sent an email with a malicious PDF called invoice.pdf that executes a hidden macro.'\n"
-            "Output: Spearphishing Attachment, Malicious File, User Execution, Phishing, Social Engineering\n"
+            "Source Text: 'The actors used a PowerShell script to download a payload called invoice.pdf.'\n"
+            "Output: Spearphishing Attachment, PowerShell, Malicious File, Ingress Tool Transfer, Script Execution\n"
         )
 
         if val_feedback:
@@ -197,10 +207,9 @@ def extractor_node(state: ChunkState) -> dict:
 
         translation_chain = translator_prompt | translator_llm | StrOutputParser()
 
-        try:
-            abstract_keywords = translation_chain.invoke({"chunk_text": chunk_text})
-        except Exception as e:
-            print(f"[ERROR] [Chunk {c_idx}] Translation Error: {e}")
+        abstract_keywords = safe_invoke(translation_chain, {"chunk_text": chunk_text})
+        if abstract_keywords is None:
+            print(f"[ERROR] [Chunk {c_idx}] Translation Error: LLM failed after retries.")
             abstract_keywords = ""
 
         print(

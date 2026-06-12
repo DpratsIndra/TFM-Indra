@@ -226,7 +226,6 @@ def get_mitre_candidates(query: str, top_k: int = 25) -> tuple:
             tactics_str = doc.metadata.get("tactics", "")
             tactics = [t.strip() for t in tactics_str.split(",") if t.strip()]
             desc = doc.metadata.get("full_description", "No description available.")[:500]
-
             final_score = (0.7 * float(r_score)) + (0.3 * float(q_score))
 
             results_with_scores.append((final_score, tech_id, name, tactics_str, tactics, desc))

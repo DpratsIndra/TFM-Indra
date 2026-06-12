@@ -194,9 +194,13 @@ def process_full_report(
 
     # 1. MAP: Loop over sanitized_chunks using ThreadPoolExecutor for parallelism
     max_workers = int(os.getenv("MAX_CONCURRENT_CHUNKS", "2"))
-    print(
-        f"[*] Starting MAP phase across {len(sanitized_chunks)} chunks (Concurrent workers: {max_workers})..."
-    )
+    print(f"[*] Starting MAP phase across {len(sanitized_chunks)} chunks (Concurrent workers: {max_workers})...")
+
+    # FIX: Pre-warm the caches on the MAIN thread to prevent Race Conditions.
+    # If 2 threads try to load the models at the same time, it duplicates RAM usage and triggers the OOM Killer.
+    from src.langgraph_agents.tools import get_retriever, load_mitre_json
+    get_retriever()
+    load_mitre_json()
 
     def _process_single_chunk(args):
         i, chunk_data = args

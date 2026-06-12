@@ -11,7 +11,8 @@ from langchain_core.language_models.chat_models import BaseChatModel
 
 logger = logging.getLogger(__name__)
 
-# Cargar variables de entorno (ej. USE_PROMPT_REPETITION, ENVIRONMENT_PROFILE)
+from tenacity import retry, stop_after_attempt, wait_exponential
+from src.core.schemas import ChunkExtraction, TTPDetection, Evidence
 load_dotenv()
 
 
@@ -117,43 +118,40 @@ class TTPAnalyzer:
                 }
             )
 
-        logger.info(
-            f"Prepared {len(inputs)} chunks for LLM inference (Chunk-by-Chunk)."
-        )
-        batch_responses = []
+        logger.info(f"Prepared {len(inputs)} chunks for LLM inference (Chunk-by-Chunk).")
+        batch_responses = [None] * len(inputs)
         artificial_delay = 0.0
-
         max_workers = int(os.getenv("MAX_CONCURRENT_CHUNKS", "2"))
+        is_gemini = "google" in str(type(self.llm)).lower()
 
-        if self.execution_profile == "REMOTE" or max_workers > 1:
-            logger.info(f"Running LangChain inference concurrently (max_concurrency={max_workers})...")
+        @retry(stop=stop_after_attempt(6), wait=wait_exponential(multiplier=2, min=5, max=60), reraise=True)
+        def _invoke_chain(inp):
+            return chain.invoke(inp)
+
+        def _process_chunk(idx, inp):
+            logger.info(f"[{idx+1}/{len(inputs)}] Querying LLM for Chunk {inp['_location']}...")
             try:
-                # return_exceptions=True devuelve el error en la lista en lugar de bloquear el proceso
-                batch_responses = chain.batch(
-                    inputs, 
-                    config={"max_concurrency": max_workers},
-                    return_exceptions=True 
-                )
+                res = _invoke_chain(inp)
+                return res
             except Exception as e:
-                logger.error(f"Error crítico en el orquestador de batch: {e}")
-        else:
-            logger.info("LOCAL Profile detected: Running chain sequentially...")
-            is_gemini = "google" in str(type(self.llm)).lower()
-            for i, inp in enumerate(inputs, 1):
-                try:
-                    logger.info(
-                        f"[{i}/{len(inputs)}] Querying LLM for Chunk {inp['_location']}..."
-                    )
-                    res = chain.invoke(inp)
-                    batch_responses.append(res)
+                logger.error(f"Error processing chunk {inp['_location']} after retries: {e}")
+                return e
 
-                    if is_gemini and i < len(inputs):
-                        sleep_time = 4.5
-                        time.sleep(sleep_time)
-                        artificial_delay += sleep_time
-                except Exception as e:
-                    logger.error(f"Error processing chunk {inp['_location']}: {e}")
-                    raise RuntimeError(f"Ejecución abortada por fallo en chunk {inp['_location']}: {e}") from e
+        import concurrent.futures
+
+        if max_workers > 1:
+            logger.info(f"Running LangChain inference concurrently (max_workers={max_workers})...")
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = [executor.submit(_process_chunk, i, inp) for i, inp in enumerate(inputs)]
+                for i, future in enumerate(futures):
+                    batch_responses[i] = future.result()
+        else:
+            logger.info("Running LangChain sequentially (max_workers=1)...")
+            for i, inp in enumerate(inputs):
+                batch_responses[i] = _process_chunk(i, inp)
+                if is_gemini and i < len(inputs) - 1:
+                    time.sleep(4.5)
+                    artificial_delay += 4.5
 
         # Reducer: Consolidar ChunkExtraction de vuelta a List[TTPDetection]
         global_ttps = {}

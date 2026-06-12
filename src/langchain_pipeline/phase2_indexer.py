@@ -149,10 +149,7 @@ class MitreIndexer:
         base_desc = technique.get("description", "").strip()
 
         keywords = []
-        tactics = technique.get("tactics", [])
-        if tactics:
-            keywords.append(f"Tactics: {', '.join(tactics)}")
-
+        
         platforms = technique.get("platforms", [])
         if platforms:
             keywords.append(f"Platforms: {', '.join(platforms)}")
@@ -168,7 +165,7 @@ class MitreIndexer:
         # Combine base description with semantic keywords
         if keywords:
             enriched_text = (
-                f"{base_desc}\n\nTechnical Keywords & Examples: {'; '.join(keywords)}"
+                f"{base_desc}\n\nMetadata:\n- " + "\n- ".join(keywords)
             )
         else:
             enriched_text = base_desc
@@ -197,21 +194,33 @@ class MitreIndexer:
         for tech in techniques:
             enriched_content = self._enrich_description(tech)
 
+            # Inyectamos la cabecera completa en el full_description para que el validador LLM la reciba
+            tech_id = tech.get("technique_id", "Unknown")
+            tech_name = tech.get("name", "Unknown")
+            tactics = ", ".join(tech.get("tactics", []))
+            
+            full_description_with_header = f"Technique: {tech_id} - {tech_name}\nTactics: {tactics}\n\n{enriched_content}"
+
             # Metadata must be flat and use simple types for Qdrant compatibility
             metadata = {
-                "technique_id": tech.get("technique_id"),
-                "name": tech.get("name"),
-                "tactics": ", ".join(tech.get("tactics", [])),
+                "technique_id": tech_id,
+                "name": tech_name,
+                "tactics": tactics,
                 "platforms": ", ".join(tech.get("platforms", [])),
-                # CRITICAL FIX: Pass the enriched content (which includes tools and malware names)
-                # to the metadata, so the LLM Validator can read the same evidence Qdrant used.
-                "full_description": enriched_content,
+                "full_description": full_description_with_header,
             }
 
             # Chunk the enriched content for fast Cross-Encoder evaluation
             chunks = splitter.split_text(enriched_content)
+            tech_id = tech.get("technique_id", "Unknown")
+            tech_name = tech.get("name", "Unknown")
+            tactics = ", ".join(tech.get("tactics", []))
+            
             for chunk in chunks:
-                documents.append(Document(page_content=chunk, metadata=metadata))
+                # CRITICAL FIX: Inject the technique name, ID and tactics into EVERY chunk.
+                # This prevents "Lost in the middle" amnesia for the Cross-Encoder.
+                chunk_with_context = f"Technique: {tech_id} - {tech_name}\nTactics: {tactics}\n\n{chunk}"
+                documents.append(Document(page_content=chunk_with_context, metadata=metadata))
 
         logger.info(f"Prepared {len(documents)} Document objects for vectorization.")
 
