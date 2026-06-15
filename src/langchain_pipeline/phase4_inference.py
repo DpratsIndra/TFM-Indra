@@ -81,7 +81,7 @@ class TTPAnalyzer:
             return [], 0.0
 
         prompt = self._build_prompt_template()
-        chain = prompt | self.llm.with_structured_output(ChunkExtraction)
+        chain = prompt | self.llm.with_structured_output(ChunkExtraction, include_raw=True)
 
         inputs = []
         for data in chunk_results:
@@ -124,9 +124,26 @@ class TTPAnalyzer:
         max_workers = int(os.getenv("MAX_CONCURRENT_CHUNKS", "2"))
         is_gemini = "google" in str(type(self.llm)).lower()
 
-        @retry(stop=stop_after_attempt(6), wait=wait_exponential(multiplier=2, min=5, max=60), reraise=True)
+        def print_retry_warning(retry_state):
+            import sys
+            print(f"\n[⚠️ ALARMA DE RATE LIMIT] Google AI Studio ha rechazado la petición.", file=sys.stderr)
+            print(f"[⏳] Tenacity esperando {retry_state.next_action.sleep} segundos antes del reintento #{retry_state.attempt_number}...", file=sys.stderr)
+
+        @retry(
+            stop=stop_after_attempt(2),
+            wait=wait_exponential(multiplier=2, min=5, max=15),
+            before_sleep=print_retry_warning,
+            reraise=True,
+        )
         def _invoke_chain(inp):
-            return chain.invoke(inp)
+            # PROACTIVE RATE LIMITING: Google AI Studio allows 15 RPM (1 request every 4 seconds)
+            if is_gemini:
+                time.sleep(4.5)
+            try:
+                return chain.invoke(inp)
+            except Exception as e:
+                # If it's a structural failure not caught by tenacity, or if it raises
+                raise RuntimeError(f"Rate Limit / API Collapse: {e}") from e
 
         def _process_chunk(idx, inp):
             logger.info(f"[{idx+1}/{len(inputs)}] Querying LLM for Chunk {inp['_location']}...")
@@ -155,13 +172,36 @@ class TTPAnalyzer:
 
         # Reducer: Consolidar ChunkExtraction de vuelta a List[TTPDetection]
         global_ttps = {}
-        for inp, res in zip(inputs, batch_responses):
-            # AÑADIDO: Controlar si el resultado fue una excepción (ej. Timeout)
-            if isinstance(res, Exception):
-                logger.error(f"  [!] Fallo/Timeout crítico en chunk {inp['_location']}: {res}")
-                raise RuntimeError(f"Ejecución abortada por fallo en chunk {inp['_location']}: {res}") from res
+        total_input_tokens = 0
+        total_output_tokens = 0
+        
+        api_crashed_flag = False
+        for inp, res_dict in zip(inputs, batch_responses):
+            if isinstance(res_dict, Exception):
+                err_str = str(res_dict).lower()
+                api_errors = ["429", "quota", "resourceexhausted", "503", "500", "timeout", "not_found", "api", "connection", "unavailable", "rate limit"]
+                if any(err in err_str for err in api_errors):
+                    logger.error(f"[!] ABORTANDO: Fallo de API/Rate Limit detectado en chunk {inp.get('_location')}. Guardando progreso parcial...")
+                    api_crashed_flag = True
+                    break  # Detenemos la agregación, devolveremos lo parcial
+                else:
+                    logger.error(f"No TTPs extracted for chunk {inp.get('_location')} due to critical failure.")
+                    continue
+
+            if not res_dict or not isinstance(res_dict, dict):
+                logger.warning(f"  [!] LLM devolvió un formato no esperado en {inp['_location']}.")
+                continue
+
+            raw_msg = res_dict.get("raw")
+            if raw_msg and hasattr(raw_msg, "usage_metadata") and raw_msg.usage_metadata:
+                total_input_tokens += raw_msg.usage_metadata.get("input_tokens", 0)
+                total_output_tokens += raw_msg.usage_metadata.get("output_tokens", 0)
+
+            res = res_dict.get("parsed")
 
             if not res or not hasattr(res, "extracted_ttps") or not res.extracted_ttps:
+                if not res:
+                    logger.warning(f"  [!] LLM devolvió NONE en {inp['_location']}. Posible fallo de parseo JSON/Structured Output de Gemma.")
                 continue
 
             for ext in res.extracted_ttps:
@@ -210,6 +250,6 @@ class TTPAnalyzer:
             final_ttps_limpios.append(ttp)
 
         logger.info(
-            f"Inference complete. {len(final_ttps_limpios)} global techniques confirmed."
+            f"Inference complete. {len(final_ttps_limpios)} global techniques confirmed. Tokens: IN={total_input_tokens}, OUT={total_output_tokens}"
         )
-        return final_ttps_limpios, artificial_delay
+        return final_ttps_limpios, artificial_delay, {"input_tokens": total_input_tokens, "output_tokens": total_output_tokens}

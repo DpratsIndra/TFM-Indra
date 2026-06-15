@@ -82,8 +82,9 @@ class ReportIngestor:
         logger.info(
             f"Loading PDF '{file_path}' using Multimodal VLM extraction (Gemini Flash)..."
         )
-        gemini_model = os.getenv("GEMINI_MODEL", "gemini-flash-lite-latest")
-        llm = ChatGoogleGenerativeAI(model=gemini_model, temperature=0.0, max_retries=3)
+        # Forzamos un modelo VLM, independientemente del modelo principal de inferencia
+        gemini_vlm_model = os.getenv("GEMINI_VLM_MODEL", "gemini-flash-lite-latest")
+        llm = ChatGoogleGenerativeAI(model=gemini_vlm_model, temperature=0.0, max_retries=3)
 
         doc = fitz.open(file_path)
         documents = []

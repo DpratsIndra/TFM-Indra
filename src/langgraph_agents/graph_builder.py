@@ -191,6 +191,8 @@ def process_full_report(
     triage_time_total = 0.0
     extraction_time_total = 0.0
     validation_time_total = 0.0
+    input_tokens_total = 0
+    output_tokens_total = 0
 
     # 1. MAP: Loop over sanitized_chunks using ThreadPoolExecutor for parallelism
     max_workers = int(os.getenv("MAX_CONCURRENT_CHUNKS", "2"))
@@ -219,6 +221,8 @@ def process_full_report(
             "triage_time": 0.0,
             "extractor_time": 0.0,
             "validator_time": 0.0,
+            "input_tokens": 0,
+            "output_tokens": 0,
         }
 
         try:
@@ -231,19 +235,32 @@ def process_full_report(
             return i, chunk_result
         except Exception as e:
             print(f"     [!] Error Crítico/Timeout procesando chunk {i + 1}: {str(e)}")
-            raise RuntimeError(f"Ejecución abortada por fallo en chunk {i + 1}: {str(e)}") from e
+            return i, e
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
         args_list = [(i, chunk) for i, chunk in enumerate(sanitized_chunks)]
         results = list(executor.map(_process_single_chunk, args_list))
 
+    api_crashed_flag = False
     for i, chunk_result in results:
         if chunk_result is None:
             continue
+            
+        if isinstance(chunk_result, Exception):
+            err_str = str(chunk_result).lower()
+            api_errors = ["429", "quota", "resourceexhausted", "503", "500", "timeout", "not_found", "api", "connection", "unavailable", "rate limit"]
+            if any(err in err_str for err in api_errors):
+                print(f"[!] ABORTANDO LangGraph: Fallo de API detectado en chunk {i + 1}. Guardando progreso parcial...")
+                api_crashed_flag = True
+                break
+            else:
+                continue
 
         triage_time_total += chunk_result.get("triage_time", 0.0)
         extraction_time_total += chunk_result.get("extractor_time", 0.0)
         validation_time_total += chunk_result.get("validator_time", 0.0)
+        input_tokens_total += chunk_result.get("input_tokens", 0)
+        output_tokens_total += chunk_result.get("output_tokens", 0)
 
         approved = chunk_result.get("approved_ttps", [])
         if approved:
@@ -261,6 +278,8 @@ def process_full_report(
         "chunks": sanitized_chunks,
         "all_approved_ttps": master_ttp_list,
         "final_json": {},
+        "input_tokens": input_tokens_total,
+        "output_tokens": output_tokens_total,
     }
 
     t0_red = time.time()
@@ -278,5 +297,8 @@ def process_full_report(
             "extraction_oracle_node_seconds": round(extraction_time_total, 2),
             "validator_node_seconds": round(validation_time_total, 2),
             "consolidator_seconds": round(consolidator_time, 2),
+            "input_tokens": input_tokens_total,
+            "output_tokens": output_tokens_total,
+            "api_crashed": api_crashed_flag
         },
     }

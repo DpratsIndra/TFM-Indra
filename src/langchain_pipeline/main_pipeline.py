@@ -170,7 +170,7 @@ def run_cti_extraction(pdf_path: str) -> str:
 
     analyzer = TTPAnalyzer(llm=llm)
     t2 = time.time()
-    confirmed_ttps, artificial_delay = analyzer.analyze_candidates(filtered_candidates)
+    confirmed_ttps, artificial_delay, tokens = analyzer.analyze_candidates(filtered_candidates)
     p4_time = (time.time() - t2) - artificial_delay
 
     # ------------------------------------------------------------------
@@ -185,6 +185,8 @@ def run_cti_extraction(pdf_path: str) -> str:
         "phase1_ingestion_seconds": round(p1_time, 2),
         "phase3_retrieval_seconds": round(p3_time, 2),
         "phase4_inference_seconds": round(p4_time, 2),
+        "input_tokens": tokens.get("input_tokens", 0),
+        "output_tokens": tokens.get("output_tokens", 0),
     }
     return output_dict_list, timing_metrics
 

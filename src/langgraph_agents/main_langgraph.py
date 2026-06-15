@@ -156,11 +156,12 @@ def run_langgraph_extraction(pdf_path: str):
 
     timing_metrics = {
         "phase1_ingestion_seconds": round(p1_time, 2),
-        "phase3_retrieval_seconds": round(
-            p2_time, 2
-        ),  # Using Context Generation as setup/retrieval equivalent
+        "phase3_retrieval_seconds": round(p2_time, 2),
         "phase4_inference_seconds": round(p3_time, 2),
         "langgraph_internal_breakdown": result_dict.get("timing_breakdown_phase3", {}),
+        "input_tokens": result_dict.get("timing_breakdown_phase3", {}).get("input_tokens", 0),
+        "output_tokens": result_dict.get("timing_breakdown_phase3", {}).get("output_tokens", 0),
+        "api_crashed": result_dict.get("timing_breakdown_phase3", {}).get("api_crashed", False)
     }
 
     return extracted_ttps, timing_metrics

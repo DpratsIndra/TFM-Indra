@@ -80,21 +80,33 @@ class ValidationResult(BaseModel):
 
 from tenacity import retry, stop_after_attempt, wait_exponential
 
+def print_retry_warning(retry_state):
+    import sys
+    print(f"\n[⚠️ ALARMA DE RATE LIMIT] Google AI Studio ha rechazado la petición.", file=sys.stderr)
+    print(f"[⏳] Tenacity esperando {retry_state.next_action.sleep} segundos antes del reintento #{retry_state.attempt_number}...", file=sys.stderr)
+
 @retry(
-    stop=stop_after_attempt(6), 
-    wait=wait_exponential(multiplier=2, min=5, max=60),
+    stop=stop_after_attempt(2), 
+    wait=wait_exponential(multiplier=2, min=5, max=15),
+    before_sleep=print_retry_warning,
     reraise=True
 )
 def _invoke_with_retry(callable_chain, input_data):
     return callable_chain.invoke(input_data)
 
 def safe_invoke(callable_chain, input_data):
-    """Safely invokes a chain or agent with exponential backoff, returning None only after all retries fail."""
+    """Safely invokes a chain or agent with exponential backoff. Raises exception if all retries fail."""
+    # PROACTIVE RATE LIMITING: Google AI Studio allows 15 RPM (1 request every 4 seconds)
+    # Solo aplicamos el sleep si estamos en el perfil LOCAL (Gemini API)
+    import os
+    if os.getenv("EXECUTION_PROFILE", "LOCAL").upper() == "LOCAL":
+        time.sleep(4.5)
+    
     try:
         return _invoke_with_retry(callable_chain, input_data)
     except Exception as e:
-        print(f"[ERROR] Model Invocation Error after retries: {e}")
-        return None
+        print(f"[ERROR CRÍTICO] Model Invocation Error after all retries exhausted: {e}")
+        raise RuntimeError(f"Rate Limit / API Collapse: {e}") from e
 
 
 def triage_node(state: ChunkState) -> dict:
@@ -107,7 +119,7 @@ def triage_node(state: ChunkState) -> dict:
     chunk_text = state["chunk_text"]
 
     llm = get_llm(tier="lite")
-    structured_llm = llm.with_structured_output(TriageDecision)
+    structured_llm = llm.with_structured_output(TriageDecision, include_raw=True)
 
     use_prompt_repetition = os.getenv("USE_PROMPT_REPETITION", "False").lower() in (
         "true",
@@ -139,14 +151,28 @@ def triage_node(state: ChunkState) -> dict:
 
     result = safe_invoke(chain, {"chunk_text": chunk_text})
 
+    in_tok = 0
+    out_tok = 0
+    
     if result is None:
         is_relevant = True
     else:
-        is_relevant = result.is_relevant
+        raw_msg = result.get("raw")
+        if raw_msg and hasattr(raw_msg, "usage_metadata") and raw_msg.usage_metadata:
+            in_tok += raw_msg.usage_metadata.get("input_tokens", 0)
+            out_tok += raw_msg.usage_metadata.get("output_tokens", 0)
+        
+        parsed = result.get("parsed")
+        is_relevant = parsed.is_relevant if parsed else True
 
     c_idx = state.get("chunk_metadata", {}).get("chunk_index", "?")
     print(f"[DEBUG] [Chunk {c_idx}] Triage - Is Relevant: {is_relevant}")
-    return {"is_relevant": is_relevant, "triage_time": time.time() - t0}
+    return {
+        "is_relevant": is_relevant, 
+        "triage_time": time.time() - t0,
+        "input_tokens": state.get("input_tokens", 0) + in_tok,
+        "output_tokens": state.get("output_tokens", 0) + out_tok,
+    }
 
 
 def extractor_node(state: ChunkState) -> dict:
@@ -160,6 +186,9 @@ def extractor_node(state: ChunkState) -> dict:
     val_feedback = state.get("validation_feedback", "")
     approved_ttps = state.get("approved_ttps", [])
     approved_ids = [t.get("technique_id") for t in approved_ttps]
+    
+    in_tok = 0
+    out_tok = 0
 
     # 1. QUERY TRANSFORMATION: Abstract Keywords Only
     c_idx = state.get("chunk_metadata", {}).get("chunk_index", "?")
@@ -207,10 +236,24 @@ def extractor_node(state: ChunkState) -> dict:
 
         translation_chain = translator_prompt | translator_llm | StrOutputParser()
 
-        abstract_keywords = safe_invoke(translation_chain, {"chunk_text": chunk_text})
-        if abstract_keywords is None:
+        abstract_keywords_result = safe_invoke(translation_chain, {"chunk_text": chunk_text})
+        if abstract_keywords_result is None:
             print(f"[ERROR] [Chunk {c_idx}] Translation Error: LLM failed after retries.")
             abstract_keywords = ""
+        else:
+            if isinstance(abstract_keywords_result, dict):
+                raw_msg = abstract_keywords_result.get("raw")
+                if raw_msg and hasattr(raw_msg, "usage_metadata") and raw_msg.usage_metadata:
+                    in_tok += raw_msg.usage_metadata.get("input_tokens", 0)
+                    out_tok += raw_msg.usage_metadata.get("output_tokens", 0)
+                abstract_keywords = abstract_keywords_result.get("parsed", "")
+            elif hasattr(abstract_keywords_result, 'response_metadata') and 'token_usage' in abstract_keywords_result.response_metadata:
+                usage = abstract_keywords_result.response_metadata['token_usage']
+                in_tok += usage.get('prompt_tokens', 0)
+                out_tok += usage.get('completion_tokens', 0)
+                abstract_keywords = abstract_keywords_result.content
+            else:
+                abstract_keywords = abstract_keywords_result
 
         print(
             f"[DEBUG] [Chunk {c_idx}] Extractor - Abstract Keywords: {abstract_keywords}"
@@ -254,7 +297,7 @@ def extractor_node(state: ChunkState) -> dict:
 
     # 3. EXTRACTION (BRAINSTORMER)
     llm = get_llm(tier="pro")
-    structured_llm = llm.with_structured_output(DraftTTPList)
+    structured_llm = llm.with_structured_output(DraftTTPList, include_raw=True)
 
     use_prompt_repetition = os.getenv("USE_PROMPT_REPETITION", "False").lower() in (
         "true",
@@ -300,48 +343,55 @@ def extractor_node(state: ChunkState) -> dict:
     if use_prompt_repetition:
         prompt_text = f"{prompt_text}\n\n{prompt_text}"
 
-    parsed_result = safe_invoke(prompt | structured_llm, {"prompt_text": prompt_text})
+    parsed_result_dict = safe_invoke(prompt | structured_llm, {"prompt_text": prompt_text})
 
-    if parsed_result is not None:
-        loc = f"Page {state.get('chunk_metadata', {}).get('page_number', '?')}, Chunk {state.get('chunk_metadata', {}).get('chunk_index', '?')}"
-        for ttp in parsed_result.ttps:
-            draft = ttp.model_dump()
-            tech_id = str(draft.get("technique_id", "")).strip().upper()
+    if parsed_result_dict is not None:
+        raw_msg = parsed_result_dict.get("raw")
+        if raw_msg and hasattr(raw_msg, "usage_metadata") and raw_msg.usage_metadata:
+            in_tok += raw_msg.usage_metadata.get("input_tokens", 0)
+            out_tok += raw_msg.usage_metadata.get("output_tokens", 0)
+            
+        parsed_result = parsed_result_dict.get("parsed")
+        if parsed_result:
+            loc = f"Page {state.get('chunk_metadata', {}).get('page_number', '?')}, Chunk {state.get('chunk_metadata', {}).get('chunk_index', '?')}"
+            for ttp in parsed_result.ttps:
+                draft = ttp.model_dump()
+                tech_id = str(draft.get("technique_id", "")).strip().upper()
 
-            # --- HYBRID GUARDIAN ---
-            if tech_id not in current_meta_map:
-                # 1. El LLM ha propuesto un ID que no le dio Qdrant.
-                # Vamos a comprobar si es una alucinación (T9999) o si es real (T1203).
-                
-                # Cargamos el diccionario global de MITRE (está cacheado, es instantáneo)
-                global_mitre_db = load_mitre_json() 
-                
-                if tech_id in global_mitre_db:
-                    print(f"[DEBUG] Model deduced {tech_id} natively. Accepted for validation.")
-                    # Inyectamos la metadata oficial para que el Validator no se confunda
-                    current_meta_map[tech_id] = {
-                        "name": global_mitre_db[tech_id]["name"],
-                        "tactics": global_mitre_db[tech_id]["tactics"],
-                        "score": 0.0
-                    }
-                    draft["technique_id"] = tech_id
-                    draft["name"] = global_mitre_db[tech_id]["name"]
-                    draft["tactic"] = global_mitre_db[tech_id]["tactics"]
-                    draft["confidence_score"] = 0.0 # Score 0.0 indica que viene de memoria, no de Qdrant
-                    draft["location"] = loc
-                    all_drafts.append(draft)
-                else:
-                    print(f"[DEBUG] Discarding hallucination: {tech_id} not in MITRE.")
-                
-                continue # Saltamos a la siguiente iteración
+                # --- HYBRID GUARDIAN ---
+                if tech_id not in current_meta_map:
+                    # 1. El LLM ha propuesto un ID que no le dio Qdrant.
+                    # Vamos a comprobar si es una alucinación (T9999) o si es real (T1203).
+                    
+                    # Cargamos el diccionario global de MITRE (está cacheado, es instantáneo)
+                    global_mitre_db = load_mitre_json() 
+                    
+                    if tech_id in global_mitre_db:
+                        print(f"[DEBUG] Model deduced {tech_id} natively. Accepted for validation.")
+                        # Inyectamos la metadata oficial para que el Validator no se confunda
+                        current_meta_map[tech_id] = {
+                            "name": global_mitre_db[tech_id]["name"],
+                            "tactics": global_mitre_db[tech_id]["tactics"],
+                            "score": 0.0
+                        }
+                        draft["technique_id"] = tech_id
+                        draft["name"] = global_mitre_db[tech_id]["name"]
+                        draft["tactic"] = global_mitre_db[tech_id]["tactics"]
+                        draft["confidence_score"] = 0.0 # Score 0.0 indica que viene de memoria, no de Qdrant
+                        draft["location"] = loc
+                        all_drafts.append(draft)
+                    else:
+                        print(f"[DEBUG] Discarding hallucination: {tech_id} not in MITRE.")
+                    
+                    continue # Saltamos a la siguiente iteración
 
-            # 2. Si venía de Qdrant (Comportamiento normal)
-            draft["technique_id"] = tech_id
-            draft["name"] = current_meta_map[tech_id]["name"]
-            draft["tactic"] = current_meta_map[tech_id]["tactics"]
-            draft["confidence_score"] = current_meta_map[tech_id]["score"]
-            draft["location"] = loc
-            all_drafts.append(draft)
+                # 2. Si venía de Qdrant (Comportamiento normal)
+                draft["technique_id"] = tech_id
+                draft["name"] = current_meta_map[tech_id]["name"]
+                draft["tactic"] = current_meta_map[tech_id]["tactics"]
+                draft["confidence_score"] = current_meta_map[tech_id]["score"]
+                draft["location"] = loc
+                all_drafts.append(draft)
 
     draft_ids = [d.get("technique_id", "Unknown") for d in all_drafts]
     print(
@@ -354,6 +404,8 @@ def extractor_node(state: ChunkState) -> dict:
         "extractor_time": state.get("extractor_time", 0.0) + (time.time() - t0),
         "candidates_list": candidates_list,
         "abstract_keywords": abstract_keywords,
+        "input_tokens": state.get("input_tokens", 0) + in_tok,
+        "output_tokens": state.get("output_tokens", 0) + out_tok,
     }
 
 
@@ -377,7 +429,7 @@ def validator_node(state: ChunkState) -> dict:
         }
 
     llm = get_llm(tier="pro", temperature=0.2)
-    structured_llm = llm.with_structured_output(ValidationResult)
+    structured_llm = llm.with_structured_output(ValidationResult, include_raw=True)
 
     use_prompt_repetition = os.getenv("USE_PROMPT_REPETITION", "False").lower() in (
         "true",
@@ -414,7 +466,7 @@ def validator_node(state: ChunkState) -> dict:
 
     chain = prompt | structured_llm
 
-    result = safe_invoke(
+    result_dict = safe_invoke(
         chain,
         {
             "global_context": state.get("global_context", "None provided."),
@@ -422,10 +474,20 @@ def validator_node(state: ChunkState) -> dict:
             "draft_ttps": json.dumps(draft_ttps_list, indent=2),
         },
     )
+    
+    in_tok = 0
+    out_tok = 0
 
-    if result is None:
+    if result_dict is None:
         print(f"[DEBUG] [Chunk {c_idx}] Validator - Validation failed gracefully.")
         return {"approved_ttps": [], "validation_feedback": "", "draft_ttps": []}
+
+    raw_msg = result_dict.get("raw")
+    if raw_msg and hasattr(raw_msg, "usage_metadata") and raw_msg.usage_metadata:
+        in_tok += raw_msg.usage_metadata.get("input_tokens", 0)
+        out_tok += raw_msg.usage_metadata.get("output_tokens", 0)
+        
+    result = result_dict.get("parsed")
 
     current_meta_map = state.get("metadata_map", {})
     new_approved = []
@@ -462,4 +524,6 @@ def validator_node(state: ChunkState) -> dict:
         "validation_feedback": feedback,
         "draft_ttps": [],  # Limpiamos los drafts para la siguiente iteración
         "validator_time": state.get("validator_time", 0.0) + (time.time() - t0),
+        "input_tokens": state.get("input_tokens", 0) + in_tok,
+        "output_tokens": state.get("output_tokens", 0) + out_tok,
     }

@@ -8,6 +8,8 @@ class GlobalState(TypedDict):
     chunks: List[Dict[str, Any]]
     all_approved_ttps: Annotated[List[Any], operator.add]
     final_json: Dict[str, Any]
+    input_tokens: int
+    output_tokens: int
 
 
 class ChunkState(TypedDict):
@@ -23,6 +25,8 @@ class ChunkState(TypedDict):
     triage_time: float
     extractor_time: float
     validator_time: float
+    input_tokens: int
+    output_tokens: int
 
     # Official Metadata map injected by Oracle
     metadata_map: dict

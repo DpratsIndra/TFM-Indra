@@ -62,7 +62,7 @@ def get_academic_sample(df: pd.DataFrame, total_size: int = 1000) -> pd.DataFram
     df_sampled = pd.concat([sample_pos, sample_neg]).sample(frac=1, random_state=42).reset_index(drop=True)
     return df_sampled
 
-def run_tram_evaluation(file_path: str, sample_size: int = None, pipeline_type: str = "langchain"):
+def run_tram_evaluation(file_path: str, sample_size: int = None, pipeline_type: str = "langchain", resume_from: str = None):
     print(f"\n[*] Loading TRAM dataset from: {file_path}")
     loader = TramDataLoader()
     df = loader.load(file_path)
@@ -77,7 +77,7 @@ def run_tram_evaluation(file_path: str, sample_size: int = None, pipeline_type: 
         df = df.sample(n=sample_size, random_state=42).reset_index(drop=True)
     else:
         # Default academic evaluation size
-        target_size = sample_size if sample_size else 1000
+        target_size = sample_size if sample_size else 200
         print(f"[*] Generating Academic Stratified Sample (N={target_size})...")
         df = get_academic_sample(df, total_size=target_size)
         
@@ -97,8 +97,23 @@ def run_tram_evaluation(file_path: str, sample_size: int = None, pipeline_type: 
     tag_vlm = "vlm_on" if use_vlm else "vlm_off"
     tag_rep = "rep_on" if use_rep else "rep_off"
     output_filename = f"tram_eval_{pipeline_type}_{tag_vlm}_{tag_rep}_{timestamp}.json"
-    output_path = os.path.join("data", "output", "evaluations", output_filename)
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    if resume_from and os.path.exists(resume_from):
+        print(f"[*] Resuming from checkpoint: {resume_from}")
+        output_path = resume_from
+        with open(resume_from, "r", encoding="utf-8") as f:
+            prev_data = json.load(f)
+        if "detailed_executions" in prev_data:
+            detailed_results = prev_data["detailed_executions"]
+            start_idx = len(detailed_results)
+            hierarchy_stats = prev_data.get("hierarchy_analysis", hierarchy_stats)
+            for d in detailed_results:
+                predicted_labels.append(d.get("predicted_labels_normalized", []))
+            print(f"[*] Resumed {start_idx} processed sentences. Continuing from index {start_idx}...")
+        previous_execution_minutes = prev_data.get("total_execution_minutes", 0.0)
+    else:
+        previous_execution_minutes = 0.0
+        output_path = os.path.join("data", "output", "evaluations", output_filename)
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
     
     print("="*60)
     print(f"🚀 INITIATING INFERENCE LOOP ({pipeline_type.upper()})")
@@ -106,7 +121,11 @@ def run_tram_evaluation(file_path: str, sample_size: int = None, pipeline_type: 
     
     start_time = time.time()
     
-    for idx, row in tqdm(df.iterrows(), total=total_records, desc="Processing Sentences"):
+    start_idx_val = len(predicted_labels)
+    df_remaining = df.iloc[start_idx_val:]
+    
+    for idx, row in tqdm(df_remaining.iterrows(), total=total_records, desc="Processing Sentences", initial=start_idx_val):
+            
         text = row['text']
         true_lbls = row['true_labels']
         predicted_ids = []
@@ -116,8 +135,10 @@ def run_tram_evaluation(file_path: str, sample_size: int = None, pipeline_type: 
                 doc = Document(page_content=text, metadata={"chunk_index": idx, "page_number": 1})
                 candidates = retriever.get_filtered_mitre_candidates([doc], threshold=0.2)
                 if candidates:
-                    detections, artificial_delay = analyzer.analyze_candidates(candidates)
-                    predicted_ids = [d.technique_id for d in detections if d.is_present]
+                    detections, artificial_delay, tokens = analyzer.analyze_candidates(candidates)
+                else:
+                    detections, artificial_delay, tokens = [], 0.0, {"input_tokens": 0, "output_tokens": 0}
+                predicted_ids = [d.technique_id for d in detections if d.is_present]
                     
             elif pipeline_type == "langgraph":
                 sanitized_chunks = [{"text": text, "metadata": {"chunk_index": idx}}]
@@ -132,6 +153,12 @@ def run_tram_evaluation(file_path: str, sample_size: int = None, pipeline_type: 
                         )
                         extracted = result.get("extracted_ttps", [])
                         predicted_ids = [ttp.get("technique_id") for ttp in extracted]
+                        timing_ph3 = result.get("timing_breakdown_phase3", {})
+                detections = [] # Mock for structural consistency if needed
+                tokens = {
+                    "input_tokens": timing_ph3.get("input_tokens", 0),
+                    "output_tokens": timing_ph3.get("output_tokens", 0)
+                }
 
             # Serializar las detecciones de LangChain (Pydantic objects a dict) si es necesario
             extracted_payload = []
@@ -181,17 +208,21 @@ def run_tram_evaluation(file_path: str, sample_size: int = None, pipeline_type: 
             tp = list(set(true_lbls) & set(predicted_ids))
             fp = list(set(predicted_ids) - set(true_lbls))
             fn = list(set(true_lbls) - set(predicted_ids))
+            
+            metrics = {"TP": len(tp), "FP": len(fp), "FN": len(fn)}
+            if len(true_lbls) == 0 and len(predicted_ids) == 0:
+                metrics["TN"] = 1
 
             detailed_results.append({
                 "sentence_id": idx,
-                "source_file": f"tram_sentence_{idx}", # Para estandarizar con CTIHAL
+                "source_file": f"tram_sentence_{idx}",
                 "text": text,
                 "true_labels": true_lbls,
-                "predicted_labels_raw": [r.get("technique_id") for r in extracted_payload if "technique_id" in r],
+                "predicted_labels_raw": [r.get("technique_id") if isinstance(r, dict) else r.technique_id for r in extracted_payload],
                 "predicted_labels_normalized": predicted_ids,
-                "metrics": {"TP": len(tp), "FP": len(fp), "FN": len(fn)},
+                "metrics": metrics,
                 "traceability_summary": traceability_summary,
-                "timing_breakdown": {}, # TRAM eval evalúa sentencias puras en memoria
+                "timing_breakdown": tokens,
                 "extracted_ttps": extracted_payload
             })
             
@@ -201,19 +232,32 @@ def run_tram_evaluation(file_path: str, sample_size: int = None, pipeline_type: 
             print(f"   True: {true_lbls}")
             print(f"   Pred: {predicted_ids}")
             
+        except KeyboardInterrupt:
+            print("\n[!] INTERRUPCIÓN MANUAL (Ctrl+C). Cancelando de forma segura y guardando los reportes completados...")
+            llm_crashed = True
+            break
         except Exception as e:
-            print(f"\n[!] Error crítico procesando la sentencia {idx}: {e}")
+            error_str = str(e)
+            print(f"\n[!] Error crítico procesando la sentencia {idx}: {error_str}")
+            
+            api_errors = ["429", "quota", "resourceexhausted", "503", "500", "timeout", "not_found", "api", "connection", "unavailable"]
+            if any(err in error_str.lower() for err in api_errors):
+                print("\n[!] CORTE DE LLM/API DETECTADO. Deteniendo ejecución para salvaguardar el progreso.")
+                llm_crashed = True
+                break
+                
             predicted_ids = []
-            detailed_results.append({"sentence_id": idx, "source_file": f"tram_sentence_{idx}", "error": str(e)})
+            detailed_results.append({"sentence_id": idx, "source_file": f"tram_sentence_{idx}", "error": error_str})
 
         predicted_labels.append(predicted_ids)
         
-        time_to_sleep = 4.5 if pipeline_type == "langchain" else 2.0
+        time_to_sleep = 5.0
         
         # NUEVO: AUTO-GUARDADO (CHECKPOINT)
+        current_session_minutes = (time.time() - start_time) / 60.0
         partial_output = {
             "status": f"INCOMPLETE - Processed {idx + 1}/{total_records}",
-            "total_execution_minutes": round((time.time() - start_time) / 60.0, 2),
+            "total_execution_minutes": round(previous_execution_minutes + current_session_minutes, 2),
             "hierarchy_analysis": hierarchy_stats,
             "detailed_executions": detailed_results
         }
@@ -222,13 +266,22 @@ def run_tram_evaluation(file_path: str, sample_size: int = None, pipeline_type: 
             
         time.sleep(time_to_sleep)
         
+    if len(predicted_labels) < len(df):
+        print(f"\n[!] Evaluadas solo {len(predicted_labels)} de {len(df)} sentencias debido a interrupción.")
+        df = df.iloc[:len(predicted_labels)].copy()
+        
     df['predicted_labels'] = predicted_labels
     
+    if len(df) == 0:
+        print("\n[!] No se evaluó ninguna sentencia. Saliendo.")
+        sys.exit(429 if 'llm_crashed' in locals() else 0)
+        
     print("\n[*] Calculating Metrics...")
     evaluator = Evaluator(df)
     results = evaluator.evaluate()
     
-    total_execution_minutes = round((time.time() - start_time) / 60.0, 2)
+    current_session_minutes = (time.time() - start_time) / 60.0
+    total_execution_minutes = round(previous_execution_minutes + current_session_minutes, 2)
     
     # Estructura JSON estandarizada para TRAM (coincide con CTIHAL)
     final_output = {
@@ -238,33 +291,9 @@ def run_tram_evaluation(file_path: str, sample_size: int = None, pipeline_type: 
         "detailed_executions": detailed_results
     }
     
-    # ---------------------------------------------------------
-    # Extract DIFFs for Qualitative Error Analysis (TFM)
-    # ---------------------------------------------------------
-    diffs = []
-    for idx, row in df.iterrows():
-        true_set = set(row['true_labels'])
-        pred_set = set(row['predicted_labels'])
-        
-        if true_set != pred_set:
-            diffs.append({
-                "sentence_id": idx,
-                "text": row['text'],
-                "human_ground_truth": list(true_set),
-                "llm_prediction": list(pred_set),
-                "false_negatives_missed": list(true_set - pred_set),
-                "false_positives_hallucinated": list(pred_set - true_set)
-            })
-    
     # Save Main Results
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(final_output, f, indent=4)
-        
-    # Save DIFFs
-    diff_filename = f"diff_analysis_{pipeline_type}_{tag_vlm}_{tag_rep}_{timestamp}.json"
-    diff_path = os.path.join("data", "output", "evaluations", diff_filename)
-    with open(diff_path, "w", encoding="utf-8") as f:
-        json.dump(diffs, f, indent=4)
         
     print("\n" + "="*50)
     print(f"🎯 EVALUATION RESULTS (MICRO) - {pipeline_type.upper()}")
@@ -274,7 +303,8 @@ def run_tram_evaluation(file_path: str, sample_size: int = None, pipeline_type: 
     print(f"F1-Score:  {results['micro']['f1']}")
     print(f"F0.5-Score:{results['micro']['f0.5']}")
     print(f"\n[+] Full report saved to: {output_path}")
-    print(f"[+] Saved {len(diffs)} conflict cases for manual review in: {diff_path}")
+    if 'llm_crashed' in locals():
+        sys.exit(429)
 
 if __name__ == "__main__":
     import argparse
@@ -282,10 +312,11 @@ if __name__ == "__main__":
     parser.add_argument("--dataset_path", type=str, default="data/eval_datasets/tram2/multi_label.json", help="Path to TRAM dataset")
     parser.add_argument("--limit", type=int, default=None, help="Max number of sentences to evaluate (for quick testing)")
     parser.add_argument("--pipeline", type=str, choices=["langchain", "langgraph"], default="langchain", help="Which architecture to evaluate")
+    parser.add_argument("--resume_from", type=str, default=None, help="Path to a previous JSON to resume execution")
     args = parser.parse_args()
 
     if not os.path.exists(args.dataset_path):
         print(f"[!] Error: Dataset not found at {args.dataset_path}")
         sys.exit(1)
         
-    run_tram_evaluation(args.dataset_path, sample_size=args.limit, pipeline_type=args.pipeline)
+    run_tram_evaluation(args.dataset_path, sample_size=args.limit, pipeline_type=args.pipeline, resume_from=args.resume_from)

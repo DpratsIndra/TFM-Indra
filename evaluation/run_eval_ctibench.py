@@ -61,6 +61,7 @@ def run_evaluation():
     parser.add_argument("--dataset_path", type=str, default="data/eval_datasets/ctibench", help="Path to CTIBench dataset")
     parser.add_argument("--limit", type=int, default=None, help="Max number of sentences to evaluate (for quick testing)")
     parser.add_argument("--pipeline", type=str, choices=["langchain", "langgraph"], default="langgraph", help="Which architecture to evaluate")
+    parser.add_argument("--resume_from", type=str, default=None, help="Path to a previous JSON to resume execution")
     args = parser.parse_args()
 
     pipeline_type = args.pipeline
@@ -78,9 +79,9 @@ def run_evaluation():
         print("[!] Error: No data found. Ensure cti-ate.tsv exists.")
         sys.exit(1)
         
-    if args.limit:
-        print(f"[*] Subsampling {args.limit} random records for testing...")
-        df = df.sample(n=args.limit, random_state=42).reset_index(drop=True)
+    limit = args.limit if args.limit else 200
+    print(f"[*] Subsampling {limit} random records for testing...")
+    df = df.sample(n=limit, random_state=42).reset_index(drop=True)
         
     print(f"[*] Total sentences for evaluation: {len(df)}")
     
@@ -89,8 +90,24 @@ def run_evaluation():
         
     timestamp = datetime.now().strftime("%Y%m%d_%H%M")
     output_filename = f"ctibench_eval_{pipeline_type}_{timestamp}.json"
-    output_path = os.path.join("data", "output", "evaluations", output_filename)
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    
+    if args.resume_from and os.path.exists(args.resume_from):
+        print(f"[*] Resuming from checkpoint: {args.resume_from}")
+        output_path = args.resume_from
+        with open(args.resume_from, "r", encoding="utf-8") as f:
+            prev_data = json.load(f)
+        if "detailed_executions" in prev_data:
+            detailed_results = prev_data["detailed_executions"]
+            start_idx = len(detailed_results)
+            hierarchy_stats = prev_data.get("hierarchy_analysis", hierarchy_stats)
+            for d in detailed_results:
+                predicted_labels.append(d.get("predicted_labels_normalized", []))
+            print(f"[*] Resumed {start_idx} processed sentences. Continuing from index {start_idx}...")
+        previous_execution_minutes = prev_data.get("total_execution_minutes", 0.0)
+    else:
+        previous_execution_minutes = 0.0
+        output_path = os.path.join("data", "output", "evaluations", output_filename)
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
         
     predicted_labels = []
     detailed_results = []
@@ -98,7 +115,11 @@ def run_evaluation():
     
     start_time = time.time()
     
-    for idx, row in tqdm(df.iterrows(), total=len(df), desc=f"Eval: {pipeline_type}"):
+    start_idx_val = len(predicted_labels)
+    df_remaining = df.iloc[start_idx_val:]
+    
+    for idx, row in tqdm(df_remaining.iterrows(), total=len(df), desc=f"Eval: {pipeline_type}", initial=start_idx_val):
+            
         text = row['text']
         true_lbls = row['true_labels']
         predicted_ids = []
@@ -108,11 +129,11 @@ def run_evaluation():
                 doc = Document(page_content=text, metadata={"chunk_index": idx, "page_number": 1})
                 candidates = retriever.get_filtered_mitre_candidates([doc], threshold=0.2)
                 if candidates:
-                    detections, _ = analyzer.analyze_candidates(candidates)
-                    predicted_ids = [d.technique_id for d in detections if d.is_present]
-                    extracted_payload = [d.model_dump() for d in detections if d.is_present]
+                    detections, artificial_delay, tokens = analyzer.analyze_candidates(candidates)
                 else:
-                    extracted_payload = []
+                    detections, artificial_delay, tokens = [], 0.0, {"input_tokens": 0, "output_tokens": 0}
+                
+                extracted_payload = [d.model_dump() for d in detections if d.is_present]
                     
             elif pipeline_type == "langgraph":
                 sanitized_chunks = [{"text": text, "metadata": {"chunk_index": idx}}]
@@ -127,6 +148,11 @@ def run_evaluation():
                         )
                         extracted_payload = result.get("extracted_ttps", [])
                         predicted_ids = [ttp.get("technique_id") for ttp in extracted_payload]
+                        timing_ph3 = result.get("timing_breakdown_phase3", {})
+                        tokens = {
+                            "input_tokens": timing_ph3.get("input_tokens", 0),
+                            "output_tokens": timing_ph3.get("output_tokens", 0)
+                        }
                         
             # Normalización y Trazabilidad Jerárquica
             normalized_preds = []
@@ -170,44 +196,71 @@ def run_evaluation():
             fp = list(set(predicted_ids) - set(true_lbls))
             fn = list(set(true_lbls) - set(predicted_ids))
             
+            metrics = {"TP": len(tp), "FP": len(fp), "FN": len(fn)}
+            if len(true_lbls) == 0 and len(predicted_ids) == 0:
+                metrics["TN"] = 1
+            
             detailed_results.append({
                 "sentence_id": idx,
-                "source_file": f"ctibench_doc_{idx}",
+                "source_file": f"ctibench_sentence_{idx}",
                 "text": text,
                 "true_labels": true_lbls,
-                "predicted_labels_raw": [r.get("technique_id") for r in extracted_payload if "technique_id" in r],
+                "predicted_labels_raw": [r.get("technique_id") if isinstance(r, dict) else r.technique_id for r in extracted_payload],
                 "predicted_labels_normalized": predicted_ids,
-                "metrics": {"TP": len(tp), "FP": len(fp), "FN": len(fn)},
+                "metrics": metrics,
                 "traceability_summary": traceability_summary,
-                "timing_breakdown": {},
+                "timing_breakdown": tokens,
                 "extracted_ttps": extracted_payload
             })
             
+        except KeyboardInterrupt:
+            print("\n[!] INTERRUPCIÓN MANUAL (Ctrl+C). Cancelando de forma segura y guardando los reportes completados...")
+            llm_crashed = True
+            break
         except Exception as e:
-            tqdm.write(f" [!] ERROR crítico en id {idx}: {e}")
+            error_str = str(e)
+            tqdm.write(f" [!] ERROR crítico en id {idx}: {error_str}")
+            
+            api_errors = ["429", "quota", "resourceexhausted", "503", "500", "timeout", "not_found", "api", "connection", "unavailable"]
+            if any(err in error_str.lower() for err in api_errors):
+                print("\n[!] CORTE DE LLM/API DETECTADO. Deteniendo ejecución para salvaguardar el progreso.")
+                llm_crashed = True
+                break
+                
             predicted_ids = []
-            detailed_results.append({"sentence_id": idx, "source_file": f"ctibench_doc_{idx}", "error": str(e)})
+            detailed_results.append({"sentence_id": idx, "source_file": f"ctibench_doc_{idx}", "error": error_str})
             
         predicted_labels.append(predicted_ids)
         
         # NUEVO: AUTO-GUARDADO (CHECKPOINT)
+        current_session_minutes = (time.time() - start_time) / 60.0
         partial_output = {
             "status": f"INCOMPLETE - Processed {idx + 1}/{len(df)}",
-            "total_execution_minutes": round((time.time() - start_time) / 60.0, 2),
+            "total_execution_minutes": round(previous_execution_minutes + current_session_minutes, 2),
             "hierarchy_analysis": hierarchy_stats,
             "detailed_executions": detailed_results
         }
         with open(output_path, "w", encoding="utf-8") as f:
             json.dump(partial_output, f, indent=4)
             
-        time.sleep(0.5)  # Breve pausa para no saturar APIs
+        time.sleep(5.0)  # Breve pausa para no saturar APIs
+        
+    if len(predicted_labels) < len(df):
+        print(f"\n[!] Evaluadas solo {len(predicted_labels)} de {len(df)} sentencias debido a interrupción.")
+        df = df.iloc[:len(predicted_labels)].copy()
+        
+    if len(df) == 0:
+        print("\n[!] No se evaluó ninguna sentencia. Saliendo.")
+        sys.exit(429 if 'llm_crashed' in locals() else 0)
         
     df['predicted_labels'] = predicted_labels
     evaluator = Evaluator(df)
     results = evaluator.evaluate()
     
-    total_execution_minutes = round((time.time() - start_time) / 60.0, 2)
+    current_session_minutes = (time.time() - start_time) / 60.0
+    total_execution_minutes = round(previous_execution_minutes + current_session_minutes, 2)
     
+    # Estructura JSON estandarizada
     final_output = {
         "total_execution_minutes": total_execution_minutes,
         "global_metrics": results,
@@ -226,6 +279,8 @@ def run_evaluation():
     print(f"Precision:  {results['micro']['precision']}")
     print(f"Recall:     {results['micro']['recall']}")
     print(f"\n💾 Resumen completo guardado en: {output_path}")
+    if 'llm_crashed' in locals():
+        sys.exit(429)
 
 if __name__ == "__main__":
     run_evaluation()
