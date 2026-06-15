@@ -163,6 +163,11 @@ def run_evaluation():
                             "output_tokens": timing_ph3.get("output_tokens", 0)
                         }
                         
+                if pipeline_type == "langgraph" and timing_ph3.get("api_crashed"):
+                    print("\n[!] CORTE DE LLM/API DETECTADO DURANTE ESTA SENTENCIA (LangGraph). Deteniendo ejecución.")
+                    llm_crashed = True
+                    break
+                        
             # Normalización y Trazabilidad Jerárquica
             normalized_preds = []
             traceability_summary = {"exact": 0, "more_detailed": 0, "more_general": 0}

@@ -175,7 +175,8 @@ def consolidator_node(state: GlobalState) -> dict:
 
 
 def process_full_report(
-    source_file: str, global_context: str, sanitized_chunks: List[Dict[str, Any]]
+    source_file: str, global_context: str, sanitized_chunks: List[Dict[str, Any]],
+    cache_path: str = None, previous_ttps: List[Any] = None, previous_timing: Dict = None
 ) -> dict:
     """
     Main orchestrator that executes the Map-Reduce flow.
@@ -188,11 +189,13 @@ def process_full_report(
     master_ttp_list = []
 
     # Acumuladores de tiempo
-    triage_time_total = 0.0
-    extraction_time_total = 0.0
-    validation_time_total = 0.0
-    input_tokens_total = 0
-    output_tokens_total = 0
+    triage_time_total = previous_timing.get("triage_time_total", 0.0) if previous_timing else 0.0
+    extraction_time_total = previous_timing.get("extraction_time_total", 0.0) if previous_timing else 0.0
+    validation_time_total = previous_timing.get("validation_time_total", 0.0) if previous_timing else 0.0
+    input_tokens_total = previous_timing.get("input_tokens_total", 0) if previous_timing else 0
+    output_tokens_total = previous_timing.get("output_tokens_total", 0) if previous_timing else 0
+    
+    master_ttp_list = previous_ttps.copy() if previous_ttps else []
 
     # 1. MAP: Loop over sanitized_chunks using ThreadPoolExecutor for parallelism
     max_workers = int(os.getenv("MAX_CONCURRENT_CHUNKS", "2"))
@@ -206,6 +209,7 @@ def process_full_report(
 
     import threading
     global_stop_event = threading.Event()
+    cache_lock = threading.Lock()
 
     def _process_single_chunk(args):
         i, chunk_data = args
@@ -235,8 +239,39 @@ def process_full_report(
             chunk_result = chunk_graph.invoke(initial_chunk_state)
             
             # LATIDO: Solo imprimimos si extrajo algo útil o si terminó bien
-            aprobados = len(chunk_result.get("approved_ttps", []))
-            print(f"     [✓] Chunk {i + 1}/{len(sanitized_chunks)} procesado. TTPs válidos: {aprobados}")
+            aprobados = chunk_result.get("approved_ttps", [])
+            print(f"     [✓] Chunk {i + 1}/{len(sanitized_chunks)} procesado. TTPs válidos: {len(aprobados)}")
+            
+            if cache_path:
+                with cache_lock:
+                    try:
+                        import json
+                        with open(cache_path, "r", encoding="utf-8") as f:
+                            cache_data = json.load(f)
+                            
+                        chunk_id = chunk_data.get("chunk_id", f"chunk_{i}")
+                        cache_data["pending_chunks"] = [
+                            c for c in cache_data.get("pending_chunks", [])
+                            if c.get("chunk_id", "") != chunk_id
+                        ]
+                        
+                        if "completed_ttps" not in cache_data:
+                            cache_data["completed_ttps"] = []
+                        cache_data["completed_ttps"].extend(aprobados)
+                        
+                        if "timing_metrics" not in cache_data:
+                            cache_data["timing_metrics"] = {}
+                        tm = cache_data["timing_metrics"]
+                        tm["triage_time_total"] = tm.get("triage_time_total", 0.0) + chunk_result.get("triage_time", 0.0)
+                        tm["extraction_time_total"] = tm.get("extraction_time_total", 0.0) + chunk_result.get("extractor_time", 0.0)
+                        tm["validation_time_total"] = tm.get("validation_time_total", 0.0) + chunk_result.get("validator_time", 0.0)
+                        tm["input_tokens_total"] = tm.get("input_tokens_total", 0) + chunk_result.get("input_tokens", 0)
+                        tm["output_tokens_total"] = tm.get("output_tokens_total", 0) + chunk_result.get("output_tokens", 0)
+                        
+                        with open(cache_path, "w", encoding="utf-8") as f:
+                            json.dump(cache_data, f, ensure_ascii=False, indent=2)
+                    except Exception as e:
+                        print(f"     [!] Error updating cache for chunk {i + 1}: {e}")
             
             return i, chunk_result
         except Exception as e:

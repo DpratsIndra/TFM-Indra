@@ -158,6 +158,12 @@ def run_evaluation():
             if len(true_lbls) == 0 and len(predicted_ids) == 0:
                 metrics["TN"] = 1
             
+            if timing.get("api_crashed"):
+                print("\n[!] CORTE DE LLM/API DETECTADO DURANTE ESTE REPORTE. Guardando extracción parcial y deteniendo ejecución.")
+                print("    El documento se reanudará de forma automática gracias al Caché de Chunks en la próxima ejecución.")
+                llm_crashed = True
+                break
+                
             detailed_results.append({
                 "source_file": pdf_path,
                 "group_name": group_name,
@@ -171,12 +177,6 @@ def run_evaluation():
             })
             
             tqdm.write(f" 📄 [{group_name}] {pdf_name} -> TP: {len(tp)} | FP: {len(fp)} | FN: {len(fn)}")
-            
-            if timing.get("api_crashed"):
-                print("\n[!] CORTE DE LLM/API DETECTADO DURANTE ESTE REPORTE. Guardando extracción parcial y deteniendo ejecución.")
-                llm_crashed = True
-                predicted_labels.append(predicted_ids)
-                break
         except KeyboardInterrupt:
             print("\n[!] INTERRUPCIÓN MANUAL (Ctrl+C). Cancelando de forma segura y guardando los reportes completados...")
             llm_crashed = True

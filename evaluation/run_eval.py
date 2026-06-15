@@ -162,6 +162,12 @@ def run_tram_evaluation(file_path: str, sample_size: int = None, pipeline_type: 
                         extracted = result.get("extracted_ttps", [])
                         predicted_ids = [ttp.get("technique_id") for ttp in extracted]
                         timing_ph3 = result.get("timing_breakdown_phase3", {})
+                
+                if timing_ph3.get("api_crashed"):
+                    print("\n[!] CORTE DE LLM/API DETECTADO DURANTE ESTA SENTENCIA (LangGraph). Deteniendo ejecución.")
+                    llm_crashed = True
+                    break
+                    
                 detections = [] # Mock for structural consistency if needed
                 tokens = {
                     "input_tokens": timing_ph3.get("input_tokens", 0),

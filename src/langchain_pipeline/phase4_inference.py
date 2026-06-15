@@ -126,7 +126,7 @@ class TTPAnalyzer:
 
         def print_retry_warning(retry_state):
             import sys
-            print(f"\n[⚠️ ALARMA DE RATE LIMIT] Google AI Studio ha rechazado la petición.", file=sys.stderr)
+            print(f"\n[⚠️ ALARMA DE API / RATE LIMIT] El servidor LLM ha rechazado la petición o ha fallado.", file=sys.stderr)
             print(f"[⏳] Tenacity esperando {retry_state.next_action.sleep} segundos antes del reintento #{retry_state.attempt_number}...", file=sys.stderr)
 
         @retry(
@@ -262,4 +262,4 @@ class TTPAnalyzer:
         logger.info(
             f"Inference complete. {len(final_ttps_limpios)} global techniques confirmed. Tokens: IN={total_input_tokens}, OUT={total_output_tokens}"
         )
-        return final_ttps_limpios, artificial_delay, {"input_tokens": total_input_tokens, "output_tokens": total_output_tokens}
+        return final_ttps_limpios, artificial_delay, {"input_tokens": total_input_tokens, "output_tokens": total_output_tokens, "api_crashed": api_crashed_flag}

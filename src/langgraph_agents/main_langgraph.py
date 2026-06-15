@@ -121,36 +121,76 @@ def run_langgraph_extraction(pdf_path: str):
     """
     t0 = time.time()
 
-    use_vlm_env = os.getenv("USE_VLM_EXTRACTION", "False").lower() in (
-        "true",
-        "1",
-        "yes",
-    )
-    ingestor = ReportIngestor(chunk_size=3500, chunk_overlap=500, use_vlm=use_vlm_env)
+    import hashlib
+    file_hash = hashlib.md5(pdf_path.encode()).hexdigest()
+    cache_path = os.path.join("data", "output", "evaluations", f"cache_langgraph_{file_hash}.json")
+    os.makedirs(os.path.dirname(cache_path), exist_ok=True)
 
-    raw_chunks = ingestor.process_report(pdf_path)
-    p1_time = time.time() - t0
+    if os.path.exists(cache_path):
+        print(f"[*] Resuming from Cache: {cache_path}")
+        with open(cache_path, "r", encoding="utf-8") as f:
+            cache_data = json.load(f)
+        sanitized_chunks = cache_data.get("pending_chunks", [])
+        global_context = cache_data.get("global_context", "")
+        completed_ttps = cache_data.get("completed_ttps", [])
+        p1_time = cache_data.get("p1_time", 0.0)
+        p2_time = cache_data.get("p2_time", 0.0)
+        previous_timing = cache_data.get("timing_metrics", {})
+        
+        if not sanitized_chunks and not completed_ttps:
+            print("[-] Cache exists but is empty. Restarting extraction.")
+            os.remove(cache_path)
+            return run_langgraph_extraction(pdf_path)
+            
+    else:
+        use_vlm_env = os.getenv("USE_VLM_EXTRACTION", "False").lower() in (
+            "true",
+            "1",
+            "yes",
+        )
+        ingestor = ReportIngestor(chunk_size=3500, chunk_overlap=500, use_vlm=use_vlm_env)
 
-    sanitized_chunks = []
-    for c in raw_chunks:
-        if hasattr(c, "page_content"):
-            sanitized_chunks.append({"text": c.page_content, "metadata": c.metadata})
-        elif isinstance(c, dict) and "text" in c:
-            sanitized_chunks.append(c)
-        else:
-            sanitized_chunks.append({"text": str(c), "metadata": {}})
+        raw_chunks = ingestor.process_report(pdf_path)
+        p1_time = time.time() - t0
 
-    if not sanitized_chunks:
-        return [], {"error": "No text extracted"}
+        sanitized_chunks = []
+        for idx, c in enumerate(raw_chunks):
+            chunk_data = {}
+            if hasattr(c, "page_content"):
+                chunk_data = {"text": c.page_content, "metadata": c.metadata}
+            elif isinstance(c, dict) and "text" in c:
+                chunk_data = c
+            else:
+                chunk_data = {"text": str(c), "metadata": {}}
+            
+            chunk_data["chunk_id"] = f"chunk_{idx}"
+            sanitized_chunks.append(chunk_data)
 
-    t1 = time.time()
-    t1 = time.time()
-    llm = get_llm(temperature=0.0)
-    global_context = generate_global_context(sanitized_chunks, llm)
-    p2_time = time.time() - t1
+        if not sanitized_chunks:
+            return [], {"error": "No text extracted"}
+
+        t1 = time.time()
+        llm = get_llm(temperature=0.0)
+        global_context = generate_global_context(sanitized_chunks, llm)
+        p2_time = time.time() - t1
+        
+        completed_ttps = []
+        previous_timing = {}
+        
+        with open(cache_path, "w", encoding="utf-8") as f:
+            json.dump({
+                "pending_chunks": sanitized_chunks,
+                "global_context": global_context,
+                "completed_ttps": completed_ttps,
+                "p1_time": p1_time,
+                "p2_time": p2_time,
+                "timing_metrics": previous_timing
+            }, f, ensure_ascii=False, indent=2)
 
     t2 = time.time()
-    result_dict = process_full_report(pdf_path, global_context, sanitized_chunks)
+    result_dict = process_full_report(pdf_path, global_context, sanitized_chunks, cache_path, completed_ttps, previous_timing)
+
+    t1 = time.time()
     p3_time = time.time() - t2
     extracted_ttps = result_dict.get("extracted_ttps", [])
 
@@ -163,6 +203,13 @@ def run_langgraph_extraction(pdf_path: str):
         "output_tokens": result_dict.get("timing_breakdown_phase3", {}).get("output_tokens", 0),
         "api_crashed": result_dict.get("timing_breakdown_phase3", {}).get("api_crashed", False)
     }
+
+    # Borrar caché si fue exitoso (no hubo crash de API)
+    if not timing_metrics.get("api_crashed", False) and os.path.exists(cache_path):
+        try:
+            os.remove(cache_path)
+        except Exception:
+            pass
 
     return extracted_ttps, timing_metrics
 
@@ -187,43 +234,81 @@ if __name__ == "__main__":
     print(f"[*] [INFO] Phase 1: Ingesting PDF: {pdf_path}")
     t0 = time.time()
 
-    use_vlm_env = os.getenv("USE_VLM_EXTRACTION", "False").lower() in (
-        "true",
-        "1",
-        "yes",
-    )
-    ingestor = ReportIngestor(chunk_size=3500, chunk_overlap=500, use_vlm=use_vlm_env)
+    import hashlib
+    file_hash = hashlib.md5(pdf_path.encode()).hexdigest()
+    cache_path = os.path.join("data", "output", "evaluations", f"cache_langgraph_{file_hash}.json")
+    os.makedirs(os.path.dirname(cache_path), exist_ok=True)
 
-    raw_chunks = ingestor.process_report(pdf_path)
-    p1_time = time.time() - t0
-    print(f"[+] [INFO] Phase 1: Extracted {len(raw_chunks)} chunks.\n")
+    if os.path.exists(cache_path):
+        print(f"[*] Resuming from Cache: {cache_path}")
+        with open(cache_path, "r", encoding="utf-8") as f:
+            cache_data = json.load(f)
+        sanitized_chunks = cache_data.get("pending_chunks", [])
+        global_context = cache_data.get("global_context", "")
+        completed_ttps = cache_data.get("completed_ttps", [])
+        p1_time = cache_data.get("p1_time", 0.0)
+        p2_time = cache_data.get("p2_time", 0.0)
+        previous_timing = cache_data.get("timing_metrics", {})
+        
+        if not sanitized_chunks and not completed_ttps:
+            print("[-] Cache exists but is empty. Restarting extraction.")
+            os.remove(cache_path)
+            sys.exit(1)
+            
+    else:
+        use_vlm_env = os.getenv("USE_VLM_EXTRACTION", "False").lower() in (
+            "true",
+            "1",
+            "yes",
+        )
+        ingestor = ReportIngestor(chunk_size=3500, chunk_overlap=500, use_vlm=use_vlm_env)
 
-    sanitized_chunks = []
-    for c in raw_chunks:
-        if hasattr(c, "page_content"):
-            sanitized_chunks.append({"text": c.page_content, "metadata": c.metadata})
-        elif isinstance(c, dict) and "text" in c:
-            sanitized_chunks.append(c)
-        else:
-            sanitized_chunks.append({"text": str(c), "metadata": {}})
+        raw_chunks = ingestor.process_report(pdf_path)
+        p1_time = time.time() - t0
+        print(f"[+] [INFO] Phase 1: Extracted {len(raw_chunks)} chunks.\n")
 
-    if not sanitized_chunks:
-        print("[-] No text could be extracted from the PDF. Exiting.")
-        sys.exit(1)
+        sanitized_chunks = []
+        for idx, c in enumerate(raw_chunks):
+            chunk_data = {}
+            if hasattr(c, "page_content"):
+                chunk_data = {"text": c.page_content, "metadata": c.metadata}
+            elif isinstance(c, dict) and "text" in c:
+                chunk_data = c
+            else:
+                chunk_data = {"text": str(c), "metadata": {}}
+            
+            chunk_data["chunk_id"] = f"chunk_{idx}"
+            sanitized_chunks.append(chunk_data)
 
-    # 2. Global Context Generation Phase
-    print("[*] [INFO] Phase 2: Generating Global Context...")
-    t1 = time.time()
-    t1 = time.time()
-    llm = get_llm(temperature=0.0)
-    global_context = generate_global_context(sanitized_chunks, llm)
-    p2_time = time.time() - t1
+        if not sanitized_chunks:
+            print("[-] No text could be extracted from the PDF. Exiting.")
+            sys.exit(1)
+
+        # 2. Global Context Generation Phase
+        print("[*] [INFO] Phase 2: Generating Global Context...")
+        t1 = time.time()
+        llm = get_llm(temperature=0.0)
+        global_context = generate_global_context(sanitized_chunks, llm)
+        p2_time = time.time() - t1
+        
+        completed_ttps = []
+        previous_timing = {}
+        
+        with open(cache_path, "w", encoding="utf-8") as f:
+            json.dump({
+                "pending_chunks": sanitized_chunks,
+                "global_context": global_context,
+                "completed_ttps": completed_ttps,
+                "p1_time": p1_time,
+                "p2_time": p2_time,
+                "timing_metrics": previous_timing
+            }, f, ensure_ascii=False, indent=2)
 
     # 3. Execution Phase (Map-Reduce)
     print("\n[*] [INFO] Phase 4: Starting Graph Execution (Map-Reduce Inference)...")
     t2 = time.time()
     # === CAMBIO AQUI ===
-    result_dict = process_full_report(pdf_path, global_context, sanitized_chunks)
+    result_dict = process_full_report(pdf_path, global_context, sanitized_chunks, cache_path, completed_ttps, previous_timing)
     p3_time = time.time() - t2
     print("[+] [INFO] Phase 4: Graph Execution Completed.")
 
@@ -231,6 +316,7 @@ if __name__ == "__main__":
     extracted_ttps = result_dict.get("extracted_ttps", [])
     p3_breakdown = result_dict.get("timing_breakdown_phase3", {})
     # ===================
+
 
     # 4. Construct Final JSON matching LangChain standard
     total_execution_time = time.time() - total_start_time
@@ -269,5 +355,11 @@ if __name__ == "__main__":
         print(f"Time Taken: {round(total_execution_time / 60.0, 2)} minutes")
         print(f"Results saved to: {output_file_path}")
         print(f"{'=' * 60}")
+        
+        if not p3_breakdown.get("api_crashed", False) and os.path.exists(cache_path):
+            try:
+                os.remove(cache_path)
+            except Exception:
+                pass
     except Exception as e:
         print(f"[!] Error saving output file: {e}")

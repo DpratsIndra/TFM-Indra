@@ -187,6 +187,7 @@ def run_cti_extraction(pdf_path: str) -> str:
         "phase4_inference_seconds": round(p4_time, 2),
         "input_tokens": tokens.get("input_tokens", 0),
         "output_tokens": tokens.get("output_tokens", 0),
+        "api_crashed": tokens.get("api_crashed", False),
     }
     return output_dict_list, timing_metrics
 
