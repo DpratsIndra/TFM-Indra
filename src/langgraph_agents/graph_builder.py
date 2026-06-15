@@ -204,8 +204,14 @@ def process_full_report(
     get_retriever()
     load_mitre_json()
 
+    import threading
+    global_stop_event = threading.Event()
+
     def _process_single_chunk(args):
         i, chunk_data = args
+        if global_stop_event.is_set():
+            return i, Exception("Aborted due to prior API crash")
+            
         chunk_text = chunk_data.get("text", str(chunk_data))
         chunk_metadata = chunk_data.get("metadata", {})
 
@@ -234,6 +240,10 @@ def process_full_report(
             
             return i, chunk_result
         except Exception as e:
+            err_str = str(e).lower()
+            api_errors = ["429", "quota", "resourceexhausted", "503", "500", "timeout", "not_found", "api", "connection", "unavailable", "rate limit"]
+            if any(err in err_str for err in api_errors):
+                global_stop_event.set()
             print(f"     [!] Error Crítico/Timeout procesando chunk {i + 1}: {str(e)}")
             return i, e
 
@@ -250,9 +260,10 @@ def process_full_report(
             err_str = str(chunk_result).lower()
             api_errors = ["429", "quota", "resourceexhausted", "503", "500", "timeout", "not_found", "api", "connection", "unavailable", "rate limit"]
             if any(err in err_str for err in api_errors):
-                print(f"[!] ABORTANDO LangGraph: Fallo de API detectado en chunk {i + 1}. Guardando progreso parcial...")
-                api_crashed_flag = True
-                break
+                if not api_crashed_flag:
+                    print(f"[!] ABORTANDO LangGraph: Fallo de API detectado en chunk {i + 1}. Guardando progreso parcial...")
+                    api_crashed_flag = True
+                continue
             else:
                 continue
 

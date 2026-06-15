@@ -145,12 +145,21 @@ class TTPAnalyzer:
                 # If it's a structural failure not caught by tenacity, or if it raises
                 raise RuntimeError(f"Rate Limit / API Collapse: {e}") from e
 
+        import threading
+        stop_event = threading.Event()
+
         def _process_chunk(idx, inp):
+            if stop_event.is_set():
+                return Exception("Aborted due to prior API crash")
             logger.info(f"[{idx+1}/{len(inputs)}] Querying LLM for Chunk {inp['_location']}...")
             try:
                 res = _invoke_chain(inp)
                 return res
             except Exception as e:
+                err_str = str(e).lower()
+                api_errors = ["429", "quota", "resourceexhausted", "503", "500", "timeout", "not_found", "api", "connection", "unavailable", "rate limit"]
+                if any(err in err_str for err in api_errors):
+                    stop_event.set()
                 logger.error(f"Error processing chunk {inp['_location']} after retries: {e}")
                 return e
 
@@ -181,9 +190,10 @@ class TTPAnalyzer:
                 err_str = str(res_dict).lower()
                 api_errors = ["429", "quota", "resourceexhausted", "503", "500", "timeout", "not_found", "api", "connection", "unavailable", "rate limit"]
                 if any(err in err_str for err in api_errors):
-                    logger.error(f"[!] ABORTANDO: Fallo de API/Rate Limit detectado en chunk {inp.get('_location')}. Guardando progreso parcial...")
-                    api_crashed_flag = True
-                    break  # Detenemos la agregación, devolveremos lo parcial
+                    if not api_crashed_flag:
+                        logger.error(f"[!] ABORTANDO: Fallo de API/Rate Limit detectado en chunk {inp.get('_location')}. Guardando progreso parcial...")
+                        api_crashed_flag = True
+                    continue  # Detenemos la agregación de este chunk, pero seguimos iterando para coger los exitosos
                 else:
                     logger.error(f"No TTPs extracted for chunk {inp.get('_location')} due to critical failure.")
                     continue

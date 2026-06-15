@@ -93,10 +93,18 @@ def run_tram_evaluation(file_path: str, sample_size: int = None, pipeline_type: 
         
     use_vlm = os.getenv("USE_VLM_EXTRACTION", "False").lower() in ("true", "1", "yes")
     use_rep = os.getenv("USE_PROMPT_REPETITION", "False").lower() in ("true", "1", "yes")
+    
+    profile = os.getenv("EXECUTION_PROFILE", "LOCAL").upper()
+    if profile == "REMOTE":
+        use_gemma = os.getenv("USE_GEMMA4", "False").lower() in ("true", "1", "yes")
+        model_used = os.getenv("VLLM_MODEL_NAME_GEMMA", "gemma4") if use_gemma else os.getenv("VLLM_MODEL_NAME", "gpt-oss-20b")
+    else:
+        model_used = os.getenv("GEMINI_MODEL", "gemini-flash-lite-latest")
+        
     timestamp = datetime.now().strftime("%Y%m%d_%H%M")
     tag_vlm = "vlm_on" if use_vlm else "vlm_off"
     tag_rep = "rep_on" if use_rep else "rep_off"
-    output_filename = f"tram_eval_{pipeline_type}_{tag_vlm}_{tag_rep}_{timestamp}.json"
+    output_filename = f"tram_eval_{pipeline_type}_{model_used}_{tag_vlm}_{tag_rep}_{timestamp}.json"
     if resume_from and os.path.exists(resume_from):
         print(f"[*] Resuming from checkpoint: {resume_from}")
         output_path = resume_from
@@ -257,6 +265,7 @@ def run_tram_evaluation(file_path: str, sample_size: int = None, pipeline_type: 
         current_session_minutes = (time.time() - start_time) / 60.0
         partial_output = {
             "status": f"INCOMPLETE - Processed {idx + 1}/{total_records}",
+            "model_used": model_used,
             "total_execution_minutes": round(previous_execution_minutes + current_session_minutes, 2),
             "hierarchy_analysis": hierarchy_stats,
             "detailed_executions": detailed_results
@@ -285,6 +294,7 @@ def run_tram_evaluation(file_path: str, sample_size: int = None, pipeline_type: 
     
     # Estructura JSON estandarizada para TRAM (coincide con CTIHAL)
     final_output = {
+        "model_used": model_used,
         "total_execution_minutes": total_execution_minutes,
         "global_metrics": results,
         "hierarchy_analysis": hierarchy_stats,

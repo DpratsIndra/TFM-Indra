@@ -40,6 +40,15 @@ def run_evaluation():
     print(f"   Pipeline:           {pipeline.upper()}")
     print(f"   VLM Extraction:     {vlm_mode}")
     print(f"   Prompt Repetition:  {rep_mode}")
+    
+    profile = os.getenv("EXECUTION_PROFILE", "LOCAL").upper()
+    if profile == "REMOTE":
+        use_gemma = os.getenv("USE_GEMMA4", "False").lower() in ("true", "1", "yes")
+        model_used = os.getenv("VLLM_MODEL_NAME_GEMMA", "gemma4") if use_gemma else os.getenv("VLLM_MODEL_NAME", "gpt-oss-20b")
+    else:
+        model_used = os.getenv("GEMINI_MODEL", "gemini-flash-lite-latest")
+    
+    print(f"   Model Used:         {model_used} ({profile})")
     print("="*80)
 
     print(f"\n[*] Loading APT_REPORT dataset from: {args.dataset_path}")
@@ -65,7 +74,7 @@ def run_evaluation():
     tag_rep = "rep_on" if str(rep_mode).lower() in ["true", "1", "yes"] else "rep_off"
     timestamp = datetime.now().strftime("%Y%m%d_%H%M")
     
-    output_filename = f"apt_eval_{pipeline}_{tag_vlm}_{tag_rep}_{timestamp}.json"
+    output_filename = f"apt_eval_{pipeline}_{model_used}_{tag_vlm}_{tag_rep}_{timestamp}.json"
     
     if args.resume_from and os.path.exists(args.resume_from):
         print(f"[*] Resuming from checkpoint: {args.resume_from}")
@@ -196,6 +205,7 @@ def run_evaluation():
         # NUEVO: AUTO-GUARDADO (CHECKPOINT)
         partial_output = {
             "status": f"INCOMPLETE - Processed {idx + 1}/{len(df)}",
+            "model_used": model_used,
             "total_execution_minutes": round(total_seconds_partial / 60.0, 2),
             "hierarchy_analysis": hierarchy_stats,
             "detailed_executions": detailed_results
@@ -231,6 +241,7 @@ def run_evaluation():
     
     # Estructura JSON estandarizada
     final_output = {
+        "model_used": model_used,
         "total_execution_minutes": round(total_seconds / 60.0, 2),
         "global_metrics": results,
         "hierarchy_analysis": hierarchy_stats,
