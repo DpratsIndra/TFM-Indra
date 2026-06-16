@@ -164,7 +164,7 @@ def run_cti_extraction(pdf_path: str) -> str:
 
     analyzer = TTPAnalyzer(llm=llm)
     t2 = time.time()
-    confirmed_ttps, artificial_delay, tokens = analyzer.analyze_candidates(filtered_candidates)
+    confirmed_ttps, artificial_delay, tokens = analyzer.analyze_candidates(filtered_candidates, cache_key=pdf_path)
     p4_time = (time.time() - t2) - artificial_delay
 
     # ------------------------------------------------------------------

@@ -306,15 +306,14 @@ def run_tram_evaluation(file_path: str, sample_size: int = None, pipeline_type: 
         print(f"\n[!] Evaluadas solo {len(predicted_labels)} de {len(df)} sentencias debido a interrupción.")
         df = df.iloc[:len(predicted_labels)].copy()
         
-    df['predicted_labels'] = predicted_labels
-    
     if len(df) == 0:
-        print("\n[!] No se evaluó ninguna sentencia. Saliendo.")
-        sys.exit(429 if 'llm_crashed' in locals() else 0)
-        
-    print("\n[*] Calculating Metrics...")
-    evaluator = Evaluator(df)
-    results = evaluator.evaluate()
+        print("\n[!] No se evaluó ninguna sentencia por completo. Creando JSON base para permitir reanudación.")
+        results = {"micro": {"precision": 0, "recall": 0, "f1": 0, "f0.5": 0}}
+    else:
+        # Evaluar y exportar
+        df['predicted_labels'] = predicted_labels
+        evaluator = Evaluator(df)
+        results = evaluator.evaluate()
     
     current_session_minutes = (time.time() - start_time) / 60.0
     total_execution_minutes = round(previous_execution_minutes + current_session_minutes, 2)

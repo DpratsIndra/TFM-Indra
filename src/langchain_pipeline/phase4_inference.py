@@ -79,7 +79,7 @@ class TTPAnalyzer:
             [("system", system_instruction), ("user", user_message)]
         )
 
-    def analyze_candidates(self, chunk_results: List[Dict[str, Any]]):
+    def analyze_candidates(self, chunk_results: List[Dict[str, Any]], cache_key: str = None):
         if not chunk_results:
             logger.warning("No candidates to analyze.")
             return [], 0.0
@@ -130,6 +130,28 @@ class TTPAnalyzer:
         max_workers = int(os.getenv("MAX_CONCURRENT_CHUNKS", "2"))
         is_gemini = "google" in str(type(self.llm)).lower()
 
+        import hashlib
+        cache_path = None
+        cached_responses = {}
+        if cache_key:
+            file_hash = hashlib.md5(cache_key.encode()).hexdigest()
+            cache_path = os.path.join("data", "output", "evaluations", f"cache_langchain_{file_hash}.json")
+            if os.path.exists(cache_path):
+                try:
+                    with open(cache_path, "r", encoding="utf-8") as f:
+                        cached_responses = json.load(f)
+                    logger.info(f"Loaded {len(cached_responses)} chunks from LangChain cache.")
+                except Exception:
+                    pass
+
+        import threading
+        cache_lock = threading.Lock()
+        def save_cache():
+            if cache_path:
+                with cache_lock:
+                    with open(cache_path, "w", encoding="utf-8") as f:
+                        json.dump(cached_responses, f, indent=4)
+
         def print_retry_warning(retry_state):
             import sys
             print(f"\n[⚠️ ALARMA DE API / RATE LIMIT] El servidor LLM ha rechazado la petición o ha fallado.", file=sys.stderr)
@@ -146,20 +168,31 @@ class TTPAnalyzer:
             if is_gemini:
                 time.sleep(4.5)
             try:
-                return chain.invoke(inp)
+                msg = chain.invoke(inp)
+                # Serialize AIMessage to plain dict
+                content = msg.content if hasattr(msg, 'content') else str(msg)
+                usage = getattr(msg, "usage_metadata", {})
+                return {"content": content, "usage_metadata": usage}
             except Exception as e:
                 # If it's a structural failure not caught by tenacity, or if it raises
                 raise RuntimeError(f"Rate Limit / API Collapse: {e}") from e
 
-        import threading
         stop_event = threading.Event()
 
         def _process_chunk(idx, inp):
             if stop_event.is_set():
                 return Exception("Aborted due to prior API crash")
+            if str(idx) in cached_responses:
+                logger.info(f"[{idx+1}/{len(inputs)}] Loading Chunk {inp['_location']} from cache...")
+                return cached_responses[str(idx)]
+
             logger.info(f"[{idx+1}/{len(inputs)}] Querying LLM for Chunk {inp['_location']}...")
             try:
                 res = _invoke_chain(inp)
+                if cache_path:
+                    with cache_lock:
+                        cached_responses[str(idx)] = res
+                    save_cache()
                 return res
             except Exception as e:
                 err_str = str(e).lower()
@@ -204,17 +237,17 @@ class TTPAnalyzer:
                     logger.error(f"No TTPs extracted for chunk {inp.get('_location')} due to critical failure: {res_dict}")
                     continue
 
-            # res_dict is now an AIMessage since we just did prompt | llm
+            # res_dict is now a dict containing content and usage_metadata
             raw_msg = res_dict
-            if raw_msg and hasattr(raw_msg, "usage_metadata") and raw_msg.usage_metadata:
-                total_input_tokens += raw_msg.usage_metadata.get("input_tokens", 0)
-                total_output_tokens += raw_msg.usage_metadata.get("output_tokens", 0)
+            if raw_msg and raw_msg.get("usage_metadata"):
+                total_input_tokens += raw_msg["usage_metadata"].get("input_tokens", 0)
+                total_output_tokens += raw_msg["usage_metadata"].get("output_tokens", 0)
 
-            if not raw_msg or not hasattr(raw_msg, "content"):
+            if not raw_msg or "content" not in raw_msg:
                 logger.warning(f"  [!] LLM devolvió respuesta vacía en {inp['_location']}.")
                 continue
 
-            content = raw_msg.content
+            content = raw_msg["content"]
             if isinstance(content, list):
                 # Handle Gemini returning a list of dicts
                 text_parts = [part["text"] for part in content if isinstance(part, dict) and "text" in part]

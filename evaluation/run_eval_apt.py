@@ -225,13 +225,13 @@ def run_evaluation():
         df = df.iloc[:len(predicted_labels)].copy()
         
     if len(df) == 0:
-        print("\n[!] No se evaluó ningún reporte. Saliendo.")
-        sys.exit(429 if 'llm_crashed' in locals() else 0)
-        
-    # Evaluar y exportar
-    df['predicted_labels'] = predicted_labels
-    evaluator = Evaluator(df)
-    results = evaluator.evaluate()
+        print("\n[!] No se evaluó ningún reporte por completo. Creando JSON base para permitir reanudación.")
+        results = {"micro": {"precision": 0, "recall": 0, "f1": 0, "f0.5": 0}}
+    else:
+        # Evaluar y exportar
+        df['predicted_labels'] = predicted_labels
+        evaluator = Evaluator(df)
+        results = evaluator.evaluate()
     
     # Calcular tiempo total de esta config
     total_seconds = sum(
