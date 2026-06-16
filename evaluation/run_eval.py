@@ -140,15 +140,31 @@ def run_tram_evaluation(file_path: str, sample_size: int = None, pipeline_type: 
         
         try:
             if pipeline_type == "langchain":
+                t_start = time.time()
                 doc = Document(page_content=text, metadata={"chunk_index": idx, "page_number": 1})
                 candidates = retriever.get_filtered_mitre_candidates([doc], threshold=0.2)
+                p3_time = time.time() - t_start
                 if candidates:
+                    t_inf = time.time()
                     detections, artificial_delay, tokens = analyzer.analyze_candidates(candidates)
+                    p4_time = (time.time() - t_inf) - artificial_delay
                 else:
-                    detections, artificial_delay, tokens = [], 0.0, {"input_tokens": 0, "output_tokens": 0}
+                    detections, artificial_delay, tokens = [], 0.0, {"input_tokens": 0, "output_tokens": 0, "api_crashed": False}
+                    p4_time = 0.0
+                
                 predicted_ids = [d.technique_id for d in detections if d.is_present]
+                
+                timing_info = {
+                    "phase1_ingestion_seconds": 0.0,
+                    "phase3_retrieval_seconds": round(p3_time, 2),
+                    "phase4_inference_seconds": round(p4_time, 2),
+                    "input_tokens": tokens.get("input_tokens", 0),
+                    "output_tokens": tokens.get("output_tokens", 0),
+                    "api_crashed": tokens.get("api_crashed", False)
+                }
                     
             elif pipeline_type == "langgraph":
+                t_start = time.time()
                 sanitized_chunks = [{"text": text, "metadata": {"chunk_index": idx}}]
                 global_context = "This is an isolated sentence from a CTI report."
                 
@@ -169,9 +185,16 @@ def run_tram_evaluation(file_path: str, sample_size: int = None, pipeline_type: 
                     break
                     
                 detections = [] # Mock for structural consistency if needed
-                tokens = {
+                
+                p4_time = timing_ph3.get("consolidator_seconds", 0) + timing_ph3.get("validator_node_seconds", 0) + timing_ph3.get("extraction_oracle_node_seconds", 0) + timing_ph3.get("triage_node_seconds", 0)
+                timing_info = {
+                    "phase1_ingestion_seconds": 0.0,
+                    "phase3_retrieval_seconds": 0.0,
+                    "phase4_inference_seconds": round(p4_time, 2),
+                    "langgraph_internal_breakdown": timing_ph3,
                     "input_tokens": timing_ph3.get("input_tokens", 0),
-                    "output_tokens": timing_ph3.get("output_tokens", 0)
+                    "output_tokens": timing_ph3.get("output_tokens", 0),
+                    "api_crashed": timing_ph3.get("api_crashed", False)
                 }
 
             # Serializar las detecciones de LangChain (Pydantic objects a dict) si es necesario
@@ -228,15 +251,13 @@ def run_tram_evaluation(file_path: str, sample_size: int = None, pipeline_type: 
                 metrics["TN"] = 1
 
             detailed_results.append({
-                "sentence_id": idx,
                 "source_file": f"tram_sentence_{idx}",
-                "text": text,
                 "true_labels": true_lbls,
                 "predicted_labels_raw": [r.get("technique_id") if isinstance(r, dict) else r.technique_id for r in extracted_payload],
                 "predicted_labels_normalized": predicted_ids,
                 "metrics": metrics,
                 "traceability_summary": traceability_summary,
-                "timing_breakdown": tokens,
+                "timing_breakdown": timing_info,
                 "extracted_ttps": extracted_payload
             })
             
@@ -261,7 +282,7 @@ def run_tram_evaluation(file_path: str, sample_size: int = None, pipeline_type: 
                 break
                 
             predicted_ids = []
-            detailed_results.append({"sentence_id": idx, "source_file": f"tram_sentence_{idx}", "error": error_str})
+            detailed_results.append({"source_file": f"tram_sentence_{idx}", "error": error_str})
 
         predicted_labels.append(predicted_ids)
         

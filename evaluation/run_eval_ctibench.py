@@ -6,7 +6,7 @@ import argparse
 import contextlib
 from datetime import datetime
 from tqdm import tqdm
-from langchain.docstore.document import Document
+from langchain_core.documents import Document
 
 # Add project root to sys.path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -15,38 +15,15 @@ from evaluation.data_loaders import CtibenchDataLoader
 from evaluation.metrics_calculator import Evaluator
 from src.langchain_pipeline.phase4_inference import TTPAnalyzer
 from src.langgraph_agents.main_langgraph import process_full_report
-from qdrant_client import QdrantClient
-from langchain_qdrant import QdrantVectorStore
-from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_qdrant.retrieval_mode import RetrievalMode
-from src.langchain_pipeline.phase3_retriever import CandidateRetriever
-from fastembed import SparseTextEmbedding
 from dotenv import load_dotenv
 
 load_dotenv(override=True)
 
-class FastEmbedSparse:
-    def __init__(self, model_name="Qdrant/bm25"):
-        self.model = SparseTextEmbedding(model_name=model_name)
-    def embed_query(self, query: str):
-        return list(self.model.embed([query]))[0]
-    def embed_documents(self, texts):
-        return list(self.model.embed(texts))
-
 def setup_langchain_components():
-    qdrant_host = os.getenv("QDRANT_HOST", "localhost")
-    qdrant_port = os.getenv("QDRANT_PORT", "6333")
-    qdrant_url = f"http://{qdrant_host}:{qdrant_port}"
-    client = QdrantClient(url=qdrant_url)
-    
-    vector_store = QdrantVectorStore(
-        client=client, collection_name="mitre_attack",
-        embedding=HuggingFaceEmbeddings(model_name="BAAI/bge-m3"),
-        sparse_embedding=FastEmbedSparse(model_name="Qdrant/bm25"),
-        retrieval_mode=RetrievalMode.HYBRID
-    )
-    retriever = CandidateRetriever(vector_store=vector_store)
+    from src.langgraph_agents.tools import get_retriever
     from src.core.llm_factory import get_llm
+    
+    retriever = get_retriever()
     llm = get_llm(temperature=0.0)
     analyzer = TTPAnalyzer(llm=llm)
     
@@ -89,8 +66,9 @@ def run_evaluation():
         sys.exit(1)
         
     limit = args.limit if args.limit else 200
-    print(f"[*] Subsampling {limit} random records for testing...")
-    df = df.sample(n=limit, random_state=42).reset_index(drop=True)
+    actual_limit = min(limit, len(df))
+    print(f"[*] Subsampling {actual_limit} random records for testing...")
+    df = df.sample(n=actual_limit, random_state=42).reset_index(drop=True)
         
     print(f"[*] Total sentences for evaluation: {len(df)}")
     
@@ -135,16 +113,31 @@ def run_evaluation():
         
         try:
             if pipeline_type == "langchain":
+                t_start = time.time()
                 doc = Document(page_content=text, metadata={"chunk_index": idx, "page_number": 1})
                 candidates = retriever.get_filtered_mitre_candidates([doc], threshold=0.2)
+                p3_time = time.time() - t_start
                 if candidates:
+                    t_inf = time.time()
                     detections, artificial_delay, tokens = analyzer.analyze_candidates(candidates)
+                    p4_time = (time.time() - t_inf) - artificial_delay
                 else:
-                    detections, artificial_delay, tokens = [], 0.0, {"input_tokens": 0, "output_tokens": 0}
+                    detections, artificial_delay, tokens = [], 0.0, {"input_tokens": 0, "output_tokens": 0, "api_crashed": False}
+                    p4_time = 0.0
                 
                 extracted_payload = [d.model_dump() for d in detections if d.is_present]
+                
+                timing_info = {
+                    "phase1_ingestion_seconds": 0.0,
+                    "phase3_retrieval_seconds": round(p3_time, 2),
+                    "phase4_inference_seconds": round(p4_time, 2),
+                    "input_tokens": tokens.get("input_tokens", 0),
+                    "output_tokens": tokens.get("output_tokens", 0),
+                    "api_crashed": tokens.get("api_crashed", False)
+                }
                     
             elif pipeline_type == "langgraph":
+                t_start = time.time()
                 sanitized_chunks = [{"text": text, "metadata": {"chunk_index": idx}}]
                 global_context = "This is a tool/malware description from CTIBench."
                 
@@ -158,9 +151,16 @@ def run_evaluation():
                         extracted_payload = result.get("extracted_ttps", [])
                         predicted_ids = [ttp.get("technique_id") for ttp in extracted_payload]
                         timing_ph3 = result.get("timing_breakdown_phase3", {})
-                        tokens = {
+                        
+                        p4_time = timing_ph3.get("consolidator_seconds", 0) + timing_ph3.get("validator_node_seconds", 0) + timing_ph3.get("extraction_oracle_node_seconds", 0) + timing_ph3.get("triage_node_seconds", 0)
+                        timing_info = {
+                            "phase1_ingestion_seconds": 0.0,
+                            "phase3_retrieval_seconds": 0.0,
+                            "phase4_inference_seconds": round(p4_time, 2),
+                            "langgraph_internal_breakdown": timing_ph3,
                             "input_tokens": timing_ph3.get("input_tokens", 0),
-                            "output_tokens": timing_ph3.get("output_tokens", 0)
+                            "output_tokens": timing_ph3.get("output_tokens", 0),
+                            "api_crashed": timing_ph3.get("api_crashed", False)
                         }
                         
                 if pipeline_type == "langgraph" and timing_ph3.get("api_crashed"):
@@ -215,15 +215,13 @@ def run_evaluation():
                 metrics["TN"] = 1
             
             detailed_results.append({
-                "sentence_id": idx,
-                "source_file": f"ctibench_sentence_{idx}",
-                "text": text,
+                "source_file": f"ctibench_doc_{idx}",
                 "true_labels": true_lbls,
-                "predicted_labels_raw": [r.get("technique_id") if isinstance(r, dict) else r.technique_id for r in extracted_payload],
+                "predicted_labels_raw": [r.get("technique_id") if isinstance(r, dict) else getattr(r, 'technique_id', str(r)) for r in extracted_payload],
                 "predicted_labels_normalized": predicted_ids,
                 "metrics": metrics,
                 "traceability_summary": traceability_summary,
-                "timing_breakdown": tokens,
+                "timing_breakdown": timing_info,
                 "extracted_ttps": extracted_payload
             })
             
@@ -242,7 +240,7 @@ def run_evaluation():
                 break
                 
             predicted_ids = []
-            detailed_results.append({"sentence_id": idx, "source_file": f"ctibench_doc_{idx}", "error": error_str})
+            detailed_results.append({"source_file": f"ctibench_doc_{idx}", "error": error_str})
             
         predicted_labels.append(predicted_ids)
         

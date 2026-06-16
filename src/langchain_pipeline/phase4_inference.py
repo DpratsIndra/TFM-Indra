@@ -7,6 +7,9 @@ from src.core.schemas import ChunkExtraction, TTPDetection, Evidence
 from dotenv import load_dotenv
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.output_parsers import PydanticOutputParser
+from pydantic import ValidationError
+import json
 
 
 logger = logging.getLogger(__name__)
@@ -56,7 +59,8 @@ class TTPAnalyzer:
             "4. Preserve the exact `location` and `Score` provided in the evidence tags.\n"
             "5. Map contextualized masked tags (e.g., <IoC_URL>) to their tactical intent.\n"
             "6. Exclusion Criteria: Strictly map observable, technical intrusion activity. Exclude geopolitical context or attribution theories.\n"
-            "7. CRITICAL JSON FORMATTING: In the 'procedure' field, you MUST write a full descriptive sentence of what the attacker did (e.g., 'The attacker used Ngrok to establish a tunnel.'). DO NOT write single words or tactic names."
+            "7. CRITICAL JSON FORMATTING: In the 'procedure' field, you MUST write a full descriptive sentence of what the attacker did (e.g., 'The attacker used Ngrok to establish a tunnel.'). DO NOT write single words or tactic names.\n"
+            "8. {format_instructions}"
         )
         if self.use_prompt_repetition:
             system_instruction = (
@@ -66,7 +70,7 @@ class TTPAnalyzer:
         user_message = (
             "<candidate_techniques>\n{candidates_str}\n</candidate_techniques>\n\n"
             "<chunk_text>\n{chunk_text}\n</chunk_text>\n\n"
-            "Based exclusively on the chunk text, extract the techniques from the candidates that are confirmed."
+            "Based exclusively on the chunk text, extract the techniques from the candidates that are confirmed. You MUST output ONLY a valid JSON object."
         )
         if self.use_prompt_repetition:
             user_message = f"{user_message}\n\n{user_message}"
@@ -80,8 +84,9 @@ class TTPAnalyzer:
             logger.warning("No candidates to analyze.")
             return [], 0.0
 
+        parser = PydanticOutputParser(pydantic_object=ChunkExtraction)
         prompt = self._build_prompt_template()
-        chain = prompt | self.llm.with_structured_output(ChunkExtraction, include_raw=True)
+        chain = prompt | self.llm
 
         inputs = []
         for data in chunk_results:
@@ -113,6 +118,7 @@ class TTPAnalyzer:
                 {
                     "chunk_text": chunk.page_content,
                     "candidates_str": "\n\n".join(cand_strings),
+                    "format_instructions": parser.get_format_instructions(),
                     "_location": f"Page {page_num}, Chunk {chunk_idx}",
                     "_meta_map": tech_metadata_map,
                 }
@@ -193,25 +199,36 @@ class TTPAnalyzer:
                     if not api_crashed_flag:
                         logger.error(f"[!] ABORTANDO: Fallo de API/Rate Limit detectado en chunk {inp.get('_location')}. Guardando progreso parcial...")
                         api_crashed_flag = True
-                    continue  # Detenemos la agregación de este chunk, pero seguimos iterando para coger los exitosos
+                    continue
                 else:
-                    logger.error(f"No TTPs extracted for chunk {inp.get('_location')} due to critical failure.")
+                    logger.error(f"No TTPs extracted for chunk {inp.get('_location')} due to critical failure: {res_dict}")
                     continue
 
-            if not res_dict or not isinstance(res_dict, dict):
-                logger.warning(f"  [!] LLM devolvió un formato no esperado en {inp['_location']}.")
-                continue
-
-            raw_msg = res_dict.get("raw")
+            # res_dict is now an AIMessage since we just did prompt | llm
+            raw_msg = res_dict
             if raw_msg and hasattr(raw_msg, "usage_metadata") and raw_msg.usage_metadata:
                 total_input_tokens += raw_msg.usage_metadata.get("input_tokens", 0)
                 total_output_tokens += raw_msg.usage_metadata.get("output_tokens", 0)
 
-            res = res_dict.get("parsed")
+            if not raw_msg or not hasattr(raw_msg, "content"):
+                logger.warning(f"  [!] LLM devolvió respuesta vacía en {inp['_location']}.")
+                continue
+
+            content = raw_msg.content
+            if isinstance(content, list):
+                # Handle Gemini returning a list of dicts
+                text_parts = [part["text"] for part in content if isinstance(part, dict) and "text" in part]
+                content = "".join(text_parts) if text_parts else str(content)
+            elif not isinstance(content, str):
+                content = str(content)
+
+            try:
+                res = parser.parse(content)
+            except Exception as e:
+                logger.warning(f"  [!] Fallo de parseo JSON en {inp['_location']}: {e}")
+                continue
 
             if not res or not hasattr(res, "extracted_ttps") or not res.extracted_ttps:
-                if not res:
-                    logger.warning(f"  [!] LLM devolvió NONE en {inp['_location']}. Posible fallo de parseo JSON/Structured Output de Gemma.")
                 continue
 
             for ext in res.extracted_ttps:
