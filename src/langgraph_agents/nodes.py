@@ -72,6 +72,29 @@ class ValidationResult(BaseModel):
         description="A list of feedback notes explaining what was hallucinated or missing."
     )
 
+class SimpleDraftTTP(BaseModel):
+    technique_id: str = Field(
+        description="The MITRE ATT&CK Technique ID (e.g., T1059.001)"
+    )
+    procedure: str = Field(
+        description="The specific procedure or behavior observed in the text"
+    )
+    justification: str = Field(
+        default="Verified by Validator",
+        description="Technical explanation of why this chunk demonstrates the technique.",
+    )
+
+class SimpleDraftTTPList(BaseModel):
+    ttps: List[SimpleDraftTTP] = Field(description="A list of drafted TTPs from the text.")
+
+class SimpleValidationResult(BaseModel):
+    valid_ttps: List[SimpleDraftTTP] = Field(
+        description="A list of approved TTPs that strictly match the text."
+    )
+    feedback_notes: List[str] = Field(
+        description="A list of feedback notes explaining what was hallucinated or missing."
+    )
+
 
 # ==============================================================================
 # NODE FUNCTIONS
@@ -82,11 +105,14 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 
 def print_retry_warning(retry_state):
     import sys
-    print(f"\n[⚠️ ALARMA DE RATE LIMIT] Google AI Studio ha rechazado la petición.", file=sys.stderr)
+    import os
+    profile = os.getenv("EXECUTION_PROFILE", "LOCAL").upper()
+    provider = "Google AI Studio" if profile == "LOCAL" else "vLLM Remote"
+    print(f"\n[⚠️ ALARMA DE CONEXIÓN] {provider} ha rechazado o fallado en la petición.", file=sys.stderr)
     print(f"[⏳] Tenacity esperando {retry_state.next_action.sleep} segundos antes del reintento #{retry_state.attempt_number}...", file=sys.stderr)
 
 @retry(
-    stop=stop_after_attempt(2), 
+    stop=stop_after_attempt(4), 
     wait=wait_exponential(multiplier=2, min=5, max=15),
     before_sleep=print_retry_warning,
     reraise=True
@@ -297,7 +323,10 @@ def extractor_node(state: ChunkState) -> dict:
 
     # 3. EXTRACTION (BRAINSTORMER)
     llm = get_llm(tier="pro")
-    structured_llm = llm.with_structured_output(DraftTTPList, include_raw=True)
+    
+    use_simple_schema = os.getenv("SIMPLIFIED_JSON_SCHEMA", "False").lower() in ("true", "1", "yes")
+    OutputSchema = SimpleDraftTTPList if use_simple_schema else DraftTTPList
+    structured_llm = llm.with_structured_output(OutputSchema, include_raw=True)
 
     use_prompt_repetition = os.getenv("USE_PROMPT_REPETITION", "False").lower() in (
         "true",
@@ -429,7 +458,10 @@ def validator_node(state: ChunkState) -> dict:
         }
 
     llm = get_llm(tier="pro", temperature=0.2)
-    structured_llm = llm.with_structured_output(ValidationResult, include_raw=True)
+    
+    use_simple_schema = os.getenv("SIMPLIFIED_JSON_SCHEMA", "False").lower() in ("true", "1", "yes")
+    ValidationSchema = SimpleValidationResult if use_simple_schema else ValidationResult
+    structured_llm = llm.with_structured_output(ValidationSchema, include_raw=True)
 
     use_prompt_repetition = os.getenv("USE_PROMPT_REPETITION", "False").lower() in (
         "true",
@@ -505,6 +537,7 @@ def validator_node(state: ChunkState) -> dict:
             ttp_dict["name"] = current_meta_map[tech_id]["name"]
             ttp_dict["tactic"] = current_meta_map[tech_id]["tactics"]
             ttp_dict["confidence_score"] = current_meta_map[tech_id]["score"]
+            ttp_dict["location"] = f"Page {state.get('chunk_metadata', {}).get('page_number', '?')}, Chunk {state.get('chunk_metadata', {}).get('chunk_index', '?')}"
             new_approved.append(ttp_dict)
 
     # Set feedback to current loop's rejections only

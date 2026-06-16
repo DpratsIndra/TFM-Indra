@@ -14,14 +14,8 @@ def bootstrap_environment():
     """Instala dependencias e inicia los servicios requeridos (Ollama y Qdrant)."""
     print("[INFO] Configuring execution environment...")
 
-    print("[INFO] Installing dependencies from requirements.txt...")
-    try:
-        subprocess.run(
-            [sys.executable, "-m", "pip", "install", "-r", "requirements.txt"],
-            check=True,
-        )
-    except Exception as e:
-        print(f"[ERROR] Error installing dependencies: {e}")
+    # Pip install step removed to avoid console spam.
+    # User is expected to have installed requirements.txt manually.
 
     llm_provider = os.environ.get("LLM_PROVIDER", "ollama").lower()
 
