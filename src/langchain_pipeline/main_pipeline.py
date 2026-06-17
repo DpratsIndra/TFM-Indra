@@ -38,7 +38,7 @@ import logging
 
 from dotenv import load_dotenv
 
-load_dotenv(override=True)
+load_dotenv()
 
 from src.langchain_pipeline.phase1_ingestion import ReportIngestor
 

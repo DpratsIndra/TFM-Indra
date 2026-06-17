@@ -16,7 +16,7 @@ from src.langgraph_agents.main_langgraph import run_langgraph_extraction
 from dotenv import load_dotenv
 
 # Cargar variables de entorno (USE_VLM_EXTRACTION, USE_PROMPT_REPETITION, etc.)
-load_dotenv(override=True)
+load_dotenv()
 
 def run_evaluation():
     """

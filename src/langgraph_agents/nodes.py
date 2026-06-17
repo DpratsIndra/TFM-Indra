@@ -145,7 +145,8 @@ def triage_node(state: ChunkState) -> dict:
     chunk_text = state["chunk_text"]
 
     llm = get_llm(tier="lite")
-    structured_llm = llm.with_structured_output(TriageDecision, include_raw=True)
+    from langchain_core.output_parsers import PydanticOutputParser
+    parser = PydanticOutputParser(pydantic_object=TriageDecision)
 
     use_prompt_repetition = os.getenv("USE_PROMPT_REPETITION", "False").lower() in (
         "true",
@@ -157,7 +158,8 @@ def triage_node(state: ChunkState) -> dict:
         "Role: Cyber Threat Intelligence Analyst.\n"
         "Task: Perform a binary classification on text chunks.\n"
         "Condition: Return True if the text contains cybersecurity threat intelligence, attacker behavior, or technical indicators. Return False otherwise.\n"
-        "Note: The text may be in any language (Spanish, Russian, etc.). Analyze it natively."
+        "Note: The text may be in any language (Spanish, Russian, etc.). Analyze it natively.\n\n"
+        "{format_instructions}"
     )
     if use_prompt_repetition:
         sys_prompt = f"{sys_prompt}\n\nReminder of Rules:\n{sys_prompt}"
@@ -173,23 +175,30 @@ def triage_node(state: ChunkState) -> dict:
         ]
     )
 
-    chain = prompt | structured_llm
+    chain = prompt | llm
 
-    result = safe_invoke(chain, {"chunk_text": chunk_text})
+    raw_msg = safe_invoke(chain, {"chunk_text": chunk_text, "format_instructions": parser.get_format_instructions()})
 
     in_tok = 0
     out_tok = 0
     
-    if result is None:
+    if raw_msg is None:
         is_relevant = True
     else:
-        raw_msg = result.get("raw")
-        if raw_msg and hasattr(raw_msg, "usage_metadata") and raw_msg.usage_metadata:
+        if hasattr(raw_msg, "usage_metadata") and raw_msg.usage_metadata:
             in_tok += raw_msg.usage_metadata.get("input_tokens", 0)
             out_tok += raw_msg.usage_metadata.get("output_tokens", 0)
         
-        parsed = result.get("parsed")
-        is_relevant = parsed.is_relevant if parsed else True
+        content = raw_msg.content if hasattr(raw_msg, "content") else str(raw_msg)
+        if isinstance(content, list):
+            text_parts = [part["text"] for part in content if isinstance(part, dict) and "text" in part]
+            content = "".join(text_parts) if text_parts else str(content)
+            
+        try:
+            parsed = parser.parse(content)
+            is_relevant = parsed.is_relevant
+        except Exception:
+            is_relevant = True # Fallback a True si falla el parser
 
     c_idx = state.get("chunk_metadata", {}).get("chunk_index", "?")
     print(f"[DEBUG] [Chunk {c_idx}] Triage - Is Relevant: {is_relevant}")
@@ -326,7 +335,8 @@ def extractor_node(state: ChunkState) -> dict:
     
     use_simple_schema = os.getenv("SIMPLIFIED_JSON_SCHEMA", "False").lower() in ("true", "1", "yes")
     OutputSchema = SimpleDraftTTPList if use_simple_schema else DraftTTPList
-    structured_llm = llm.with_structured_output(OutputSchema, include_raw=True)
+    from langchain_core.output_parsers import PydanticOutputParser
+    parser = PydanticOutputParser(pydantic_object=OutputSchema)
 
     use_prompt_repetition = os.getenv("USE_PROMPT_REPETITION", "False").lower() in (
         "true",
@@ -342,7 +352,8 @@ def extractor_node(state: ChunkState) -> dict:
         "3. Ignore previously approved or rejected techniques.\n"
         "4. Focus exclusively on observable actions.\n"
         "5. CRITICAL JSON FORMATTING: In the 'procedure' field, you MUST write a full descriptive sentence of what the attacker did (e.g., 'The attacker used Ngrok to establish a tunnel.'). DO NOT write single words or tactic names.\n"
-        "6. Output strictly according to the requested JSON schema."
+        "6. Output strictly according to the requested JSON schema.\n\n"
+        "{format_instructions}"
     )
     if use_prompt_repetition:
         sys_prompt = f"{sys_prompt}\n\nReminder of Rules:\n{sys_prompt}"
@@ -372,16 +383,26 @@ def extractor_node(state: ChunkState) -> dict:
     if use_prompt_repetition:
         prompt_text = f"{prompt_text}\n\n{prompt_text}"
 
-    parsed_result_dict = safe_invoke(prompt | structured_llm, {"prompt_text": prompt_text})
+    parsed_result_dict = safe_invoke(prompt | llm, {"prompt_text": prompt_text, "format_instructions": parser.get_format_instructions()})
 
+    parsed_result = None
     if parsed_result_dict is not None:
-        raw_msg = parsed_result_dict.get("raw")
-        if raw_msg and hasattr(raw_msg, "usage_metadata") and raw_msg.usage_metadata:
+        raw_msg = parsed_result_dict
+        if hasattr(raw_msg, "usage_metadata") and raw_msg.usage_metadata:
             in_tok += raw_msg.usage_metadata.get("input_tokens", 0)
             out_tok += raw_msg.usage_metadata.get("output_tokens", 0)
             
-        parsed_result = parsed_result_dict.get("parsed")
-        if parsed_result:
+        content = raw_msg.content if hasattr(raw_msg, "content") else str(raw_msg)
+        if isinstance(content, list):
+            text_parts = [part["text"] for part in content if isinstance(part, dict) and "text" in part]
+            content = "".join(text_parts) if text_parts else str(content)
+            
+        try:
+            parsed_result = parser.parse(content)
+        except Exception as e:
+            print(f"[ERROR] Extractor parsing failed: {e}")
+            
+        if parsed_result and parsed_result.ttps:
             loc = f"Page {state.get('chunk_metadata', {}).get('page_number', '?')}, Chunk {state.get('chunk_metadata', {}).get('chunk_index', '?')}"
             for ttp in parsed_result.ttps:
                 draft = ttp.model_dump()
@@ -461,7 +482,8 @@ def validator_node(state: ChunkState) -> dict:
     
     use_simple_schema = os.getenv("SIMPLIFIED_JSON_SCHEMA", "False").lower() in ("true", "1", "yes")
     ValidationSchema = SimpleValidationResult if use_simple_schema else ValidationResult
-    structured_llm = llm.with_structured_output(ValidationSchema, include_raw=True)
+    from langchain_core.output_parsers import PydanticOutputParser
+    parser = PydanticOutputParser(pydantic_object=ValidationSchema)
 
     use_prompt_repetition = os.getenv("USE_PROMPT_REPETITION", "False").lower() in (
         "true",
@@ -478,7 +500,8 @@ def validator_node(state: ChunkState) -> dict:
         "3. Approve the technique if the text contains concrete evidence of the technical action described.\n"
         "4. Reject the technique if it is based solely on theoretical motives or implies the action did not occur.\n"
         "5. Provide specific feedback for rejected techniques to improve extraction accuracy.\n"
-        "6. Validate each technique independently."
+        "6. Validate each technique independently.\n\n"
+        "{format_instructions}"
     )
 
     if use_prompt_repetition:
@@ -496,7 +519,7 @@ def validator_node(state: ChunkState) -> dict:
         ]
     )
 
-    chain = prompt | structured_llm
+    chain = prompt | llm
 
     result_dict = safe_invoke(
         chain,
@@ -504,6 +527,7 @@ def validator_node(state: ChunkState) -> dict:
             "global_context": state.get("global_context", "None provided."),
             "chunk_text": state["chunk_text"],
             "draft_ttps": json.dumps(draft_ttps_list, indent=2),
+            "format_instructions": parser.get_format_instructions()
         },
     )
     
@@ -514,12 +538,21 @@ def validator_node(state: ChunkState) -> dict:
         print(f"[DEBUG] [Chunk {c_idx}] Validator - Validation failed gracefully.")
         return {"approved_ttps": [], "validation_feedback": "", "draft_ttps": []}
 
-    raw_msg = result_dict.get("raw")
-    if raw_msg and hasattr(raw_msg, "usage_metadata") and raw_msg.usage_metadata:
+    raw_msg = result_dict
+    if hasattr(raw_msg, "usage_metadata") and raw_msg.usage_metadata:
         in_tok += raw_msg.usage_metadata.get("input_tokens", 0)
         out_tok += raw_msg.usage_metadata.get("output_tokens", 0)
         
-    result = result_dict.get("parsed")
+    content = raw_msg.content if hasattr(raw_msg, "content") else str(raw_msg)
+    if isinstance(content, list):
+        text_parts = [part["text"] for part in content if isinstance(part, dict) and "text" in part]
+        content = "".join(text_parts) if text_parts else str(content)
+        
+    result = None
+    try:
+        result = parser.parse(content)
+    except Exception as e:
+        print(f"[ERROR] Validator parsing failed: {e}")
 
     current_meta_map = state.get("metadata_map", {})
     new_approved = []

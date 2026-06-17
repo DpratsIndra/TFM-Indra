@@ -17,7 +17,7 @@ from src.langchain_pipeline.phase4_inference import TTPAnalyzer
 from src.langgraph_agents.main_langgraph import process_full_report
 from dotenv import load_dotenv
 
-load_dotenv(override=True)
+load_dotenv()
 
 def setup_langchain_components():
     from src.langgraph_agents.tools import get_retriever
@@ -78,6 +78,10 @@ def run_evaluation():
     timestamp = datetime.now().strftime("%Y%m%d_%H%M")
     output_filename = f"ctibench_eval_{pipeline_type}_{model_used}_{timestamp}.json"
     
+    predicted_labels = []
+    detailed_results = []
+    hierarchy_stats = {"total_exact_matches": 0, "total_more_detailed": 0, "total_more_general": 0}
+
     if args.resume_from and os.path.exists(args.resume_from):
         print(f"[*] Resuming from checkpoint: {args.resume_from}")
         output_path = args.resume_from
@@ -96,9 +100,7 @@ def run_evaluation():
         output_path = os.path.join("data", "output", "evaluations", output_filename)
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
         
-    predicted_labels = []
-    detailed_results = []
-    hierarchy_stats = {"total_exact_matches": 0, "total_more_detailed": 0, "total_more_general": 0}
+        start_idx = 0
     
     start_time = time.time()
     
