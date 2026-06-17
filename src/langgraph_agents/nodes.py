@@ -122,11 +122,7 @@ def _invoke_with_retry(callable_chain, input_data):
 
 def safe_invoke(callable_chain, input_data):
     """Safely invokes a chain or agent with exponential backoff. Raises exception if all retries fail."""
-    # PROACTIVE RATE LIMITING: Google AI Studio allows 15 RPM (1 request every 4 seconds)
-    # Solo aplicamos el sleep si estamos en el perfil LOCAL (Gemini API)
-    import os
-    if os.getenv("EXECUTION_PROFILE", "LOCAL").upper() == "LOCAL":
-        time.sleep(4.5)
+    # RATE LIMITING: Handled dynamically by Tenacity (@retry) upon receiving 429 errors.
     
     try:
         return _invoke_with_retry(callable_chain, input_data)

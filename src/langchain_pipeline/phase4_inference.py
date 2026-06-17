@@ -164,9 +164,6 @@ class TTPAnalyzer:
             reraise=True,
         )
         def _invoke_chain(inp):
-            # PROACTIVE RATE LIMITING: Google AI Studio allows 15 RPM (1 request every 4 seconds)
-            if is_gemini:
-                time.sleep(4.5)
             try:
                 msg = chain.invoke(inp)
                 # Serialize AIMessage to plain dict
@@ -180,11 +177,11 @@ class TTPAnalyzer:
         stop_event = threading.Event()
 
         def _process_chunk(idx, inp):
-            if stop_event.is_set():
-                return Exception("Aborted due to prior API crash")
             if str(idx) in cached_responses:
                 logger.info(f"[{idx+1}/{len(inputs)}] Loading Chunk {inp['_location']} from cache...")
                 return cached_responses[str(idx)]
+            if stop_event.is_set():
+                return Exception("Aborted due to prior API crash")
 
             logger.info(f"[{idx+1}/{len(inputs)}] Querying LLM for Chunk {inp['_location']}...")
             try:
@@ -214,9 +211,6 @@ class TTPAnalyzer:
             logger.info("Running LangChain sequentially (max_workers=1)...")
             for i, inp in enumerate(inputs):
                 batch_responses[i] = _process_chunk(i, inp)
-                if is_gemini and i < len(inputs) - 1:
-                    time.sleep(4.5)
-                    artificial_delay += 4.5
 
         # Reducer: Consolidar ChunkExtraction de vuelta a List[TTPDetection]
         global_ttps = {}
