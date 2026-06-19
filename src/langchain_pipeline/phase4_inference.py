@@ -75,9 +75,14 @@ class TTPAnalyzer:
         if self.use_prompt_repetition:
             user_message = f"{user_message}\n\n{user_message}"
 
-        return ChatPromptTemplate.from_messages(
-            [("system", system_instruction), ("user", user_message)]
-        )
+        use_gemma = os.getenv("USE_GEMMA4", "False").lower() in ("true", "1", "yes")
+        if use_gemma:
+            combined_message = f"{system_instruction}\n\n---\n\n{user_message}"
+            return ChatPromptTemplate.from_messages([("user", combined_message)])
+        else:
+            return ChatPromptTemplate.from_messages(
+                [("system", system_instruction), ("user", user_message)]
+            )
 
     def analyze_candidates(self, chunk_results: List[Dict[str, Any]], cache_key: str = None):
         if not chunk_results:
