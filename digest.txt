@@ -4,6 +4,7 @@ Directory structure:
     ├── requirements-dev.txt
     ├── requirements.txt
     ├── run_all_evals.sh
+    ├── test_prompt.py
     ├── test_remote_concurrency.py
     ├── TFM.code-workspace
     ├── dashboard/
@@ -33,12 +34,14 @@ Directory structure:
     │   │   ├── phase2_indexer.py
     │   │   ├── phase3_retriever.py
     │   │   └── phase4_inference.py
-    │   └── langgraph_agents/
-    │       ├── graph_builder.py
-    │       ├── main_langgraph.py
-    │       ├── nodes.py
-    │       ├── state.py
-    │       └── tools.py
+    │   ├── langgraph_agents/
+    │   │   ├── graph_builder.py
+    │   │   ├── main_langgraph.py
+    │   │   ├── nodes.py
+    │   │   ├── state.py
+    │   │   └── tools.py
+    │   └── scripts/
+    │       └── generate_diffs.py
     └── .antigravity/
         └── rules.md
 
@@ -153,35 +156,64 @@ echo "======================================================="
 echo "Iniciando suite de evaluaciones en: $EVAL_SCRIPT"
 echo "======================================================="
 
+run_eval() {
+    local cmd="$@"
+    eval "$cmd"
+    local exit_code=$?
+    if [ $exit_code -eq 429 ]; then
+        echo -e "\n[❌] RATE LIMIT DETECTED (Exit code 429). Stopping suite execution to preserve checkpoint."
+        exit 429
+    elif [ $exit_code -ne 0 ] && [ $exit_code -ne 130 ]; then
+        echo -e "\n[⚠️] Command failed with exit code $exit_code: $cmd"
+    fi
+}
+
 # --- LANGCHAIN ---
 echo "[*] Ejecutando LANGCHAIN: Nada (VLM=False, Repetition=False)"
-USE_VLM_EXTRACTION=False USE_PROMPT_REPETITION=False PYTHONPATH=. python "$EVAL_SCRIPT" --pipeline langchain
+run_eval "USE_VLM_EXTRACTION=False USE_PROMPT_REPETITION=False PYTHONPATH=. python \"$EVAL_SCRIPT\" --pipeline langchain"
 
 echo "[*] Ejecutando LANGCHAIN: Solo VLM (VLM=True, Repetition=False)"
-USE_VLM_EXTRACTION=True USE_PROMPT_REPETITION=False PYTHONPATH=. python "$EVAL_SCRIPT" --pipeline langchain
+run_eval "USE_VLM_EXTRACTION=True USE_PROMPT_REPETITION=False PYTHONPATH=. python \"$EVAL_SCRIPT\" --pipeline langchain"
 
 echo "[*] Ejecutando LANGCHAIN: Solo Repetition (VLM=False, Repetition=True)"
-USE_VLM_EXTRACTION=False USE_PROMPT_REPETITION=True PYTHONPATH=. python "$EVAL_SCRIPT" --pipeline langchain
+run_eval "USE_VLM_EXTRACTION=False USE_PROMPT_REPETITION=True PYTHONPATH=. python \"$EVAL_SCRIPT\" --pipeline langchain"
 
 echo "[*] Ejecutando LANGCHAIN: Ambas (VLM=True, Repetition=True)"
-USE_VLM_EXTRACTION=True USE_PROMPT_REPETITION=True PYTHONPATH=. python "$EVAL_SCRIPT" --pipeline langchain
+run_eval "USE_VLM_EXTRACTION=True USE_PROMPT_REPETITION=True PYTHONPATH=. python \"$EVAL_SCRIPT\" --pipeline langchain"
 
 # --- LANGGRAPH ---
 echo "[*] Ejecutando LANGGRAPH: Nada (VLM=False, Repetition=False)"
-USE_VLM_EXTRACTION=False USE_PROMPT_REPETITION=False PYTHONPATH=. python "$EVAL_SCRIPT" --pipeline langgraph
+run_eval "USE_VLM_EXTRACTION=False USE_PROMPT_REPETITION=False PYTHONPATH=. python \"$EVAL_SCRIPT\" --pipeline langgraph"
 
 echo "[*] Ejecutando LANGGRAPH: Solo VLM (VLM=True, Repetition=False)"
-USE_VLM_EXTRACTION=True USE_PROMPT_REPETITION=False PYTHONPATH=. python "$EVAL_SCRIPT" --pipeline langgraph
+run_eval "USE_VLM_EXTRACTION=True USE_PROMPT_REPETITION=False PYTHONPATH=. python \"$EVAL_SCRIPT\" --pipeline langgraph"
 
 echo "[*] Ejecutando LANGGRAPH: Solo Repetition (VLM=False, Repetition=True)"
-USE_VLM_EXTRACTION=False USE_PROMPT_REPETITION=True PYTHONPATH=. python "$EVAL_SCRIPT" --pipeline langgraph
+run_eval "USE_VLM_EXTRACTION=False USE_PROMPT_REPETITION=True PYTHONPATH=. python \"$EVAL_SCRIPT\" --pipeline langgraph"
 
 echo "[*] Ejecutando LANGGRAPH: Ambas (VLM=True, Repetition=True)"
-USE_VLM_EXTRACTION=True USE_PROMPT_REPETITION=True PYTHONPATH=. python "$EVAL_SCRIPT" --pipeline langgraph
+run_eval "USE_VLM_EXTRACTION=True USE_PROMPT_REPETITION=True PYTHONPATH=. python \"$EVAL_SCRIPT\" --pipeline langgraph"
 
 echo "======================================================="
 echo "Suite de evaluaciones finalizada."
 echo "======================================================="
+
+
+
+
+================================================
+FILE: test_prompt.py
+================================================
+from langchain_core.prompts import ChatPromptTemplate
+
+prompt = ChatPromptTemplate.from_messages([
+    ("system", "Hello {name}"),
+])
+
+try:
+    print(prompt.invoke({"name": "David", "extra": "data"}))
+except Exception as e:
+    print(f"ERROR: {e}")
 
 
 
@@ -975,7 +1007,7 @@ def get_academic_sample(df: pd.DataFrame, total_size: int = 1000) -> pd.DataFram
     df_sampled = pd.concat([sample_pos, sample_neg]).sample(frac=1, random_state=42).reset_index(drop=True)
     return df_sampled
 
-def run_tram_evaluation(file_path: str, sample_size: int = None, pipeline_type: str = "langchain"):
+def run_tram_evaluation(file_path: str, sample_size: int = None, pipeline_type: str = "langchain", resume_from: str = None):
     print(f"\n[*] Loading TRAM dataset from: {file_path}")
     loader = TramDataLoader()
     df = loader.load(file_path)
@@ -990,7 +1022,7 @@ def run_tram_evaluation(file_path: str, sample_size: int = None, pipeline_type: 
         df = df.sample(n=sample_size, random_state=42).reset_index(drop=True)
     else:
         # Default academic evaluation size
-        target_size = sample_size if sample_size else 1000
+        target_size = sample_size if sample_size else 200
         print(f"[*] Generating Academic Stratified Sample (N={target_size})...")
         df = get_academic_sample(df, total_size=target_size)
         
@@ -1003,30 +1035,86 @@ def run_tram_evaluation(file_path: str, sample_size: int = None, pipeline_type: 
     
     if pipeline_type == "langchain":
         retriever, analyzer = get_langchain_engine()
+        
+    use_vlm = os.getenv("USE_VLM_EXTRACTION", "False").lower() in ("true", "1", "yes")
+    use_rep = os.getenv("USE_PROMPT_REPETITION", "False").lower() in ("true", "1", "yes")
+    
+    profile = os.getenv("EXECUTION_PROFILE", "LOCAL").upper()
+    if profile == "REMOTE":
+        use_gemma = os.getenv("USE_GEMMA4", "False").lower() in ("true", "1", "yes")
+        model_used = os.getenv("VLLM_MODEL_NAME_GEMMA", "gemma4") if use_gemma else os.getenv("VLLM_MODEL_NAME", "gpt-oss-20b")
+    else:
+        model_used = os.getenv("GEMINI_MODEL", "gemini-flash-lite-latest")
+        
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M")
+    tag_vlm = "vlm_on" if use_vlm else "vlm_off"
+    tag_rep = "rep_on" if use_rep else "rep_off"
+    output_filename = f"tram_eval_{pipeline_type}_{model_used}_{tag_vlm}_{tag_rep}_{timestamp}.json"
+    if resume_from and os.path.exists(resume_from):
+        print(f"[*] Resuming from checkpoint: {resume_from}")
+        output_path = resume_from
+        with open(resume_from, "r", encoding="utf-8") as f:
+            prev_data = json.load(f)
+        if "detailed_executions" in prev_data:
+            detailed_results = prev_data["detailed_executions"]
+            start_idx = len(detailed_results)
+            hierarchy_stats = prev_data.get("hierarchy_analysis", hierarchy_stats)
+            for d in detailed_results:
+                predicted_labels.append(d.get("predicted_labels_normalized", []))
+            print(f"[*] Resumed {start_idx} processed sentences. Continuing from index {start_idx}...")
+        previous_execution_minutes = prev_data.get("total_execution_minutes", 0.0)
+    else:
+        previous_execution_minutes = 0.0
+        output_path = os.path.join("data", "output", "evaluations", output_filename)
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
     
     print("="*60)
     print(f"🚀 INITIATING INFERENCE LOOP ({pipeline_type.upper()})")
     print("="*60)
     
-    for idx, row in tqdm(df.iterrows(), total=total_records, desc="Processing Sentences"):
+    start_time = time.time()
+    
+    start_idx_val = len(predicted_labels)
+    df_remaining = df.iloc[start_idx_val:]
+    
+    for idx, row in tqdm(df_remaining.iterrows(), total=total_records, desc="Processing Sentences", initial=start_idx_val):
+            
         text = row['text']
         true_lbls = row['true_labels']
         predicted_ids = []
         
-        if pipeline_type == "langchain":
-            doc = Document(page_content=text, metadata={"chunk_index": idx, "page_number": 1})
-            candidates = retriever.get_filtered_mitre_candidates([doc], threshold=0.2)
-            if candidates:
-                detections, artificial_delay = analyzer.analyze_candidates(candidates)
+        try:
+            if pipeline_type == "langchain":
+                t_start = time.time()
+                doc = Document(page_content=text, metadata={"chunk_index": idx, "page_number": 1})
+                candidates = retriever.get_filtered_mitre_candidates([doc], threshold=0.2)
+                p3_time = time.time() - t_start
+                if candidates:
+                    t_inf = time.time()
+                    detections, artificial_delay, tokens = analyzer.analyze_candidates(candidates)
+                    p4_time = (time.time() - t_inf) - artificial_delay
+                else:
+                    detections, artificial_delay, tokens = [], 0.0, {"input_tokens": 0, "output_tokens": 0, "api_crashed": False}
+                    p4_time = 0.0
+                
                 predicted_ids = [d.technique_id for d in detections if d.is_present]
                 
-        elif pipeline_type == "langgraph":
-            sanitized_chunks = [{"text": text, "metadata": {"chunk_index": idx}}]
-            global_context = "This is an isolated sentence from a CTI report."
-            
-            with open(os.devnull, 'w') as devnull:
-                with contextlib.redirect_stdout(devnull):
-                    try:
+                timing_info = {
+                    "phase1_ingestion_seconds": 0.0,
+                    "phase3_retrieval_seconds": round(p3_time, 2),
+                    "phase4_inference_seconds": round(p4_time, 2),
+                    "input_tokens": tokens.get("input_tokens", 0),
+                    "output_tokens": tokens.get("output_tokens", 0),
+                    "api_crashed": tokens.get("api_crashed", False)
+                }
+                    
+            elif pipeline_type == "langgraph":
+                t_start = time.time()
+                sanitized_chunks = [{"text": text, "metadata": {"chunk_index": idx}}]
+                global_context = "This is an isolated sentence from a CTI report."
+                
+                with open(os.devnull, 'w') as devnull:
+                    with contextlib.redirect_stdout(devnull):
                         result = process_full_report(
                             source_file=f"tram_sentence_{idx}",
                             global_context=global_context,
@@ -1034,135 +1122,159 @@ def run_tram_evaluation(file_path: str, sample_size: int = None, pipeline_type: 
                         )
                         extracted = result.get("extracted_ttps", [])
                         predicted_ids = [ttp.get("technique_id") for ttp in extracted]
-                    except Exception as e:
-                        print(f"\n[FATAL] Error crítico procesando la sentencia {idx}: {e}")
-                        sys.exit(1)
-
-        # Serializar las detecciones de LangChain (Pydantic objects a dict) si es necesario
-        extracted_payload = []
-        if pipeline_type == "langchain" and 'candidates' in locals() and candidates:
-            if 'detections' in locals():
-                extracted_payload = [d.model_dump() for d in detections if d.is_present]
-        elif pipeline_type == "langgraph" and 'extracted' in locals():
-            extracted_payload = extracted
-            
-        # Normalización y Trazabilidad Jerárquica
-        normalized_preds = []
-        traceability_summary = {"exact": 0, "more_detailed": 0, "more_general": 0}
-        
-        for result_ttp in extracted_payload:
-            pred_id = result_ttp.get("technique_id")
-            if not pred_id: continue
+                        timing_ph3 = result.get("timing_breakdown_phase3", {})
                 
-            matched_true = None
-            match_type = "false_positive"
-            
-            for t in true_lbls:
-                if pred_id == t:
-                    matched_true = t
-                    match_type = "exact"
-                    break
-                elif "." not in t and pred_id.startswith(t + "."):
-                    matched_true = t
-                    match_type = "more_detailed"
-                    break
-                elif "." not in pred_id and t.startswith(pred_id + "."):
-                    matched_true = t
-                    match_type = "more_general"
+                if timing_ph3.get("api_crashed"):
+                    print("\n[!] CORTE DE LLM/API DETECTADO DURANTE ESTA SENTENCIA (LangGraph). Deteniendo ejecución.")
+                    llm_crashed = True
                     break
                     
-            result_ttp["hierarchy_match"] = match_type
-            if matched_true:
-                result_ttp["matched_true_label"] = matched_true
-                normalized_preds.append(matched_true)
-                traceability_summary[match_type] += 1
-                if match_type == "exact": hierarchy_stats["total_exact_matches"] += 1
-                elif match_type == "more_detailed": hierarchy_stats["total_more_detailed"] += 1
-                elif match_type == "more_general": hierarchy_stats["total_more_general"] += 1
-            else:
-                normalized_preds.append(pred_id)
+                detections = [] # Mock for structural consistency if needed
+                
+                p4_time = timing_ph3.get("consolidator_seconds", 0) + timing_ph3.get("validator_node_seconds", 0) + timing_ph3.get("extraction_oracle_node_seconds", 0) + timing_ph3.get("triage_node_seconds", 0)
+                timing_info = {
+                    "phase1_ingestion_seconds": 0.0,
+                    "phase3_retrieval_seconds": 0.0,
+                    "phase4_inference_seconds": round(p4_time, 2),
+                    "langgraph_internal_breakdown": timing_ph3,
+                    "input_tokens": timing_ph3.get("input_tokens", 0),
+                    "output_tokens": timing_ph3.get("output_tokens", 0),
+                    "api_crashed": timing_ph3.get("api_crashed", False)
+                }
 
-        predicted_ids = list(set(normalized_preds))
+            # Serializar las detecciones de LangChain (Pydantic objects a dict) si es necesario
+            extracted_payload = []
+            if pipeline_type == "langchain" and 'candidates' in locals() and candidates:
+                if 'detections' in locals():
+                    extracted_payload = [d.model_dump() for d in detections if d.is_present]
+            elif pipeline_type == "langgraph" and 'extracted' in locals():
+                extracted_payload = extracted
+                
+            # Normalización y Trazabilidad Jerárquica
+            normalized_preds = []
+            traceability_summary = {"exact": 0, "more_detailed": 0, "more_general": 0}
+            
+            for result_ttp in extracted_payload:
+                pred_id = result_ttp.get("technique_id")
+                if not pred_id: continue
+                    
+                matched_true = None
+                match_type = "false_positive"
+                
+                for t in true_lbls:
+                    if pred_id == t:
+                        matched_true = t
+                        match_type = "exact"
+                        break
+                    elif "." not in t and pred_id.startswith(t + "."):
+                        matched_true = t
+                        match_type = "more_detailed"
+                        break
+                    elif "." not in pred_id and t.startswith(pred_id + "."):
+                        matched_true = t
+                        match_type = "more_general"
+                        break
+                        
+                result_ttp["hierarchy_match"] = match_type
+                if matched_true:
+                    result_ttp["matched_true_label"] = matched_true
+                    normalized_preds.append(matched_true)
+                    traceability_summary[match_type] += 1
+                    if match_type == "exact": hierarchy_stats["total_exact_matches"] += 1
+                    elif match_type == "more_detailed": hierarchy_stats["total_more_detailed"] += 1
+                    elif match_type == "more_general": hierarchy_stats["total_more_general"] += 1
+                else:
+                    normalized_preds.append(pred_id)
+
+            predicted_ids = list(set(normalized_preds))
+            tp = list(set(true_lbls) & set(predicted_ids))
+            fp = list(set(predicted_ids) - set(true_lbls))
+            fn = list(set(true_lbls) - set(predicted_ids))
+            
+            metrics = {"TP": len(tp), "FP": len(fp), "FN": len(fn)}
+            if len(true_lbls) == 0 and len(predicted_ids) == 0:
+                metrics["TN"] = 1
+
+            detailed_results.append({
+                "source_file": f"tram_sentence_{idx}",
+                "true_labels": true_lbls,
+                "predicted_labels_raw": [r.get("technique_id") if isinstance(r, dict) else r.technique_id for r in extracted_payload],
+                "predicted_labels_normalized": predicted_ids,
+                "metrics": metrics,
+                "traceability_summary": traceability_summary,
+                "timing_breakdown": timing_info,
+                "extracted_ttps": extracted_payload
+            })
+            
+            # Live Terminal Logging
+            match_status = "✅ MATCH" if set(true_lbls) == set(predicted_ids) else "⚠️ DIFF"
+            print(f"\n[Sentence {idx+1}/{total_records}] {match_status}")
+            print(f"   True: {true_lbls}")
+            print(f"   Pred: {predicted_ids}")
+            
+        except KeyboardInterrupt:
+            print("\n[!] INTERRUPCIÓN MANUAL (Ctrl+C). Cancelando de forma segura y guardando los reportes completados...")
+            llm_crashed = True
+            break
+        except Exception as e:
+            error_str = str(e)
+            print(f"\n[!] Error crítico procesando la sentencia {idx}: {error_str}")
+            
+            api_errors = ["429", "quota", "resourceexhausted", "503", "500", "timeout", "not_found", "api", "connection", "unavailable"]
+            if any(err in error_str.lower() for err in api_errors):
+                print("\n[!] CORTE DE LLM/API DETECTADO. Deteniendo ejecución para salvaguardar el progreso.")
+                llm_crashed = True
+                break
+                
+            predicted_ids = []
+            detailed_results.append({"source_file": f"tram_sentence_{idx}", "error": error_str})
+
         predicted_labels.append(predicted_ids)
         
-        tp = list(set(true_lbls) & set(predicted_ids))
-        fp = list(set(predicted_ids) - set(true_lbls))
-        fn = list(set(true_lbls) - set(predicted_ids))
-
-        detailed_results.append({
-            "sentence_id": idx,
-            "source_file": f"tram_sentence_{idx}", # Para estandarizar con CTIHAL
-            "text": text,
-            "true_labels": true_lbls,
-            "predicted_labels_raw": [r.get("technique_id") for r in extracted_payload if "technique_id" in r],
-            "predicted_labels_normalized": predicted_ids,
-            "metrics": {"TP": len(tp), "FP": len(fp), "FN": len(fn)},
-            "traceability_summary": traceability_summary,
-            "timing_breakdown": {}, # TRAM eval evalúa sentencias puras en memoria
-            "extracted_ttps": extracted_payload
-        })
+        time_to_sleep = 5.0
         
-        # Live Terminal Logging
-        match_status = "✅ MATCH" if set(true_lbls) == set(predicted_ids) else "⚠️ DIFF"
-        print(f"\n[Sentence {idx+1}/{total_records}] {match_status}")
-        print(f"   True: {true_lbls}")
-        print(f"   Pred: {predicted_ids}")
-        
-        time_to_sleep = 4.5 if pipeline_type == "langchain" else 2.0
+        # NUEVO: AUTO-GUARDADO (CHECKPOINT)
+        current_session_minutes = (time.time() - start_time) / 60.0
+        partial_output = {
+            "status": f"INCOMPLETE - Processed {idx + 1}/{total_records}",
+            "model_used": model_used,
+            "total_execution_minutes": round(previous_execution_minutes + current_session_minutes, 2),
+            "hierarchy_analysis": hierarchy_stats,
+            "detailed_executions": detailed_results
+        }
+        with open(output_path, "w", encoding="utf-8") as f:
+            json.dump(partial_output, f, indent=4)
+            
         time.sleep(time_to_sleep)
         
-    df['predicted_labels'] = predicted_labels
+    if len(predicted_labels) < len(df):
+        print(f"\n[!] Evaluadas solo {len(predicted_labels)} de {len(df)} sentencias debido a interrupción.")
+        df = df.iloc[:len(predicted_labels)].copy()
+        
+    if len(df) == 0:
+        print("\n[!] No se evaluó ninguna sentencia por completo. Creando JSON base para permitir reanudación.")
+        results = {"micro": {"precision": 0, "recall": 0, "f1": 0, "f0.5": 0}}
+    else:
+        # Evaluar y exportar
+        df['predicted_labels'] = predicted_labels
+        evaluator = Evaluator(df)
+        results = evaluator.evaluate()
     
-    print("\n[*] Calculating Metrics...")
-    evaluator = Evaluator(df)
-    results = evaluator.evaluate()
+    current_session_minutes = (time.time() - start_time) / 60.0
+    total_execution_minutes = round(previous_execution_minutes + current_session_minutes, 2)
     
     # Estructura JSON estandarizada para TRAM (coincide con CTIHAL)
     final_output = {
-        "total_execution_minutes": 0.0, # Aproximado o no calculado en memoria por sentencia
+        "model_used": model_used,
+        "total_execution_minutes": total_execution_minutes,
         "global_metrics": results,
         "hierarchy_analysis": hierarchy_stats,
         "detailed_executions": detailed_results
     }
     
-    # ---------------------------------------------------------
-    # Extract DIFFs for Qualitative Error Analysis (TFM)
-    # ---------------------------------------------------------
-    diffs = []
-    for idx, row in df.iterrows():
-        true_set = set(row['true_labels'])
-        pred_set = set(row['predicted_labels'])
-        
-        if true_set != pred_set:
-            diffs.append({
-                "sentence_id": idx,
-                "text": row['text'],
-                "human_ground_truth": list(true_set),
-                "llm_prediction": list(pred_set),
-                "false_negatives_missed": list(true_set - pred_set),
-                "false_positives_hallucinated": list(pred_set - true_set)
-            })
-    
-    use_vlm = os.getenv("USE_VLM_EXTRACTION", "False").lower() in ("true", "1", "yes")
-    use_rep = os.getenv("USE_PROMPT_REPETITION", "False").lower() in ("true", "1", "yes")
-    
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M")
-    tag_vlm = "vlm_on" if use_vlm else "vlm_off"
-    tag_rep = "rep_on" if use_rep else "rep_off"
-    
     # Save Main Results
-    output_filename = f"tram_eval_{pipeline_type}_{tag_vlm}_{tag_rep}_{timestamp}.json"
-    output_path = os.path.join("data", "output", "evaluations", output_filename)
-    
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(final_output, f, indent=4)
-        
-    # Save DIFFs
-    diff_filename = f"diff_analysis_{pipeline_type}_{tag_vlm}_{tag_rep}_{timestamp}.json"
-    diff_path = os.path.join("data", "output", "evaluations", diff_filename)
-    with open(diff_path, "w", encoding="utf-8") as f:
-        json.dump(diffs, f, indent=4)
         
     print("\n" + "="*50)
     print(f"🎯 EVALUATION RESULTS (MICRO) - {pipeline_type.upper()}")
@@ -1172,7 +1284,8 @@ def run_tram_evaluation(file_path: str, sample_size: int = None, pipeline_type: 
     print(f"F1-Score:  {results['micro']['f1']}")
     print(f"F0.5-Score:{results['micro']['f0.5']}")
     print(f"\n[+] Full report saved to: {output_path}")
-    print(f"[+] Saved {len(diffs)} conflict cases for manual review in: {diff_path}")
+    if 'llm_crashed' in locals():
+        sys.exit(429)
 
 if __name__ == "__main__":
     import argparse
@@ -1180,13 +1293,14 @@ if __name__ == "__main__":
     parser.add_argument("--dataset_path", type=str, default="data/eval_datasets/tram2/multi_label.json", help="Path to TRAM dataset")
     parser.add_argument("--limit", type=int, default=None, help="Max number of sentences to evaluate (for quick testing)")
     parser.add_argument("--pipeline", type=str, choices=["langchain", "langgraph"], default="langchain", help="Which architecture to evaluate")
+    parser.add_argument("--resume_from", type=str, default=None, help="Path to a previous JSON to resume execution")
     args = parser.parse_args()
 
     if not os.path.exists(args.dataset_path):
         print(f"[!] Error: Dataset not found at {args.dataset_path}")
         sys.exit(1)
         
-    run_tram_evaluation(args.dataset_path, sample_size=args.limit, pipeline_type=args.pipeline)
+    run_tram_evaluation(args.dataset_path, sample_size=args.limit, pipeline_type=args.pipeline, resume_from=args.resume_from)
 
 
 
@@ -1211,7 +1325,7 @@ from src.langgraph_agents.main_langgraph import run_langgraph_extraction
 from dotenv import load_dotenv
 
 # Cargar variables de entorno (USE_VLM_EXTRACTION, USE_PROMPT_REPETITION, etc.)
-load_dotenv(override=True)
+load_dotenv()
 
 def run_evaluation():
     """
@@ -1222,6 +1336,7 @@ def run_evaluation():
     parser.add_argument("--dataset_path", type=str, default="data/eval_datasets/APT_REPORT", help="Path to APT_REPORT dataset")
     parser.add_argument("--limit", type=int, default=None, help="Max number of PDFs to evaluate (for quick testing)")
     parser.add_argument("--pipeline", type=str, choices=["langchain", "langgraph"], default="langgraph", help="Which architecture to evaluate")
+    parser.add_argument("--resume_from", type=str, default=None, help="Path to a previous JSON to resume execution")
     args = parser.parse_args()
 
     # Leer configuración desde las variables de entorno
@@ -1234,6 +1349,15 @@ def run_evaluation():
     print(f"   Pipeline:           {pipeline.upper()}")
     print(f"   VLM Extraction:     {vlm_mode}")
     print(f"   Prompt Repetition:  {rep_mode}")
+    
+    profile = os.getenv("EXECUTION_PROFILE", "LOCAL").upper()
+    if profile == "REMOTE":
+        use_gemma = os.getenv("USE_GEMMA4", "False").lower() in ("true", "1", "yes")
+        model_used = os.getenv("VLLM_MODEL_NAME_GEMMA", "gemma4") if use_gemma else os.getenv("VLLM_MODEL_NAME", "gpt-oss-20b")
+    else:
+        model_used = os.getenv("GEMINI_MODEL", "gemini-flash-lite-latest")
+    
+    print(f"   Model Used:         {model_used} ({profile})")
     print("="*80)
 
     print(f"\n[*] Loading APT_REPORT dataset from: {args.dataset_path}")
@@ -1244,9 +1368,9 @@ def run_evaluation():
         print("[!] Error: No PDFs/MDs matched. Ensure mitre_group_mapping.json exists and dataset has PDFs.")
         sys.exit(1)
         
-    if args.limit:
-        print(f"[*] Subsampling {args.limit} random reports for testing...")
-        df = df.sample(n=args.limit, random_state=42).reset_index(drop=True)
+    limit = args.limit if args.limit else 10
+    print(f"[*] Subsampling {limit} random reports for testing...")
+    df = df.sample(n=limit, random_state=42).reset_index(drop=True)
         
     print(f"[*] Successfully paired {len(df)} PDF raw reports with Ground Truth.")
     
@@ -1254,8 +1378,35 @@ def run_evaluation():
     detailed_results = []
     hierarchy_stats = {"total_exact_matches": 0, "total_more_detailed": 0, "total_more_general": 0}
     
+    # Definir ruta de salida antes del bucle para auto-guardado
+    tag_vlm = "vlm_on" if str(vlm_mode).lower() in ["true", "1", "yes"] else "vlm_off"
+    tag_rep = "rep_on" if str(rep_mode).lower() in ["true", "1", "yes"] else "rep_off"
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M")
+    
+    output_filename = f"apt_eval_{pipeline}_{model_used}_{tag_vlm}_{tag_rep}_{timestamp}.json"
+    
+    if args.resume_from and os.path.exists(args.resume_from):
+        print(f"[*] Resuming from checkpoint: {args.resume_from}")
+        output_path = args.resume_from
+        with open(args.resume_from, "r", encoding="utf-8") as f:
+            prev_data = json.load(f)
+        if "detailed_executions" in prev_data:
+            detailed_results = prev_data["detailed_executions"]
+            start_idx = len(detailed_results)
+            hierarchy_stats = prev_data.get("hierarchy_analysis", hierarchy_stats)
+            for d in detailed_results:
+                predicted_labels.append(d.get("predicted_labels_normalized", []))
+            print(f"[*] Resumed {start_idx} processed reports. Continuing from index {start_idx}...")
+    else:
+        output_path = os.path.join("data", "output", "evaluations", output_filename)
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    
+    start_idx_val = len(predicted_labels)
+    
+    df_remaining = df.iloc[start_idx_val:]
     # Bucle de inferencia E2E
-    for idx, row in tqdm(df.iterrows(), total=len(df), desc=f"Eval: {pipeline}"):
+    for idx, row in tqdm(df_remaining.iterrows(), total=len(df), desc=f"Eval: {pipeline}", initial=start_idx_val):
+            
         pdf_path = row['source_file']
         true_lbls = row['true_labels']
         group_name = row.get('group_name', 'Unknown')
@@ -1312,34 +1463,84 @@ def run_evaluation():
             fp = list(set(predicted_ids) - set(true_lbls))
             fn = list(set(true_lbls) - set(predicted_ids))
             
+            metrics = {"TP": len(tp), "FP": len(fp), "FN": len(fn)}
+            if len(true_lbls) == 0 and len(predicted_ids) == 0:
+                metrics["TN"] = 1
+            
+            if timing.get("api_crashed"):
+                print("\n[!] CORTE DE LLM/API DETECTADO DURANTE ESTE REPORTE. Guardando extracción parcial y deteniendo ejecución.")
+                print("    El documento se reanudará de forma automática gracias al Caché de Chunks en la próxima ejecución.")
+                llm_crashed = True
+                break
+                
             detailed_results.append({
                 "source_file": pdf_path,
                 "group_name": group_name,
                 "true_labels": true_lbls,
                 "predicted_labels_raw": [r.get("technique_id") for r in results_list if "technique_id" in r],
                 "predicted_labels_normalized": predicted_ids,
-                "metrics": {"TP": len(tp), "FP": len(fp), "FN": len(fn)},
+                "metrics": metrics,
                 "traceability_summary": traceability_summary,
                 "timing_breakdown": timing,
                 "extracted_ttps": results_list
             })
             
             tqdm.write(f" 📄 [{group_name}] {pdf_name} -> TP: {len(tp)} | FP: {len(fp)} | FN: {len(fn)}")
-            
+        except KeyboardInterrupt:
+            print("\n[!] INTERRUPCIÓN MANUAL (Ctrl+C). Cancelando de forma segura y guardando los reportes completados...")
+            llm_crashed = True
+            break
         except Exception as e:
-            tqdm.write(f" [!] ERROR crítico en {pdf_name}: {e}")
+            error_str = str(e)
+            tqdm.write(f" [!] ERROR crítico en {pdf_name}: {error_str}")
+            
+            api_errors = ["429", "quota", "resourceexhausted", "503", "500", "timeout", "not_found", "api", "connection", "unavailable"]
+            if any(err in error_str.lower() for err in api_errors):
+                print("\n[!] CORTE DE LLM/API DETECTADO. Deteniendo ejecución para salvaguardar el progreso.")
+                llm_crashed = True
+                break
+                
             predicted_ids = []
-            detailed_results.append({"source_file": pdf_path, "error": str(e)})
+            detailed_results.append({"source_file": pdf_path, "error": error_str})
         
         predicted_labels.append(predicted_ids)
+        
+        # Calcular tiempo total acumulado hasta ahora
+        total_seconds_partial = sum(
+            sum(v for k, v in d.get("timing_breakdown", {}).items() if isinstance(v, (int, float))) 
+            for d in detailed_results if "timing_breakdown" in d
+        )
+        
+        # NUEVO: AUTO-GUARDADO (CHECKPOINT)
+        partial_output = {
+            "status": f"INCOMPLETE - Processed {idx + 1}/{len(df)}",
+            "model_used": model_used,
+            "total_execution_minutes": round(total_seconds_partial / 60.0, 2),
+            "hierarchy_analysis": hierarchy_stats,
+            "detailed_executions": detailed_results
+        }
+        with open(output_path, "w", encoding="utf-8") as f:
+            json.dump(partial_output, f, indent=4)
         
         # Cuidar el Rate Limit del Free Tier entre documentos pesados
         time.sleep(2)
         
-    # Evaluar y exportar
-    df['predicted_labels'] = predicted_labels
-    evaluator = Evaluator(df)
-    results = evaluator.evaluate()
+        # NUEVO: Forzar limpieza de RAM para evitar OOM Killer con Docling
+        import gc
+        gc.collect()
+        
+    if len(predicted_labels) < len(df):
+        print(f"\n[!] Evaluados solo {len(predicted_labels)} de {len(df)} reportes debido a interrupción.")
+        df = df.iloc[:len(predicted_labels)].copy()
+        
+    if len(df) == 0:
+        print("\n[!] No se evaluó ningún reporte por completo. Creando JSON base para permitir reanudación.")
+        results = {"micro": {"precision": 0, "recall": 0, "f1": 0, "f0.5": 0}}
+    else:
+        # Evaluar y exportar
+        df['predicted_labels'] = predicted_labels
+        evaluator = Evaluator(df)
+        results = evaluator.evaluate()
     
     # Calcular tiempo total de esta config
     total_seconds = sum(
@@ -1349,21 +1550,13 @@ def run_evaluation():
     
     # Estructura JSON estandarizada
     final_output = {
+        "model_used": model_used,
         "total_execution_minutes": round(total_seconds / 60.0, 2),
         "global_metrics": results,
         "hierarchy_analysis": hierarchy_stats,
         "detailed_executions": detailed_results
     }
     
-    # Nombres de archivo dinámicos basados en la config actual
-    tag_vlm = "vlm_on" if str(vlm_mode).lower() in ["true", "1", "yes"] else "vlm_off"
-    tag_rep = "rep_on" if str(rep_mode).lower() in ["true", "1", "yes"] else "rep_off"
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M")
-    
-    output_filename = f"apt_eval_{pipeline}_{tag_vlm}_{tag_rep}_{timestamp}.json"
-    output_path = os.path.join("data", "output", "evaluations", output_filename)
-    
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(final_output, f, indent=4)
         
@@ -1374,7 +1567,9 @@ def run_evaluation():
     print(f"F1-Score:   {results['micro']['f1']}")
     print(f"Precision:  {results['micro']['precision']}")
     print(f"Recall:     {results['micro']['recall']}")
-    print(f"\n💾 Resumen completo guardado en: {output_path}")
+    print(f"\n[+] Full report saved to: {output_path}")
+    if 'llm_crashed' in locals():
+        sys.exit(429)
 
 if __name__ == "__main__":
     run_evaluation()
@@ -1392,7 +1587,7 @@ import argparse
 import contextlib
 from datetime import datetime
 from tqdm import tqdm
-from langchain.docstore.document import Document
+from langchain_core.documents import Document
 
 # Add project root to sys.path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -1401,38 +1596,15 @@ from evaluation.data_loaders import CtibenchDataLoader
 from evaluation.metrics_calculator import Evaluator
 from src.langchain_pipeline.phase4_inference import TTPAnalyzer
 from src.langgraph_agents.main_langgraph import process_full_report
-from qdrant_client import QdrantClient
-from langchain_qdrant import QdrantVectorStore
-from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_qdrant.retrieval_mode import RetrievalMode
-from src.langchain_pipeline.phase3_retriever import CandidateRetriever
-from fastembed import SparseTextEmbedding
 from dotenv import load_dotenv
 
-load_dotenv(override=True)
-
-class FastEmbedSparse:
-    def __init__(self, model_name="Qdrant/bm25"):
-        self.model = SparseTextEmbedding(model_name=model_name)
-    def embed_query(self, query: str):
-        return list(self.model.embed([query]))[0]
-    def embed_documents(self, texts):
-        return list(self.model.embed(texts))
+load_dotenv()
 
 def setup_langchain_components():
-    qdrant_host = os.getenv("QDRANT_HOST", "localhost")
-    qdrant_port = os.getenv("QDRANT_PORT", "6333")
-    qdrant_url = f"http://{qdrant_host}:{qdrant_port}"
-    client = QdrantClient(url=qdrant_url)
-    
-    vector_store = QdrantVectorStore(
-        client=client, collection_name="mitre_attack",
-        embedding=HuggingFaceEmbeddings(model_name="BAAI/bge-m3"),
-        sparse_embedding=FastEmbedSparse(model_name="Qdrant/bm25"),
-        retrieval_mode=RetrievalMode.HYBRID
-    )
-    retriever = CandidateRetriever(vector_store=vector_store)
+    from src.langgraph_agents.tools import get_retriever
     from src.core.llm_factory import get_llm
+    
+    retriever = get_retriever()
     llm = get_llm(temperature=0.0)
     analyzer = TTPAnalyzer(llm=llm)
     
@@ -1447,6 +1619,7 @@ def run_evaluation():
     parser.add_argument("--dataset_path", type=str, default="data/eval_datasets/ctibench", help="Path to CTIBench dataset")
     parser.add_argument("--limit", type=int, default=None, help="Max number of sentences to evaluate (for quick testing)")
     parser.add_argument("--pipeline", type=str, choices=["langchain", "langgraph"], default="langgraph", help="Which architecture to evaluate")
+    parser.add_argument("--resume_from", type=str, default=None, help="Path to a previous JSON to resume execution")
     args = parser.parse_args()
 
     pipeline_type = args.pipeline
@@ -1454,6 +1627,15 @@ def run_evaluation():
     print("\n" + "="*80)
     print("🚀 INICIANDO EVALUACIÓN CTIBENCH (TEXT-LEVEL)")
     print(f"   Pipeline:           {pipeline_type.upper()}")
+    
+    profile = os.getenv("EXECUTION_PROFILE", "LOCAL").upper()
+    if profile == "REMOTE":
+        use_gemma = os.getenv("USE_GEMMA4", "False").lower() in ("true", "1", "yes")
+        model_used = os.getenv("VLLM_MODEL_NAME_GEMMA", "gemma4") if use_gemma else os.getenv("VLLM_MODEL_NAME", "gpt-oss-20b")
+    else:
+        model_used = os.getenv("GEMINI_MODEL", "gemini-flash-lite-latest")
+    
+    print(f"   Model Used:         {model_used} ({profile})")
     print("="*80)
 
     print(f"\n[*] Loading CTIBench dataset from: {args.dataset_path}")
@@ -1464,36 +1646,85 @@ def run_evaluation():
         print("[!] Error: No data found. Ensure cti-ate.tsv exists.")
         sys.exit(1)
         
-    if args.limit:
-        print(f"[*] Subsampling {args.limit} random records for testing...")
-        df = df.sample(n=args.limit, random_state=42).reset_index(drop=True)
+    limit = args.limit if args.limit else 200
+    actual_limit = min(limit, len(df))
+    print(f"[*] Subsampling {actual_limit} random records for testing...")
+    df = df.sample(n=actual_limit, random_state=42).reset_index(drop=True)
         
     print(f"[*] Total sentences for evaluation: {len(df)}")
+    
+    vlm_mode = os.getenv("USE_VLM_EXTRACTION", "False")
+    rep_mode = os.getenv("USE_PROMPT_REPETITION", "False")
+    tag_vlm = "vlm_on" if str(vlm_mode).lower() in ["true", "1", "yes"] else "vlm_off"
+    tag_rep = "rep_on" if str(rep_mode).lower() in ["true", "1", "yes"] else "rep_off"
     
     if pipeline_type == "langchain":
         retriever, analyzer = setup_langchain_components()
         
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M")
+    output_filename = f"ctibench_eval_{pipeline_type}_{model_used}_{tag_vlm}_{tag_rep}_{timestamp}.json"
     predicted_labels = []
     detailed_results = []
     hierarchy_stats = {"total_exact_matches": 0, "total_more_detailed": 0, "total_more_general": 0}
+
+    if args.resume_from and os.path.exists(args.resume_from):
+        print(f"[*] Resuming from checkpoint: {args.resume_from}")
+        output_path = args.resume_from
+        with open(args.resume_from, "r", encoding="utf-8") as f:
+            prev_data = json.load(f)
+        if "detailed_executions" in prev_data:
+            detailed_results = prev_data["detailed_executions"]
+            start_idx = len(detailed_results)
+            hierarchy_stats = prev_data.get("hierarchy_analysis", hierarchy_stats)
+            for d in detailed_results:
+                predicted_labels.append(d.get("predicted_labels_normalized", []))
+            print(f"[*] Resumed {start_idx} processed sentences. Continuing from index {start_idx}...")
+        previous_execution_minutes = prev_data.get("total_execution_minutes", 0.0)
+    else:
+        previous_execution_minutes = 0.0
+        output_path = os.path.join("data", "output", "evaluations", output_filename)
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        
+        start_idx = 0
     
-    for idx, row in tqdm(df.iterrows(), total=len(df), desc=f"Eval: {pipeline_type}"):
+    start_time = time.time()
+    
+    start_idx_val = len(predicted_labels)
+    df_remaining = df.iloc[start_idx_val:]
+    
+    for idx, row in tqdm(df_remaining.iterrows(), total=len(df), desc=f"Eval: {pipeline_type}", initial=start_idx_val):
+            
         text = row['text']
         true_lbls = row['true_labels']
         predicted_ids = []
         
         try:
             if pipeline_type == "langchain":
+                t_start = time.time()
                 doc = Document(page_content=text, metadata={"chunk_index": idx, "page_number": 1})
                 candidates = retriever.get_filtered_mitre_candidates([doc], threshold=0.2)
+                p3_time = time.time() - t_start
                 if candidates:
-                    detections, _ = analyzer.analyze_candidates(candidates)
-                    predicted_ids = [d.technique_id for d in detections if d.is_present]
-                    extracted_payload = [d.model_dump() for d in detections if d.is_present]
+                    t_inf = time.time()
+                    detections, artificial_delay, tokens = analyzer.analyze_candidates(candidates)
+                    p4_time = (time.time() - t_inf) - artificial_delay
                 else:
-                    extracted_payload = []
+                    detections, artificial_delay, tokens = [], 0.0, {"input_tokens": 0, "output_tokens": 0, "api_crashed": False}
+                    p4_time = 0.0
+                
+                extracted_payload = [d.model_dump() for d in detections if d.is_present]
+                
+                timing_info = {
+                    "phase1_ingestion_seconds": 0.0,
+                    "phase3_retrieval_seconds": round(p3_time, 2),
+                    "phase4_inference_seconds": round(p4_time, 2),
+                    "input_tokens": tokens.get("input_tokens", 0),
+                    "output_tokens": tokens.get("output_tokens", 0),
+                    "api_crashed": tokens.get("api_crashed", False)
+                }
                     
             elif pipeline_type == "langgraph":
+                t_start = time.time()
                 sanitized_chunks = [{"text": text, "metadata": {"chunk_index": idx}}]
                 global_context = "This is a tool/malware description from CTIBench."
                 
@@ -1506,6 +1737,23 @@ def run_evaluation():
                         )
                         extracted_payload = result.get("extracted_ttps", [])
                         predicted_ids = [ttp.get("technique_id") for ttp in extracted_payload]
+                        timing_ph3 = result.get("timing_breakdown_phase3", {})
+                        
+                        p4_time = timing_ph3.get("consolidator_seconds", 0) + timing_ph3.get("validator_node_seconds", 0) + timing_ph3.get("extraction_oracle_node_seconds", 0) + timing_ph3.get("triage_node_seconds", 0)
+                        timing_info = {
+                            "phase1_ingestion_seconds": 0.0,
+                            "phase3_retrieval_seconds": 0.0,
+                            "phase4_inference_seconds": round(p4_time, 2),
+                            "langgraph_internal_breakdown": timing_ph3,
+                            "input_tokens": timing_ph3.get("input_tokens", 0),
+                            "output_tokens": timing_ph3.get("output_tokens", 0),
+                            "api_crashed": timing_ph3.get("api_crashed", False)
+                        }
+                        
+                if pipeline_type == "langgraph" and timing_ph3.get("api_crashed"):
+                    print("\n[!] CORTE DE LLM/API DETECTADO DURANTE ESTA SENTENCIA (LangGraph). Deteniendo ejecución.")
+                    llm_crashed = True
+                    break
                         
             # Normalización y Trazabilidad Jerárquica
             normalized_preds = []
@@ -1549,40 +1797,79 @@ def run_evaluation():
             fp = list(set(predicted_ids) - set(true_lbls))
             fn = list(set(true_lbls) - set(predicted_ids))
             
+            metrics = {"TP": len(tp), "FP": len(fp), "FN": len(fn)}
+            if len(true_lbls) == 0 and len(predicted_ids) == 0:
+                metrics["TN"] = 1
+            
             detailed_results.append({
-                "sentence_id": idx,
-                "text": text,
+                "source_file": f"ctibench_doc_{idx}",
                 "true_labels": true_lbls,
-                "predicted_labels_raw": [r.get("technique_id") for r in extracted_payload if "technique_id" in r],
+                "predicted_labels_raw": [r.get("technique_id") if isinstance(r, dict) else getattr(r, 'technique_id', str(r)) for r in extracted_payload],
                 "predicted_labels_normalized": predicted_ids,
-                "metrics": {"TP": len(tp), "FP": len(fp), "FN": len(fn)},
+                "metrics": metrics,
                 "traceability_summary": traceability_summary,
+                "timing_breakdown": timing_info,
                 "extracted_ttps": extracted_payload
             })
             
+        except KeyboardInterrupt:
+            print("\n[!] INTERRUPCIÓN MANUAL (Ctrl+C). Cancelando de forma segura y guardando los reportes completados...")
+            llm_crashed = True
+            break
         except Exception as e:
-            tqdm.write(f" [!] ERROR crítico en id {idx}: {e}")
+            error_str = str(e)
+            tqdm.write(f" [!] ERROR crítico en id {idx}: {error_str}")
+            
+            api_errors = ["429", "quota", "resourceexhausted", "503", "500", "timeout", "not_found", "api", "connection", "unavailable"]
+            if any(err in error_str.lower() for err in api_errors):
+                print("\n[!] CORTE DE LLM/API DETECTADO. Deteniendo ejecución para salvaguardar el progreso.")
+                llm_crashed = True
+                break
+                
             predicted_ids = []
-            detailed_results.append({"sentence_id": idx, "error": str(e)})
+            detailed_results.append({"source_file": f"ctibench_doc_{idx}", "error": error_str})
             
         predicted_labels.append(predicted_ids)
-        time.sleep(0.5)  # Breve pausa para no saturar APIs
         
-    df['predicted_labels'] = predicted_labels
-    evaluator = Evaluator(df)
-    results = evaluator.evaluate()
+        # NUEVO: AUTO-GUARDADO (CHECKPOINT)
+        current_session_minutes = (time.time() - start_time) / 60.0
+        partial_output = {
+            "status": f"INCOMPLETE - Processed {idx + 1}/{len(df)}",
+            "model_used": model_used,
+            "total_execution_minutes": round(previous_execution_minutes + current_session_minutes, 2),
+            "hierarchy_analysis": hierarchy_stats,
+            "detailed_executions": detailed_results
+        }
+        with open(output_path, "w", encoding="utf-8") as f:
+            json.dump(partial_output, f, indent=4)
+            
+        time.sleep(5.0)  # Breve pausa para no saturar APIs
+        
+    if len(predicted_labels) < len(df):
+        print(f"\n[!] Evaluadas solo {len(predicted_labels)} de {len(df)} sentencias debido a interrupción.")
+        df = df.iloc[:len(predicted_labels)].copy()
+        
+    if len(df) == 0:
+        print("\n[!] No se evaluó ningún reporte por completo. Creando JSON base para permitir reanudación.")
+        results = {"micro": {"precision": 0, "recall": 0, "f1": 0, "f0.5": 0}}
+    else:
+        # Evaluar y exportar
+        df['predicted_labels'] = predicted_labels
+        evaluator = Evaluator(df)
+        results = evaluator.evaluate()
     
+    current_session_minutes = (time.time() - start_time) / 60.0
+    total_execution_minutes = round(previous_execution_minutes + current_session_minutes, 2)
+    
+    # Estructura JSON estandarizada
     final_output = {
+        "model_used": model_used,
+        "total_execution_minutes": total_execution_minutes,
         "global_metrics": results,
         "hierarchy_analysis": hierarchy_stats,
         "detailed_executions": detailed_results
     }
     
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M")
-    output_filename = f"ctibench_eval_{pipeline_type}_{timestamp}.json"
-    output_path = os.path.join("data", "output", "evaluations", output_filename)
-    
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(final_output, f, indent=4)
         
@@ -1594,6 +1881,8 @@ def run_evaluation():
     print(f"Precision:  {results['micro']['precision']}")
     print(f"Recall:     {results['micro']['recall']}")
     print(f"\n💾 Resumen completo guardado en: {output_path}")
+    if 'llm_crashed' in locals():
+        sys.exit(429)
 
 if __name__ == "__main__":
     run_evaluation()
@@ -1621,7 +1910,7 @@ from src.langgraph_agents.main_langgraph import run_langgraph_extraction
 from dotenv import load_dotenv
 
 # Cargar variables de entorno (USE_VLM_EXTRACTION, USE_PROMPT_REPETITION, etc.)
-load_dotenv(override=True)
+load_dotenv()
 
 def run_evaluation():
     """
@@ -1634,6 +1923,7 @@ def run_evaluation():
     parser.add_argument("--dataset_path", type=str, default="data/eval_datasets/ctihal", help="Path to CTI-HAL dataset")
     parser.add_argument("--limit", type=int, default=None, help="Max number of PDFs to evaluate (for quick testing)")
     parser.add_argument("--pipeline", type=str, choices=["langchain", "langgraph"], default="langchain", help="Which architecture to evaluate")
+    parser.add_argument("--resume_from", type=str, default=None, help="Path to a previous JSON to resume execution")
     args = parser.parse_args()
 
     # Leer configuración desde las variables de entorno
@@ -1646,6 +1936,15 @@ def run_evaluation():
     print(f"   Pipeline:           {pipeline.upper()}")
     print(f"   VLM Extraction:     {vlm_mode}")
     print(f"   Prompt Repetition:  {rep_mode}")
+
+    profile = os.getenv("EXECUTION_PROFILE", "LOCAL").upper()
+    if profile == "REMOTE":
+        use_gemma = os.getenv("USE_GEMMA4", "False").lower() in ("true", "1", "yes")
+        model_used = os.getenv("VLLM_MODEL_NAME_GEMMA", "gemma4") if use_gemma else os.getenv("VLLM_MODEL_NAME", "gpt-oss-20b")
+    else:
+        model_used = os.getenv("GEMINI_MODEL", "gemini-flash-lite-latest")
+    
+    print(f"   Model Used:         {model_used} ({profile})")
     print("="*80)
 
     print(f"\n[*] Loading CTI-HAL dataset from: {args.dataset_path}")
@@ -1656,9 +1955,9 @@ def run_evaluation():
         print("[!] Error: No PDFs/MDs matched. Check folder structure (ensure 'reports' and 'annotations/.../annotator L' exist).")
         sys.exit(1)
         
-    if args.limit:
-        print(f"[*] Subsampling {args.limit} random reports for testing...")
-        df = df.sample(n=args.limit, random_state=42).reset_index(drop=True)
+    limit = args.limit if args.limit else 10
+    print(f"[*] Subsampling {limit} random reports for testing...")
+    df = df.sample(n=limit, random_state=42).reset_index(drop=True)
         
     print(f"[*] Successfully paired {len(df)} PDF raw reports with Ground Truth.")
     
@@ -1666,8 +1965,36 @@ def run_evaluation():
     detailed_results = []
     hierarchy_stats = {"total_exact_matches": 0, "total_more_detailed": 0, "total_more_general": 0}
     
+    # Definir ruta de salida antes del bucle para auto-guardado
+    tag_vlm = "vlm_on" if str(vlm_mode).lower() in ["true", "1", "yes"] else "vlm_off"
+    tag_rep = "rep_on" if str(rep_mode).lower() in ["true", "1", "yes"] else "rep_off"
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M")
+    
+    output_filename = f"ctihal_eval_{pipeline}_{model_used}_{tag_vlm}_{tag_rep}_{timestamp}.json"
+    
+    if args.resume_from and os.path.exists(args.resume_from):
+        print(f"[*] Resuming from checkpoint: {args.resume_from}")
+        output_path = args.resume_from
+        with open(args.resume_from, "r", encoding="utf-8") as f:
+            prev_data = json.load(f)
+        if "detailed_executions" in prev_data:
+            detailed_results = prev_data["detailed_executions"]
+            start_idx = len(detailed_results)
+            hierarchy_stats = prev_data.get("hierarchy_analysis", hierarchy_stats)
+            for d in detailed_results:
+                predicted_labels.append(d.get("predicted_labels_normalized", []))
+            print(f"[*] Resumed {start_idx} processed reports. Continuing from index {start_idx}...")
+    else:
+        output_path = os.path.join("data", "output", "evaluations", output_filename)
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    
+    start_idx_val = len(predicted_labels)
+    
+    df_remaining = df.iloc[start_idx_val:]
+    
     # Bucle de inferencia E2E
-    for idx, row in tqdm(df.iterrows(), total=len(df), desc=f"Eval: {pipeline}"):
+    for idx, row in tqdm(df_remaining.iterrows(), total=len(df), desc=f"Eval: {pipeline}", initial=start_idx_val):
+            
         pdf_path = row['source_file']
         true_lbls = row['true_labels']
         predicted_ids = []
@@ -1723,12 +2050,22 @@ def run_evaluation():
             fp = list(set(predicted_ids) - set(true_lbls))
             fn = list(set(true_lbls) - set(predicted_ids))
             
+            metrics = {"TP": len(tp), "FP": len(fp), "FN": len(fn)}
+            if len(true_lbls) == 0 and len(predicted_ids) == 0:
+                metrics["TN"] = 1
+
+            if timing.get("api_crashed"):
+                print("\n[!] CORTE DE LLM/API DETECTADO DURANTE ESTE REPORTE. Guardando extracción parcial y deteniendo ejecución.")
+                print("    El documento se reanudará de forma automática gracias al Caché de Chunks en la próxima ejecución.")
+                llm_crashed = True
+                break
+
             detailed_results.append({
                 "source_file": pdf_path,
                 "true_labels": true_lbls,
-                "predicted_labels_raw": [r.get("technique_id") for r in results_list if "technique_id" in r],
+                "predicted_labels_raw": [r.get("technique_id") if isinstance(r, dict) else getattr(r, 'technique_id', str(r)) for r in results_list],
                 "predicted_labels_normalized": predicted_ids,
-                "metrics": {"TP": len(tp), "FP": len(fp), "FN": len(fn)},
+                "metrics": metrics,
                 "traceability_summary": traceability_summary,
                 "timing_breakdown": timing,
                 "extracted_ttps": results_list
@@ -1736,19 +2073,56 @@ def run_evaluation():
             
             tqdm.write(f" 📄 {pdf_name} -> TP: {len(tp)} | FP: {len(fp)} | FN: {len(fn)}")
             
+        except KeyboardInterrupt:
+            print("\n[!] INTERRUPCIÓN MANUAL (Ctrl+C). Cancelando de forma segura y guardando los reportes completados...")
+            llm_crashed = True
+            break
         except Exception as e:
-            tqdm.write(f" [!] ERROR crítico en {pdf_name}: {e}")
-            sys.exit(1)
+            error_str = str(e)
+            tqdm.write(f" [!] ERROR crítico en {pdf_name}: {error_str}")
+            
+            api_errors = ["429", "quota", "resourceexhausted", "503", "500", "timeout", "not_found", "api", "connection", "unavailable"]
+            if any(err in error_str.lower() for err in api_errors):
+                print("\n[!] CORTE DE LLM/API DETECTADO. Deteniendo ejecución para salvaguardar el progreso.")
+                llm_crashed = True
+                break
+                
+            detailed_results.append({"source_file": pdf_path, "error": error_str})
         
         predicted_labels.append(predicted_ids)
+        
+        # Calcular tiempo total acumulado hasta ahora
+        total_seconds_partial = sum(
+            sum(v for k, v in d.get("timing_breakdown", {}).items() if isinstance(v, (int, float))) 
+            for d in detailed_results if "timing_breakdown" in d
+        )
+        
+        # NUEVO: AUTO-GUARDADO (CHECKPOINT)
+        partial_output = {
+            "status": f"INCOMPLETE - Processed {idx + 1}/{len(df)}",
+            "model_used": model_used,
+            "total_execution_minutes": round(total_seconds_partial / 60.0, 2),
+            "hierarchy_analysis": hierarchy_stats,
+            "detailed_executions": detailed_results
+        }
+        with open(output_path, "w", encoding="utf-8") as f:
+            json.dump(partial_output, f, indent=4)
         
         # Cuidar el Rate Limit del Free Tier entre documentos pesados
         time.sleep(10)
         
-    # Evaluar y exportar
-    df['predicted_labels'] = predicted_labels
-    evaluator = Evaluator(df)
-    results = evaluator.evaluate()
+    if len(predicted_labels) < len(df):
+        print(f"\n[!] Evaluados solo {len(predicted_labels)} de {len(df)} reportes debido a interrupción.")
+        df = df.iloc[:len(predicted_labels)].copy()
+        
+    if len(df) == 0:
+        print("\n[!] No se evaluó ningún reporte por completo. Creando JSON base para permitir reanudación.")
+        results = {"micro": {"precision": 0, "recall": 0, "f1": 0, "f0.5": 0}}
+    else:
+        # Evaluar y exportar
+        df['predicted_labels'] = predicted_labels
+        evaluator = Evaluator(df)
+        results = evaluator.evaluate()
     
     # Calcular tiempo total de esta config
     total_seconds = sum(
@@ -1758,21 +2132,13 @@ def run_evaluation():
     
     # Estructura JSON estandarizada
     final_output = {
+        "model_used": model_used,
         "total_execution_minutes": round(total_seconds / 60.0, 2),
         "global_metrics": results,
         "hierarchy_analysis": hierarchy_stats,
         "detailed_executions": detailed_results
     }
     
-    # Nombres de archivo dinámicos basados en la config actual
-    tag_vlm = "vlm_on" if str(vlm_mode).lower() in ["true", "1", "yes"] else "vlm_off"
-    tag_rep = "rep_on" if str(rep_mode).lower() in ["true", "1", "yes"] else "rep_off"
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M")
-    
-    output_filename = f"ctihal_eval_{pipeline}_{tag_vlm}_{tag_rep}_{timestamp}.json"
-    output_path = os.path.join("data", "output", "evaluations", output_filename)
-    
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(final_output, f, indent=4)
         
@@ -1783,7 +2149,9 @@ def run_evaluation():
     print(f"F1-Score:   {results['micro']['f1']}")
     print(f"Precision:  {results['micro']['precision']}")
     print(f"Recall:     {results['micro']['recall']}")
-    print(f"\n💾 Resumen completo guardado en: {output_path}")
+    print(f"\n[+] Full report saved to: {output_path}")
+    if 'llm_crashed' in locals():
+        sys.exit(429)
 
 if __name__ == "__main__":
     run_evaluation()
@@ -2102,19 +2470,22 @@ def get_llm(temperature: float = 0.0) -> BaseChatModel:
         if not vllm_base_url:
             raise ValueError("VLLM_BASE_URL is not set in .env")
 
+        llm_timeout = float(os.getenv("LLM_TIMEOUT_SECONDS", "120.0"))
+
         return ChatOpenAI(
             model=model_name,
             base_url=vllm_base_url,
             api_key="EMPTY",
             temperature=temperature,
             seed=42,
-            max_retries=1,
-            timeout=600.0
+            max_retries=0,
+            timeout=llm_timeout,
+            request_timeout=llm_timeout
         )
     else:
         model_name = os.getenv("GEMINI_MODEL", "gemini-flash-lite-latest")
         return ChatGoogleGenerativeAI(
-            model=model_name, temperature=temperature, max_retries=3, seed=42
+            model=model_name, temperature=temperature, max_retries=0, seed=42
         )
 
 
@@ -2203,14 +2574,8 @@ def bootstrap_environment():
     """Instala dependencias e inicia los servicios requeridos (Ollama y Qdrant)."""
     print("[INFO] Configuring execution environment...")
 
-    print("[INFO] Installing dependencies from requirements.txt...")
-    try:
-        subprocess.run(
-            [sys.executable, "-m", "pip", "install", "-r", "requirements.txt"],
-            check=True,
-        )
-    except Exception as e:
-        print(f"[ERROR] Error installing dependencies: {e}")
+    # Pip install step removed to avoid console spam.
+    # User is expected to have installed requirements.txt manually.
 
     llm_provider = os.environ.get("LLM_PROVIDER", "ollama").lower()
 
@@ -2236,7 +2601,7 @@ import logging
 
 from dotenv import load_dotenv
 
-load_dotenv(override=True)
+load_dotenv()
 
 from src.langchain_pipeline.phase1_ingestion import ReportIngestor
 
@@ -2362,7 +2727,7 @@ def run_cti_extraction(pdf_path: str) -> str:
 
     analyzer = TTPAnalyzer(llm=llm)
     t2 = time.time()
-    confirmed_ttps, artificial_delay = analyzer.analyze_candidates(filtered_candidates)
+    confirmed_ttps, artificial_delay, tokens = analyzer.analyze_candidates(filtered_candidates, cache_key=pdf_path)
     p4_time = (time.time() - t2) - artificial_delay
 
     # ------------------------------------------------------------------
@@ -2377,6 +2742,9 @@ def run_cti_extraction(pdf_path: str) -> str:
         "phase1_ingestion_seconds": round(p1_time, 2),
         "phase3_retrieval_seconds": round(p3_time, 2),
         "phase4_inference_seconds": round(p4_time, 2),
+        "input_tokens": tokens.get("input_tokens", 0),
+        "output_tokens": tokens.get("output_tokens", 0),
+        "api_crashed": tokens.get("api_crashed", False),
     }
     return output_dict_list, timing_metrics
 
@@ -2519,8 +2887,9 @@ class ReportIngestor:
         logger.info(
             f"Loading PDF '{file_path}' using Multimodal VLM extraction (Gemini Flash)..."
         )
-        gemini_model = os.getenv("GEMINI_MODEL", "gemini-flash-lite-latest")
-        llm = ChatGoogleGenerativeAI(model=gemini_model, temperature=0.0, max_retries=3)
+        # Forzamos un modelo VLM, independientemente del modelo principal de inferencia
+        gemini_vlm_model = os.getenv("GEMINI_VLM_MODEL", "gemini-flash-lite-latest")
+        llm = ChatGoogleGenerativeAI(model=gemini_vlm_model, temperature=0.0, max_retries=3)
 
         doc = fitz.open(file_path)
         documents = []
@@ -3324,6 +3693,9 @@ from src.core.schemas import ChunkExtraction, TTPDetection, Evidence
 from dotenv import load_dotenv
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.output_parsers import PydanticOutputParser
+from pydantic import ValidationError
+import json
 
 
 logger = logging.getLogger(__name__)
@@ -3373,7 +3745,8 @@ class TTPAnalyzer:
             "4. Preserve the exact `location` and `Score` provided in the evidence tags.\n"
             "5. Map contextualized masked tags (e.g., <IoC_URL>) to their tactical intent.\n"
             "6. Exclusion Criteria: Strictly map observable, technical intrusion activity. Exclude geopolitical context or attribution theories.\n"
-            "7. CRITICAL JSON FORMATTING: In the 'procedure' field, you MUST write a full descriptive sentence of what the attacker did (e.g., 'The attacker used Ngrok to establish a tunnel.'). DO NOT write single words or tactic names."
+            "7. CRITICAL JSON FORMATTING: In the 'procedure' field, you MUST write a full descriptive sentence of what the attacker did (e.g., 'The attacker used Ngrok to establish a tunnel.'). DO NOT write single words or tactic names.\n"
+            "8. {format_instructions}"
         )
         if self.use_prompt_repetition:
             system_instruction = (
@@ -3383,7 +3756,7 @@ class TTPAnalyzer:
         user_message = (
             "<candidate_techniques>\n{candidates_str}\n</candidate_techniques>\n\n"
             "<chunk_text>\n{chunk_text}\n</chunk_text>\n\n"
-            "Based exclusively on the chunk text, extract the techniques from the candidates that are confirmed."
+            "Based exclusively on the chunk text, extract the techniques from the candidates that are confirmed. You MUST output ONLY a valid JSON object."
         )
         if self.use_prompt_repetition:
             user_message = f"{user_message}\n\n{user_message}"
@@ -3392,13 +3765,14 @@ class TTPAnalyzer:
             [("system", system_instruction), ("user", user_message)]
         )
 
-    def analyze_candidates(self, chunk_results: List[Dict[str, Any]]):
+    def analyze_candidates(self, chunk_results: List[Dict[str, Any]], cache_key: str = None):
         if not chunk_results:
             logger.warning("No candidates to analyze.")
             return [], 0.0
 
+        parser = PydanticOutputParser(pydantic_object=ChunkExtraction)
         prompt = self._build_prompt_template()
-        chain = prompt | self.llm.with_structured_output(ChunkExtraction)
+        chain = prompt | self.llm
 
         inputs = []
         for data in chunk_results:
@@ -3430,6 +3804,7 @@ class TTPAnalyzer:
                 {
                     "chunk_text": chunk.page_content,
                     "candidates_str": "\n\n".join(cand_strings),
+                    "format_instructions": parser.get_format_instructions(),
                     "_location": f"Page {page_num}, Chunk {chunk_idx}",
                     "_meta_map": tech_metadata_map,
                 }
@@ -3441,16 +3816,72 @@ class TTPAnalyzer:
         max_workers = int(os.getenv("MAX_CONCURRENT_CHUNKS", "2"))
         is_gemini = "google" in str(type(self.llm)).lower()
 
-        @retry(stop=stop_after_attempt(6), wait=wait_exponential(multiplier=2, min=5, max=60), reraise=True)
+        import hashlib
+        cache_path = None
+        cached_responses = {}
+        if cache_key:
+            file_hash = hashlib.md5(cache_key.encode()).hexdigest()
+            cache_path = os.path.join("data", "output", "evaluations", f"cache_langchain_{file_hash}.json")
+            if os.path.exists(cache_path):
+                try:
+                    with open(cache_path, "r", encoding="utf-8") as f:
+                        cached_responses = json.load(f)
+                    logger.info(f"Loaded {len(cached_responses)} chunks from LangChain cache.")
+                except Exception:
+                    pass
+
+        import threading
+        cache_lock = threading.Lock()
+        def save_cache():
+            if cache_path:
+                with cache_lock:
+                    with open(cache_path, "w", encoding="utf-8") as f:
+                        json.dump(cached_responses, f, indent=4)
+
+        def print_retry_warning(retry_state):
+            import sys
+            print(f"\n[⚠️ ALARMA DE API / RATE LIMIT] El servidor LLM ha rechazado la petición o ha fallado.", file=sys.stderr)
+            print(f"[⏳] Tenacity esperando {retry_state.next_action.sleep} segundos antes del reintento #{retry_state.attempt_number}...", file=sys.stderr)
+
+        @retry(
+            stop=stop_after_attempt(6),
+            wait=wait_exponential(multiplier=2, min=5, max=30),
+            before_sleep=print_retry_warning,
+            reraise=True,
+        )
         def _invoke_chain(inp):
-            return chain.invoke(inp)
+            try:
+                msg = chain.invoke(inp)
+                # Serialize AIMessage to plain dict
+                content = msg.content if hasattr(msg, 'content') else str(msg)
+                usage = getattr(msg, "usage_metadata", {})
+                return {"content": content, "usage_metadata": usage}
+            except Exception as e:
+                # If it's a structural failure not caught by tenacity, or if it raises
+                raise RuntimeError(f"Rate Limit / API Collapse: {e}") from e
+
+        stop_event = threading.Event()
 
         def _process_chunk(idx, inp):
+            if str(idx) in cached_responses:
+                logger.info(f"[{idx+1}/{len(inputs)}] Loading Chunk {inp['_location']} from cache...")
+                return cached_responses[str(idx)]
+            if stop_event.is_set():
+                return Exception("Aborted due to prior API crash")
+
             logger.info(f"[{idx+1}/{len(inputs)}] Querying LLM for Chunk {inp['_location']}...")
             try:
                 res = _invoke_chain(inp)
+                if cache_path:
+                    with cache_lock:
+                        cached_responses[str(idx)] = res
+                    save_cache()
                 return res
             except Exception as e:
+                err_str = str(e).lower()
+                api_errors = ["429", "quota", "resourceexhausted", "503", "500", "timeout", "not_found", "api", "connection", "unavailable", "rate limit"]
+                if any(err in err_str for err in api_errors):
+                    stop_event.set()
                 logger.error(f"Error processing chunk {inp['_location']} after retries: {e}")
                 return e
 
@@ -3466,17 +3897,49 @@ class TTPAnalyzer:
             logger.info("Running LangChain sequentially (max_workers=1)...")
             for i, inp in enumerate(inputs):
                 batch_responses[i] = _process_chunk(i, inp)
-                if is_gemini and i < len(inputs) - 1:
-                    time.sleep(4.5)
-                    artificial_delay += 4.5
 
         # Reducer: Consolidar ChunkExtraction de vuelta a List[TTPDetection]
         global_ttps = {}
-        for inp, res in zip(inputs, batch_responses):
-            # AÑADIDO: Controlar si el resultado fue una excepción (ej. Timeout)
-            if isinstance(res, Exception):
-                logger.error(f"  [!] Fallo/Timeout crítico en chunk {inp['_location']}: {res}")
-                raise RuntimeError(f"Ejecución abortada por fallo en chunk {inp['_location']}: {res}") from res
+        total_input_tokens = 0
+        total_output_tokens = 0
+        
+        api_crashed_flag = False
+        for inp, res_dict in zip(inputs, batch_responses):
+            if isinstance(res_dict, Exception):
+                err_str = str(res_dict).lower()
+                api_errors = ["429", "quota", "resourceexhausted", "503", "500", "timeout", "not_found", "api", "connection", "unavailable", "rate limit"]
+                if any(err in err_str for err in api_errors):
+                    if not api_crashed_flag:
+                        logger.error(f"[!] ABORTANDO: Fallo de API/Rate Limit detectado en chunk {inp.get('_location')}. Guardando progreso parcial...")
+                        api_crashed_flag = True
+                    continue
+                else:
+                    logger.error(f"No TTPs extracted for chunk {inp.get('_location')} due to critical failure: {res_dict}")
+                    continue
+
+            # res_dict is now a dict containing content and usage_metadata
+            raw_msg = res_dict
+            if raw_msg and raw_msg.get("usage_metadata"):
+                total_input_tokens += raw_msg["usage_metadata"].get("input_tokens", 0)
+                total_output_tokens += raw_msg["usage_metadata"].get("output_tokens", 0)
+
+            if not raw_msg or "content" not in raw_msg:
+                logger.warning(f"  [!] LLM devolvió respuesta vacía en {inp['_location']}.")
+                continue
+
+            content = raw_msg["content"]
+            if isinstance(content, list):
+                # Handle Gemini returning a list of dicts
+                text_parts = [part["text"] for part in content if isinstance(part, dict) and "text" in part]
+                content = "".join(text_parts) if text_parts else str(content)
+            elif not isinstance(content, str):
+                content = str(content)
+
+            try:
+                res = parser.parse(content)
+            except Exception as e:
+                logger.warning(f"  [!] Fallo de parseo JSON en {inp['_location']}: {e}")
+                continue
 
             if not res or not hasattr(res, "extracted_ttps") or not res.extracted_ttps:
                 continue
@@ -3527,9 +3990,9 @@ class TTPAnalyzer:
             final_ttps_limpios.append(ttp)
 
         logger.info(
-            f"Inference complete. {len(final_ttps_limpios)} global techniques confirmed."
+            f"Inference complete. {len(final_ttps_limpios)} global techniques confirmed. Tokens: IN={total_input_tokens}, OUT={total_output_tokens}"
         )
-        return final_ttps_limpios, artificial_delay
+        return final_ttps_limpios, artificial_delay, {"input_tokens": total_input_tokens, "output_tokens": total_output_tokens, "api_crashed": api_crashed_flag}
 
 
 
@@ -3713,7 +4176,8 @@ def consolidator_node(state: GlobalState) -> dict:
 
 
 def process_full_report(
-    source_file: str, global_context: str, sanitized_chunks: List[Dict[str, Any]]
+    source_file: str, global_context: str, sanitized_chunks: List[Dict[str, Any]],
+    cache_path: str = None, previous_ttps: List[Any] = None, previous_timing: Dict = None
 ) -> dict:
     """
     Main orchestrator that executes the Map-Reduce flow.
@@ -3726,9 +4190,13 @@ def process_full_report(
     master_ttp_list = []
 
     # Acumuladores de tiempo
-    triage_time_total = 0.0
-    extraction_time_total = 0.0
-    validation_time_total = 0.0
+    triage_time_total = previous_timing.get("triage_time_total", 0.0) if previous_timing else 0.0
+    extraction_time_total = previous_timing.get("extraction_time_total", 0.0) if previous_timing else 0.0
+    validation_time_total = previous_timing.get("validation_time_total", 0.0) if previous_timing else 0.0
+    input_tokens_total = previous_timing.get("input_tokens_total", 0) if previous_timing else 0
+    output_tokens_total = previous_timing.get("output_tokens_total", 0) if previous_timing else 0
+    
+    master_ttp_list = previous_ttps.copy() if previous_ttps else []
 
     # 1. MAP: Loop over sanitized_chunks using ThreadPoolExecutor for parallelism
     max_workers = int(os.getenv("MAX_CONCURRENT_CHUNKS", "2"))
@@ -3740,8 +4208,15 @@ def process_full_report(
     get_retriever()
     load_mitre_json()
 
+    import threading
+    global_stop_event = threading.Event()
+    cache_lock = threading.Lock()
+
     def _process_single_chunk(args):
         i, chunk_data = args
+        if global_stop_event.is_set():
+            return i, Exception("Aborted due to prior API crash")
+            
         chunk_text = chunk_data.get("text", str(chunk_data))
         chunk_metadata = chunk_data.get("metadata", {})
 
@@ -3757,31 +4232,82 @@ def process_full_report(
             "triage_time": 0.0,
             "extractor_time": 0.0,
             "validator_time": 0.0,
+            "input_tokens": 0,
+            "output_tokens": 0,
         }
 
         try:
             chunk_result = chunk_graph.invoke(initial_chunk_state)
             
             # LATIDO: Solo imprimimos si extrajo algo útil o si terminó bien
-            aprobados = len(chunk_result.get("approved_ttps", []))
-            print(f"     [✓] Chunk {i + 1}/{len(sanitized_chunks)} procesado. TTPs válidos: {aprobados}")
+            aprobados = chunk_result.get("approved_ttps", [])
+            print(f"     [✓] Chunk {i + 1}/{len(sanitized_chunks)} procesado. TTPs válidos: {len(aprobados)}")
+            
+            if cache_path:
+                with cache_lock:
+                    try:
+                        import json
+                        with open(cache_path, "r", encoding="utf-8") as f:
+                            cache_data = json.load(f)
+                            
+                        chunk_id = chunk_data.get("chunk_id", f"chunk_{i}")
+                        cache_data["pending_chunks"] = [
+                            c for c in cache_data.get("pending_chunks", [])
+                            if c.get("chunk_id", "") != chunk_id
+                        ]
+                        
+                        if "completed_ttps" not in cache_data:
+                            cache_data["completed_ttps"] = []
+                        cache_data["completed_ttps"].extend(aprobados)
+                        
+                        if "timing_metrics" not in cache_data:
+                            cache_data["timing_metrics"] = {}
+                        tm = cache_data["timing_metrics"]
+                        tm["triage_time_total"] = tm.get("triage_time_total", 0.0) + chunk_result.get("triage_time", 0.0)
+                        tm["extraction_time_total"] = tm.get("extraction_time_total", 0.0) + chunk_result.get("extractor_time", 0.0)
+                        tm["validation_time_total"] = tm.get("validation_time_total", 0.0) + chunk_result.get("validator_time", 0.0)
+                        tm["input_tokens_total"] = tm.get("input_tokens_total", 0) + chunk_result.get("input_tokens", 0)
+                        tm["output_tokens_total"] = tm.get("output_tokens_total", 0) + chunk_result.get("output_tokens", 0)
+                        
+                        with open(cache_path, "w", encoding="utf-8") as f:
+                            json.dump(cache_data, f, ensure_ascii=False, indent=2)
+                    except Exception as e:
+                        print(f"     [!] Error updating cache for chunk {i + 1}: {e}")
             
             return i, chunk_result
         except Exception as e:
+            err_str = str(e).lower()
+            api_errors = ["429", "quota", "resourceexhausted", "503", "500", "timeout", "not_found", "api", "connection", "unavailable", "rate limit"]
+            if any(err in err_str for err in api_errors):
+                global_stop_event.set()
             print(f"     [!] Error Crítico/Timeout procesando chunk {i + 1}: {str(e)}")
-            raise RuntimeError(f"Ejecución abortada por fallo en chunk {i + 1}: {str(e)}") from e
+            return i, e
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
         args_list = [(i, chunk) for i, chunk in enumerate(sanitized_chunks)]
         results = list(executor.map(_process_single_chunk, args_list))
 
+    api_crashed_flag = False
     for i, chunk_result in results:
         if chunk_result is None:
             continue
+            
+        if isinstance(chunk_result, Exception):
+            err_str = str(chunk_result).lower()
+            api_errors = ["429", "quota", "resourceexhausted", "503", "500", "timeout", "not_found", "api", "connection", "unavailable", "rate limit"]
+            if any(err in err_str for err in api_errors):
+                if not api_crashed_flag:
+                    print(f"[!] ABORTANDO LangGraph: Fallo de API detectado en chunk {i + 1}. Guardando progreso parcial...")
+                    api_crashed_flag = True
+                continue
+            else:
+                continue
 
         triage_time_total += chunk_result.get("triage_time", 0.0)
         extraction_time_total += chunk_result.get("extractor_time", 0.0)
         validation_time_total += chunk_result.get("validator_time", 0.0)
+        input_tokens_total += chunk_result.get("input_tokens", 0)
+        output_tokens_total += chunk_result.get("output_tokens", 0)
 
         approved = chunk_result.get("approved_ttps", [])
         if approved:
@@ -3799,6 +4325,8 @@ def process_full_report(
         "chunks": sanitized_chunks,
         "all_approved_ttps": master_ttp_list,
         "final_json": {},
+        "input_tokens": input_tokens_total,
+        "output_tokens": output_tokens_total,
     }
 
     t0_red = time.time()
@@ -3816,6 +4344,9 @@ def process_full_report(
             "extraction_oracle_node_seconds": round(extraction_time_total, 2),
             "validator_node_seconds": round(validation_time_total, 2),
             "consolidator_seconds": round(consolidator_time, 2),
+            "input_tokens": input_tokens_total,
+            "output_tokens": output_tokens_total,
+            "api_crashed": api_crashed_flag
         },
     }
 
@@ -3840,14 +4371,8 @@ def bootstrap_environment():
     """Instala dependencias e inicia los servicios requeridos (Ollama y Qdrant)."""
     print("[INFO] Configuring execution environment...")
 
-    print("[INFO] Installing dependencies from requirements.txt...")
-    try:
-        subprocess.run(
-            [sys.executable, "-m", "pip", "install", "-r", "requirements.txt"],
-            check=True,
-        )
-    except Exception as e:
-        print(f"[ERROR] Error installing dependencies: {e}")
+    # Pip install step removed to avoid console spam.
+    # User is expected to have installed requirements.txt manually.
 
     llm_provider = os.environ.get("LLM_PROVIDER", "ollama").lower()
 
@@ -3870,7 +4395,7 @@ bootstrap_environment()
 
 from dotenv import load_dotenv
 
-load_dotenv(override=True)
+load_dotenv()
 
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.prompts import ChatPromptTemplate
@@ -3947,47 +4472,95 @@ def run_langgraph_extraction(pdf_path: str):
     """
     t0 = time.time()
 
-    use_vlm_env = os.getenv("USE_VLM_EXTRACTION", "False").lower() in (
-        "true",
-        "1",
-        "yes",
-    )
-    ingestor = ReportIngestor(chunk_size=3500, chunk_overlap=500, use_vlm=use_vlm_env)
+    import hashlib
+    file_hash = hashlib.md5(pdf_path.encode()).hexdigest()
+    cache_path = os.path.join("data", "output", "evaluations", f"cache_langgraph_{file_hash}.json")
+    os.makedirs(os.path.dirname(cache_path), exist_ok=True)
 
-    raw_chunks = ingestor.process_report(pdf_path)
-    p1_time = time.time() - t0
+    if os.path.exists(cache_path):
+        print(f"[*] Resuming from Cache: {cache_path}")
+        with open(cache_path, "r", encoding="utf-8") as f:
+            cache_data = json.load(f)
+        sanitized_chunks = cache_data.get("pending_chunks", [])
+        global_context = cache_data.get("global_context", "")
+        completed_ttps = cache_data.get("completed_ttps", [])
+        p1_time = cache_data.get("p1_time", 0.0)
+        p2_time = cache_data.get("p2_time", 0.0)
+        previous_timing = cache_data.get("timing_metrics", {})
+        
+        if not sanitized_chunks and not completed_ttps:
+            print("[-] Cache exists but is empty. Restarting extraction.")
+            os.remove(cache_path)
+            return run_langgraph_extraction(pdf_path)
+            
+    else:
+        use_vlm_env = os.getenv("USE_VLM_EXTRACTION", "False").lower() in (
+            "true",
+            "1",
+            "yes",
+        )
+        ingestor = ReportIngestor(chunk_size=3500, chunk_overlap=500, use_vlm=use_vlm_env)
 
-    sanitized_chunks = []
-    for c in raw_chunks:
-        if hasattr(c, "page_content"):
-            sanitized_chunks.append({"text": c.page_content, "metadata": c.metadata})
-        elif isinstance(c, dict) and "text" in c:
-            sanitized_chunks.append(c)
-        else:
-            sanitized_chunks.append({"text": str(c), "metadata": {}})
+        raw_chunks = ingestor.process_report(pdf_path)
+        p1_time = time.time() - t0
 
-    if not sanitized_chunks:
-        return [], {"error": "No text extracted"}
+        sanitized_chunks = []
+        for idx, c in enumerate(raw_chunks):
+            chunk_data = {}
+            if hasattr(c, "page_content"):
+                chunk_data = {"text": c.page_content, "metadata": c.metadata}
+            elif isinstance(c, dict) and "text" in c:
+                chunk_data = c
+            else:
+                chunk_data = {"text": str(c), "metadata": {}}
+            
+            chunk_data["chunk_id"] = f"chunk_{idx}"
+            sanitized_chunks.append(chunk_data)
 
-    t1 = time.time()
-    t1 = time.time()
-    llm = get_llm(temperature=0.0)
-    global_context = generate_global_context(sanitized_chunks, llm)
-    p2_time = time.time() - t1
+        if not sanitized_chunks:
+            return [], {"error": "No text extracted"}
+
+        t1 = time.time()
+        llm = get_llm(temperature=0.0)
+        global_context = generate_global_context(sanitized_chunks, llm)
+        p2_time = time.time() - t1
+        
+        completed_ttps = []
+        previous_timing = {}
+        
+        with open(cache_path, "w", encoding="utf-8") as f:
+            json.dump({
+                "pending_chunks": sanitized_chunks,
+                "global_context": global_context,
+                "completed_ttps": completed_ttps,
+                "p1_time": p1_time,
+                "p2_time": p2_time,
+                "timing_metrics": previous_timing
+            }, f, ensure_ascii=False, indent=2)
 
     t2 = time.time()
-    result_dict = process_full_report(pdf_path, global_context, sanitized_chunks)
+    result_dict = process_full_report(pdf_path, global_context, sanitized_chunks, cache_path, completed_ttps, previous_timing)
+
+    t1 = time.time()
     p3_time = time.time() - t2
     extracted_ttps = result_dict.get("extracted_ttps", [])
 
     timing_metrics = {
         "phase1_ingestion_seconds": round(p1_time, 2),
-        "phase3_retrieval_seconds": round(
-            p2_time, 2
-        ),  # Using Context Generation as setup/retrieval equivalent
+        "phase3_retrieval_seconds": round(p2_time, 2),
         "phase4_inference_seconds": round(p3_time, 2),
         "langgraph_internal_breakdown": result_dict.get("timing_breakdown_phase3", {}),
+        "input_tokens": result_dict.get("timing_breakdown_phase3", {}).get("input_tokens", 0),
+        "output_tokens": result_dict.get("timing_breakdown_phase3", {}).get("output_tokens", 0),
+        "api_crashed": result_dict.get("timing_breakdown_phase3", {}).get("api_crashed", False)
     }
+
+    # Borrar caché si fue exitoso (no hubo crash de API)
+    if not timing_metrics.get("api_crashed", False) and os.path.exists(cache_path):
+        try:
+            os.remove(cache_path)
+        except Exception:
+            pass
 
     return extracted_ttps, timing_metrics
 
@@ -4012,43 +4585,81 @@ if __name__ == "__main__":
     print(f"[*] [INFO] Phase 1: Ingesting PDF: {pdf_path}")
     t0 = time.time()
 
-    use_vlm_env = os.getenv("USE_VLM_EXTRACTION", "False").lower() in (
-        "true",
-        "1",
-        "yes",
-    )
-    ingestor = ReportIngestor(chunk_size=3500, chunk_overlap=500, use_vlm=use_vlm_env)
+    import hashlib
+    file_hash = hashlib.md5(pdf_path.encode()).hexdigest()
+    cache_path = os.path.join("data", "output", "evaluations", f"cache_langgraph_{file_hash}.json")
+    os.makedirs(os.path.dirname(cache_path), exist_ok=True)
 
-    raw_chunks = ingestor.process_report(pdf_path)
-    p1_time = time.time() - t0
-    print(f"[+] [INFO] Phase 1: Extracted {len(raw_chunks)} chunks.\n")
+    if os.path.exists(cache_path):
+        print(f"[*] Resuming from Cache: {cache_path}")
+        with open(cache_path, "r", encoding="utf-8") as f:
+            cache_data = json.load(f)
+        sanitized_chunks = cache_data.get("pending_chunks", [])
+        global_context = cache_data.get("global_context", "")
+        completed_ttps = cache_data.get("completed_ttps", [])
+        p1_time = cache_data.get("p1_time", 0.0)
+        p2_time = cache_data.get("p2_time", 0.0)
+        previous_timing = cache_data.get("timing_metrics", {})
+        
+        if not sanitized_chunks and not completed_ttps:
+            print("[-] Cache exists but is empty. Restarting extraction.")
+            os.remove(cache_path)
+            sys.exit(1)
+            
+    else:
+        use_vlm_env = os.getenv("USE_VLM_EXTRACTION", "False").lower() in (
+            "true",
+            "1",
+            "yes",
+        )
+        ingestor = ReportIngestor(chunk_size=3500, chunk_overlap=500, use_vlm=use_vlm_env)
 
-    sanitized_chunks = []
-    for c in raw_chunks:
-        if hasattr(c, "page_content"):
-            sanitized_chunks.append({"text": c.page_content, "metadata": c.metadata})
-        elif isinstance(c, dict) and "text" in c:
-            sanitized_chunks.append(c)
-        else:
-            sanitized_chunks.append({"text": str(c), "metadata": {}})
+        raw_chunks = ingestor.process_report(pdf_path)
+        p1_time = time.time() - t0
+        print(f"[+] [INFO] Phase 1: Extracted {len(raw_chunks)} chunks.\n")
 
-    if not sanitized_chunks:
-        print("[-] No text could be extracted from the PDF. Exiting.")
-        sys.exit(1)
+        sanitized_chunks = []
+        for idx, c in enumerate(raw_chunks):
+            chunk_data = {}
+            if hasattr(c, "page_content"):
+                chunk_data = {"text": c.page_content, "metadata": c.metadata}
+            elif isinstance(c, dict) and "text" in c:
+                chunk_data = c
+            else:
+                chunk_data = {"text": str(c), "metadata": {}}
+            
+            chunk_data["chunk_id"] = f"chunk_{idx}"
+            sanitized_chunks.append(chunk_data)
 
-    # 2. Global Context Generation Phase
-    print("[*] [INFO] Phase 2: Generating Global Context...")
-    t1 = time.time()
-    t1 = time.time()
-    llm = get_llm(temperature=0.0)
-    global_context = generate_global_context(sanitized_chunks, llm)
-    p2_time = time.time() - t1
+        if not sanitized_chunks:
+            print("[-] No text could be extracted from the PDF. Exiting.")
+            sys.exit(1)
+
+        # 2. Global Context Generation Phase
+        print("[*] [INFO] Phase 2: Generating Global Context...")
+        t1 = time.time()
+        llm = get_llm(temperature=0.0)
+        global_context = generate_global_context(sanitized_chunks, llm)
+        p2_time = time.time() - t1
+        
+        completed_ttps = []
+        previous_timing = {}
+        
+        with open(cache_path, "w", encoding="utf-8") as f:
+            json.dump({
+                "pending_chunks": sanitized_chunks,
+                "global_context": global_context,
+                "completed_ttps": completed_ttps,
+                "p1_time": p1_time,
+                "p2_time": p2_time,
+                "timing_metrics": previous_timing
+            }, f, ensure_ascii=False, indent=2)
 
     # 3. Execution Phase (Map-Reduce)
     print("\n[*] [INFO] Phase 4: Starting Graph Execution (Map-Reduce Inference)...")
     t2 = time.time()
     # === CAMBIO AQUI ===
-    result_dict = process_full_report(pdf_path, global_context, sanitized_chunks)
+    result_dict = process_full_report(pdf_path, global_context, sanitized_chunks, cache_path, completed_ttps, previous_timing)
     p3_time = time.time() - t2
     print("[+] [INFO] Phase 4: Graph Execution Completed.")
 
@@ -4056,6 +4667,7 @@ if __name__ == "__main__":
     extracted_ttps = result_dict.get("extracted_ttps", [])
     p3_breakdown = result_dict.get("timing_breakdown_phase3", {})
     # ===================
+
 
     # 4. Construct Final JSON matching LangChain standard
     total_execution_time = time.time() - total_start_time
@@ -4094,6 +4706,12 @@ if __name__ == "__main__":
         print(f"Time Taken: {round(total_execution_time / 60.0, 2)} minutes")
         print(f"Results saved to: {output_file_path}")
         print(f"{'=' * 60}")
+        
+        if not p3_breakdown.get("api_crashed", False) and os.path.exists(cache_path):
+            try:
+                os.remove(cache_path)
+            except Exception:
+                pass
     except Exception as e:
         print(f"[!] Error saving output file: {e}")
 
@@ -4176,6 +4794,29 @@ class ValidationResult(BaseModel):
         description="A list of feedback notes explaining what was hallucinated or missing."
     )
 
+class SimpleDraftTTP(BaseModel):
+    technique_id: str = Field(
+        description="The MITRE ATT&CK Technique ID (e.g., T1059.001)"
+    )
+    procedure: str = Field(
+        description="The specific procedure or behavior observed in the text"
+    )
+    justification: str = Field(
+        default="Verified by Validator",
+        description="Technical explanation of why this chunk demonstrates the technique.",
+    )
+
+class SimpleDraftTTPList(BaseModel):
+    ttps: List[SimpleDraftTTP] = Field(description="A list of drafted TTPs from the text.")
+
+class SimpleValidationResult(BaseModel):
+    valid_ttps: List[SimpleDraftTTP] = Field(
+        description="A list of approved TTPs that strictly match the text."
+    )
+    feedback_notes: List[str] = Field(
+        description="A list of feedback notes explaining what was hallucinated or missing."
+    )
+
 
 # ==============================================================================
 # NODE FUNCTIONS
@@ -4184,21 +4825,32 @@ class ValidationResult(BaseModel):
 
 from tenacity import retry, stop_after_attempt, wait_exponential
 
+def print_retry_warning(retry_state):
+    import sys
+    import os
+    profile = os.getenv("EXECUTION_PROFILE", "LOCAL").upper()
+    provider = "Google AI Studio" if profile == "LOCAL" else "vLLM Remote"
+    print(f"\n[⚠️ ALARMA DE CONEXIÓN] {provider} ha rechazado o fallado en la petición.", file=sys.stderr)
+    print(f"[⏳] Tenacity esperando {retry_state.next_action.sleep} segundos antes del reintento #{retry_state.attempt_number}...", file=sys.stderr)
+
 @retry(
     stop=stop_after_attempt(6), 
-    wait=wait_exponential(multiplier=2, min=5, max=60),
+    wait=wait_exponential(multiplier=2, min=5, max=30),
+    before_sleep=print_retry_warning,
     reraise=True
 )
 def _invoke_with_retry(callable_chain, input_data):
     return callable_chain.invoke(input_data)
 
 def safe_invoke(callable_chain, input_data):
-    """Safely invokes a chain or agent with exponential backoff, returning None only after all retries fail."""
+    """Safely invokes a chain or agent with exponential backoff. Raises exception if all retries fail."""
+    # RATE LIMITING: Handled dynamically by Tenacity (@retry) upon receiving 429 errors.
+    
     try:
         return _invoke_with_retry(callable_chain, input_data)
     except Exception as e:
-        print(f"[ERROR] Model Invocation Error after retries: {e}")
-        return None
+        print(f"[ERROR CRÍTICO] Model Invocation Error after all retries exhausted: {e}")
+        raise RuntimeError(f"Rate Limit / API Collapse: {e}") from e
 
 
 def triage_node(state: ChunkState) -> dict:
@@ -4211,7 +4863,8 @@ def triage_node(state: ChunkState) -> dict:
     chunk_text = state["chunk_text"]
 
     llm = get_llm(tier="lite")
-    structured_llm = llm.with_structured_output(TriageDecision)
+    from langchain_core.output_parsers import PydanticOutputParser
+    parser = PydanticOutputParser(pydantic_object=TriageDecision)
 
     use_prompt_repetition = os.getenv("USE_PROMPT_REPETITION", "False").lower() in (
         "true",
@@ -4223,7 +4876,8 @@ def triage_node(state: ChunkState) -> dict:
         "Role: Cyber Threat Intelligence Analyst.\n"
         "Task: Perform a binary classification on text chunks.\n"
         "Condition: Return True if the text contains cybersecurity threat intelligence, attacker behavior, or technical indicators. Return False otherwise.\n"
-        "Note: The text may be in any language (Spanish, Russian, etc.). Analyze it natively."
+        "Note: The text may be in any language (Spanish, Russian, etc.). Analyze it natively.\n\n"
+        "{format_instructions}"
     )
     if use_prompt_repetition:
         sys_prompt = f"{sys_prompt}\n\nReminder of Rules:\n{sys_prompt}"
@@ -4239,18 +4893,39 @@ def triage_node(state: ChunkState) -> dict:
         ]
     )
 
-    chain = prompt | structured_llm
+    chain = prompt | llm
 
-    result = safe_invoke(chain, {"chunk_text": chunk_text})
+    raw_msg = safe_invoke(chain, {"chunk_text": chunk_text, "format_instructions": parser.get_format_instructions()})
 
-    if result is None:
+    in_tok = 0
+    out_tok = 0
+    
+    if raw_msg is None:
         is_relevant = True
     else:
-        is_relevant = result.is_relevant
+        if hasattr(raw_msg, "usage_metadata") and raw_msg.usage_metadata:
+            in_tok += raw_msg.usage_metadata.get("input_tokens", 0)
+            out_tok += raw_msg.usage_metadata.get("output_tokens", 0)
+        
+        content = raw_msg.content if hasattr(raw_msg, "content") else str(raw_msg)
+        if isinstance(content, list):
+            text_parts = [part["text"] for part in content if isinstance(part, dict) and "text" in part]
+            content = "".join(text_parts) if text_parts else str(content)
+            
+        try:
+            parsed = parser.parse(content)
+            is_relevant = parsed.is_relevant
+        except Exception:
+            is_relevant = True # Fallback a True si falla el parser
 
     c_idx = state.get("chunk_metadata", {}).get("chunk_index", "?")
     print(f"[DEBUG] [Chunk {c_idx}] Triage - Is Relevant: {is_relevant}")
-    return {"is_relevant": is_relevant, "triage_time": time.time() - t0}
+    return {
+        "is_relevant": is_relevant, 
+        "triage_time": time.time() - t0,
+        "input_tokens": state.get("input_tokens", 0) + in_tok,
+        "output_tokens": state.get("output_tokens", 0) + out_tok,
+    }
 
 
 def extractor_node(state: ChunkState) -> dict:
@@ -4264,6 +4939,9 @@ def extractor_node(state: ChunkState) -> dict:
     val_feedback = state.get("validation_feedback", "")
     approved_ttps = state.get("approved_ttps", [])
     approved_ids = [t.get("technique_id") for t in approved_ttps]
+    
+    in_tok = 0
+    out_tok = 0
 
     # 1. QUERY TRANSFORMATION: Abstract Keywords Only
     c_idx = state.get("chunk_metadata", {}).get("chunk_index", "?")
@@ -4311,10 +4989,24 @@ def extractor_node(state: ChunkState) -> dict:
 
         translation_chain = translator_prompt | translator_llm | StrOutputParser()
 
-        abstract_keywords = safe_invoke(translation_chain, {"chunk_text": chunk_text})
-        if abstract_keywords is None:
+        abstract_keywords_result = safe_invoke(translation_chain, {"chunk_text": chunk_text})
+        if abstract_keywords_result is None:
             print(f"[ERROR] [Chunk {c_idx}] Translation Error: LLM failed after retries.")
             abstract_keywords = ""
+        else:
+            if isinstance(abstract_keywords_result, dict):
+                raw_msg = abstract_keywords_result.get("raw")
+                if raw_msg and hasattr(raw_msg, "usage_metadata") and raw_msg.usage_metadata:
+                    in_tok += raw_msg.usage_metadata.get("input_tokens", 0)
+                    out_tok += raw_msg.usage_metadata.get("output_tokens", 0)
+                abstract_keywords = abstract_keywords_result.get("parsed", "")
+            elif hasattr(abstract_keywords_result, 'response_metadata') and 'token_usage' in abstract_keywords_result.response_metadata:
+                usage = abstract_keywords_result.response_metadata['token_usage']
+                in_tok += usage.get('prompt_tokens', 0)
+                out_tok += usage.get('completion_tokens', 0)
+                abstract_keywords = abstract_keywords_result.content
+            else:
+                abstract_keywords = abstract_keywords_result
 
         print(
             f"[DEBUG] [Chunk {c_idx}] Extractor - Abstract Keywords: {abstract_keywords}"
@@ -4358,7 +5050,11 @@ def extractor_node(state: ChunkState) -> dict:
 
     # 3. EXTRACTION (BRAINSTORMER)
     llm = get_llm(tier="pro")
-    structured_llm = llm.with_structured_output(DraftTTPList)
+    
+    use_simple_schema = os.getenv("SIMPLIFIED_JSON_SCHEMA", "False").lower() in ("true", "1", "yes")
+    OutputSchema = SimpleDraftTTPList if use_simple_schema else DraftTTPList
+    from langchain_core.output_parsers import PydanticOutputParser
+    parser = PydanticOutputParser(pydantic_object=OutputSchema)
 
     use_prompt_repetition = os.getenv("USE_PROMPT_REPETITION", "False").lower() in (
         "true",
@@ -4374,7 +5070,8 @@ def extractor_node(state: ChunkState) -> dict:
         "3. Ignore previously approved or rejected techniques.\n"
         "4. Focus exclusively on observable actions.\n"
         "5. CRITICAL JSON FORMATTING: In the 'procedure' field, you MUST write a full descriptive sentence of what the attacker did (e.g., 'The attacker used Ngrok to establish a tunnel.'). DO NOT write single words or tactic names.\n"
-        "6. Output strictly according to the requested JSON schema."
+        "6. Output strictly according to the requested JSON schema.\n\n"
+        "{format_instructions}"
     )
     if use_prompt_repetition:
         sys_prompt = f"{sys_prompt}\n\nReminder of Rules:\n{sys_prompt}"
@@ -4404,48 +5101,65 @@ def extractor_node(state: ChunkState) -> dict:
     if use_prompt_repetition:
         prompt_text = f"{prompt_text}\n\n{prompt_text}"
 
-    parsed_result = safe_invoke(prompt | structured_llm, {"prompt_text": prompt_text})
+    parsed_result_dict = safe_invoke(prompt | llm, {"prompt_text": prompt_text, "format_instructions": parser.get_format_instructions()})
 
-    if parsed_result is not None:
-        loc = f"Page {state.get('chunk_metadata', {}).get('page_number', '?')}, Chunk {state.get('chunk_metadata', {}).get('chunk_index', '?')}"
-        for ttp in parsed_result.ttps:
-            draft = ttp.model_dump()
-            tech_id = str(draft.get("technique_id", "")).strip().upper()
+    parsed_result = None
+    if parsed_result_dict is not None:
+        raw_msg = parsed_result_dict
+        if hasattr(raw_msg, "usage_metadata") and raw_msg.usage_metadata:
+            in_tok += raw_msg.usage_metadata.get("input_tokens", 0)
+            out_tok += raw_msg.usage_metadata.get("output_tokens", 0)
+            
+        content = raw_msg.content if hasattr(raw_msg, "content") else str(raw_msg)
+        if isinstance(content, list):
+            text_parts = [part["text"] for part in content if isinstance(part, dict) and "text" in part]
+            content = "".join(text_parts) if text_parts else str(content)
+            
+        try:
+            parsed_result = parser.parse(content)
+        except Exception as e:
+            print(f"[ERROR] Extractor parsing failed: {e}")
+            
+        if parsed_result and parsed_result.ttps:
+            loc = f"Page {state.get('chunk_metadata', {}).get('page_number', '?')}, Chunk {state.get('chunk_metadata', {}).get('chunk_index', '?')}"
+            for ttp in parsed_result.ttps:
+                draft = ttp.model_dump()
+                tech_id = str(draft.get("technique_id", "")).strip().upper()
 
-            # --- HYBRID GUARDIAN ---
-            if tech_id not in current_meta_map:
-                # 1. El LLM ha propuesto un ID que no le dio Qdrant.
-                # Vamos a comprobar si es una alucinación (T9999) o si es real (T1203).
-                
-                # Cargamos el diccionario global de MITRE (está cacheado, es instantáneo)
-                global_mitre_db = load_mitre_json() 
-                
-                if tech_id in global_mitre_db:
-                    print(f"[DEBUG] Model deduced {tech_id} natively. Accepted for validation.")
-                    # Inyectamos la metadata oficial para que el Validator no se confunda
-                    current_meta_map[tech_id] = {
-                        "name": global_mitre_db[tech_id]["name"],
-                        "tactics": global_mitre_db[tech_id]["tactics"],
-                        "score": 0.0
-                    }
-                    draft["technique_id"] = tech_id
-                    draft["name"] = global_mitre_db[tech_id]["name"]
-                    draft["tactic"] = global_mitre_db[tech_id]["tactics"]
-                    draft["confidence_score"] = 0.0 # Score 0.0 indica que viene de memoria, no de Qdrant
-                    draft["location"] = loc
-                    all_drafts.append(draft)
-                else:
-                    print(f"[DEBUG] Discarding hallucination: {tech_id} not in MITRE.")
-                
-                continue # Saltamos a la siguiente iteración
+                # --- HYBRID GUARDIAN ---
+                if tech_id not in current_meta_map:
+                    # 1. El LLM ha propuesto un ID que no le dio Qdrant.
+                    # Vamos a comprobar si es una alucinación (T9999) o si es real (T1203).
+                    
+                    # Cargamos el diccionario global de MITRE (está cacheado, es instantáneo)
+                    global_mitre_db = load_mitre_json() 
+                    
+                    if tech_id in global_mitre_db:
+                        print(f"[DEBUG] Model deduced {tech_id} natively. Accepted for validation.")
+                        # Inyectamos la metadata oficial para que el Validator no se confunda
+                        current_meta_map[tech_id] = {
+                            "name": global_mitre_db[tech_id]["name"],
+                            "tactics": global_mitre_db[tech_id]["tactics"],
+                            "score": 0.0
+                        }
+                        draft["technique_id"] = tech_id
+                        draft["name"] = global_mitre_db[tech_id]["name"]
+                        draft["tactic"] = global_mitre_db[tech_id]["tactics"]
+                        draft["confidence_score"] = 0.0 # Score 0.0 indica que viene de memoria, no de Qdrant
+                        draft["location"] = loc
+                        all_drafts.append(draft)
+                    else:
+                        print(f"[DEBUG] Discarding hallucination: {tech_id} not in MITRE.")
+                    
+                    continue # Saltamos a la siguiente iteración
 
-            # 2. Si venía de Qdrant (Comportamiento normal)
-            draft["technique_id"] = tech_id
-            draft["name"] = current_meta_map[tech_id]["name"]
-            draft["tactic"] = current_meta_map[tech_id]["tactics"]
-            draft["confidence_score"] = current_meta_map[tech_id]["score"]
-            draft["location"] = loc
-            all_drafts.append(draft)
+                # 2. Si venía de Qdrant (Comportamiento normal)
+                draft["technique_id"] = tech_id
+                draft["name"] = current_meta_map[tech_id]["name"]
+                draft["tactic"] = current_meta_map[tech_id]["tactics"]
+                draft["confidence_score"] = current_meta_map[tech_id]["score"]
+                draft["location"] = loc
+                all_drafts.append(draft)
 
     draft_ids = [d.get("technique_id", "Unknown") for d in all_drafts]
     print(
@@ -4458,6 +5172,8 @@ def extractor_node(state: ChunkState) -> dict:
         "extractor_time": state.get("extractor_time", 0.0) + (time.time() - t0),
         "candidates_list": candidates_list,
         "abstract_keywords": abstract_keywords,
+        "input_tokens": state.get("input_tokens", 0) + in_tok,
+        "output_tokens": state.get("output_tokens", 0) + out_tok,
     }
 
 
@@ -4481,7 +5197,11 @@ def validator_node(state: ChunkState) -> dict:
         }
 
     llm = get_llm(tier="pro", temperature=0.2)
-    structured_llm = llm.with_structured_output(ValidationResult)
+    
+    use_simple_schema = os.getenv("SIMPLIFIED_JSON_SCHEMA", "False").lower() in ("true", "1", "yes")
+    ValidationSchema = SimpleValidationResult if use_simple_schema else ValidationResult
+    from langchain_core.output_parsers import PydanticOutputParser
+    parser = PydanticOutputParser(pydantic_object=ValidationSchema)
 
     use_prompt_repetition = os.getenv("USE_PROMPT_REPETITION", "False").lower() in (
         "true",
@@ -4498,7 +5218,8 @@ def validator_node(state: ChunkState) -> dict:
         "3. Approve the technique if the text contains concrete evidence of the technical action described.\n"
         "4. Reject the technique if it is based solely on theoretical motives or implies the action did not occur.\n"
         "5. Provide specific feedback for rejected techniques to improve extraction accuracy.\n"
-        "6. Validate each technique independently."
+        "6. Validate each technique independently.\n\n"
+        "{format_instructions}"
     )
 
     if use_prompt_repetition:
@@ -4516,20 +5237,40 @@ def validator_node(state: ChunkState) -> dict:
         ]
     )
 
-    chain = prompt | structured_llm
+    chain = prompt | llm
 
-    result = safe_invoke(
+    result_dict = safe_invoke(
         chain,
         {
             "global_context": state.get("global_context", "None provided."),
             "chunk_text": state["chunk_text"],
             "draft_ttps": json.dumps(draft_ttps_list, indent=2),
+            "format_instructions": parser.get_format_instructions()
         },
     )
+    
+    in_tok = 0
+    out_tok = 0
 
-    if result is None:
+    if result_dict is None:
         print(f"[DEBUG] [Chunk {c_idx}] Validator - Validation failed gracefully.")
         return {"approved_ttps": [], "validation_feedback": "", "draft_ttps": []}
+
+    raw_msg = result_dict
+    if hasattr(raw_msg, "usage_metadata") and raw_msg.usage_metadata:
+        in_tok += raw_msg.usage_metadata.get("input_tokens", 0)
+        out_tok += raw_msg.usage_metadata.get("output_tokens", 0)
+        
+    content = raw_msg.content if hasattr(raw_msg, "content") else str(raw_msg)
+    if isinstance(content, list):
+        text_parts = [part["text"] for part in content if isinstance(part, dict) and "text" in part]
+        content = "".join(text_parts) if text_parts else str(content)
+        
+    result = None
+    try:
+        result = parser.parse(content)
+    except Exception as e:
+        print(f"[ERROR] Validator parsing failed: {e}")
 
     current_meta_map = state.get("metadata_map", {})
     new_approved = []
@@ -4547,6 +5288,7 @@ def validator_node(state: ChunkState) -> dict:
             ttp_dict["name"] = current_meta_map[tech_id]["name"]
             ttp_dict["tactic"] = current_meta_map[tech_id]["tactics"]
             ttp_dict["confidence_score"] = current_meta_map[tech_id]["score"]
+            ttp_dict["location"] = f"Page {state.get('chunk_metadata', {}).get('page_number', '?')}, Chunk {state.get('chunk_metadata', {}).get('chunk_index', '?')}"
             new_approved.append(ttp_dict)
 
     # Set feedback to current loop's rejections only
@@ -4566,6 +5308,8 @@ def validator_node(state: ChunkState) -> dict:
         "validation_feedback": feedback,
         "draft_ttps": [],  # Limpiamos los drafts para la siguiente iteración
         "validator_time": state.get("validator_time", 0.0) + (time.time() - t0),
+        "input_tokens": state.get("input_tokens", 0) + in_tok,
+        "output_tokens": state.get("output_tokens", 0) + out_tok,
     }
 
 
@@ -4583,6 +5327,8 @@ class GlobalState(TypedDict):
     chunks: List[Dict[str, Any]]
     all_approved_ttps: Annotated[List[Any], operator.add]
     final_json: Dict[str, Any]
+    input_tokens: int
+    output_tokens: int
 
 
 class ChunkState(TypedDict):
@@ -4598,6 +5344,8 @@ class ChunkState(TypedDict):
     triage_time: float
     extractor_time: float
     validator_time: float
+    input_tokens: int
+    output_tokens: int
 
     # Official Metadata map injected by Oracle
     metadata_map: dict
@@ -4866,6 +5614,69 @@ def get_mitre_candidates(query: str, top_k: int = 25) -> tuple:
     except Exception as e:
         print(f"Error during search: {str(e)}")
         return [], {}
+
+
+
+================================================
+FILE: src/scripts/generate_diffs.py
+================================================
+import json
+import sys
+import os
+
+def generate_diffs(json_path: str):
+    if not os.path.exists(json_path):
+        print(f"[!] File not found: {json_path}")
+        return
+
+    print(f"[*] Reading {json_path}...")
+    with open(json_path, 'r', encoding='utf-8') as f:
+        data = json.load(f)
+
+    detailed_executions = data.get("detailed_executions", [])
+    if not detailed_executions:
+        print("[!] No 'detailed_executions' found in the JSON. Cannot generate diffs.")
+        return
+
+    diffs = []
+    for item in detailed_executions:
+        true_labels = item.get("true_labels", [])
+        pred_labels = item.get("predicted_labels_normalized", [])
+        
+        true_set = set(true_labels)
+        pred_set = set(pred_labels)
+        
+        if true_set != pred_set:
+            diffs.append({
+                "sentence_id": item.get("sentence_id", item.get("source_file", "unknown")),
+                "text": item.get("text", ""),
+                "human_ground_truth": list(true_set),
+                "llm_prediction": list(pred_set),
+                "false_negatives_missed": list(true_set - pred_set),
+                "false_positives_hallucinated": list(pred_set - true_set)
+            })
+
+    # Generate output path
+    dirname = os.path.dirname(json_path)
+    basename = os.path.basename(json_path)
+    
+    # Prepend 'diff_analysis_' to the original filename
+    diff_filename = f"diff_analysis_{basename}"
+    output_path = os.path.join(dirname, diff_filename)
+
+    with open(output_path, "w", encoding="utf-8") as f:
+        json.dump(diffs, f, indent=4)
+
+    print(f"[+] Successfully generated diffs.")
+    print(f"[+] Saved {len(diffs)} conflict cases for qualitative review in: {output_path}")
+
+if __name__ == "__main__":
+    if len(sys.argv) < 2:
+        print("Usage: python src/scripts/generate_diffs.py <path_to_evaluation_json>")
+        sys.exit(1)
+        
+    target_json = sys.argv[1]
+    generate_diffs(target_json)
 
 
 

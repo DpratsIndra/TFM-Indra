@@ -52,8 +52,13 @@ def main():
     load_dotenv(override=True)
     
     # Configure URLs based on .env
-    vllm_url = os.getenv("VLLM_BASE_URL", "http://10.0.152.198:8001/v1").rstrip("/") + "/chat/completions"
-    vllm_model = os.getenv("VLLM_MODEL_NAME", "gpt-oss-20b")
+    use_gemma = os.getenv("USE_GEMMA4", "False").lower() in ("true", "1", "yes")
+    if use_gemma:
+        vllm_url = os.getenv("VLLM_BASE_URL_GEMMA", "http://10.0.152.198:8003/v1").rstrip("/") + "/chat/completions"
+        vllm_model = os.getenv("VLLM_MODEL_NAME_GEMMA", "gemma4")
+    else:
+        vllm_url = os.getenv("VLLM_BASE_URL", "http://10.0.152.198:8001/v1").rstrip("/") + "/chat/completions"
+        vllm_model = os.getenv("VLLM_MODEL_NAME", "gpt-oss-20b")
     
     reranker_url = os.getenv("RERANKER_URL", "http://10.0.152.198:8005/v1/rerank")
     reranker_model = os.getenv("RERANKER_MODEL_NAME", "jina-reranker-v2-base-multilingual")

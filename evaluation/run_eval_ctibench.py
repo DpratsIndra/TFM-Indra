@@ -72,12 +72,16 @@ def run_evaluation():
         
     print(f"[*] Total sentences for evaluation: {len(df)}")
     
+    vlm_mode = os.getenv("USE_VLM_EXTRACTION", "False")
+    rep_mode = os.getenv("USE_PROMPT_REPETITION", "False")
+    tag_vlm = "vlm_on" if str(vlm_mode).lower() in ["true", "1", "yes"] else "vlm_off"
+    tag_rep = "rep_on" if str(rep_mode).lower() in ["true", "1", "yes"] else "rep_off"
+    
     if pipeline_type == "langchain":
         retriever, analyzer = setup_langchain_components()
         
     timestamp = datetime.now().strftime("%Y%m%d_%H%M")
-    output_filename = f"ctibench_eval_{pipeline_type}_{model_used}_{timestamp}.json"
-    
+    output_filename = f"ctibench_eval_{pipeline_type}_{model_used}_{tag_vlm}_{tag_rep}_{timestamp}.json"
     predicted_labels = []
     detailed_results = []
     hierarchy_stats = {"total_exact_matches": 0, "total_more_detailed": 0, "total_more_general": 0}

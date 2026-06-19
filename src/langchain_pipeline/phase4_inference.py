@@ -158,8 +158,8 @@ class TTPAnalyzer:
             print(f"[⏳] Tenacity esperando {retry_state.next_action.sleep} segundos antes del reintento #{retry_state.attempt_number}...", file=sys.stderr)
 
         @retry(
-            stop=stop_after_attempt(2),
-            wait=wait_exponential(multiplier=2, min=5, max=15),
+            stop=stop_after_attempt(6),
+            wait=wait_exponential(multiplier=2, min=5, max=30),
             before_sleep=print_retry_warning,
             reraise=True,
         )
