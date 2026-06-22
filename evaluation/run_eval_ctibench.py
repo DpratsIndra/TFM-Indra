@@ -44,7 +44,7 @@ def run_evaluation():
     pipeline_type = args.pipeline
 
     print("\n" + "="*80)
-    print("🚀 INICIANDO EVALUACIÓN CTIBENCH (TEXT-LEVEL)")
+    print("[*] INITIATING CTIBENCH EVALUATION (TEXT-LEVEL)")
     print(f"   Pipeline:           {pipeline_type.upper()}")
     
     profile = os.getenv("EXECUTION_PROFILE", "LOCAL").upper()
@@ -170,7 +170,7 @@ def run_evaluation():
                         }
                         
                 if pipeline_type == "langgraph" and timing_ph3.get("api_crashed"):
-                    print("\n[!] CORTE DE LLM/API DETECTADO DURANTE ESTA SENTENCIA (LangGraph). Deteniendo ejecución.")
+                    print("\n[!] LLM/API CRASH DETECTED DURING THIS SENTENCE (LangGraph). Stopping execution.")
                     llm_crashed = True
                     break
                         
@@ -237,11 +237,11 @@ def run_evaluation():
             break
         except Exception as e:
             error_str = str(e)
-            tqdm.write(f" [!] ERROR crítico en id {idx}: {error_str}")
+            tqdm.write(f" [!] Critical ERROR in id {idx}: {error_str}")
             
             api_errors = ["429", "quota", "resourceexhausted", "503", "500", "timeout", "not_found", "api", "connection", "unavailable"]
             if any(err in error_str.lower() for err in api_errors):
-                print("\n[!] CORTE DE LLM/API DETECTADO. Deteniendo ejecución para salvaguardar el progreso.")
+                print("\n[!] LLM/API CRASH DETECTED. Stopping execution to save progress.")
                 llm_crashed = True
                 break
                 
@@ -293,7 +293,7 @@ def run_evaluation():
         json.dump(final_output, f, indent=4)
         
     print("\n" + "="*80)
-    print(f"🎯 RESULTADOS MICRO PARA CTIBENCH ({pipeline_type.upper()})")
+    print(f"[*] MICRO RESULTS FOR CTIBENCH ({pipeline_type.upper()})")
     print("="*80)
     print(f"F0.5-Score: {results['micro']['f0.5']}")
     print(f"F1-Score:   {results['micro']['f1']}")

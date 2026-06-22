@@ -24,7 +24,7 @@ class ReportIngestor:
     Fase 1: Ingesta y Particionado Semántico.
     Transforma un PDF en fragmentos de texto.
     - Modo Normal (Docling): Extracción tradicional.
-    - Modo VLM (Gemini): Convierte páginas a imagen y transcribe usando VLM.
+    - VLM Mode (Gemini): Converts pages to image and transcribes using a VLM.
     Ofusca los IoCs y particiona el texto.
     """
 
@@ -82,7 +82,7 @@ class ReportIngestor:
         logger.info(
             f"Loading PDF '{file_path}' using Multimodal VLM extraction (Gemini Flash)..."
         )
-        # Forzamos un modelo VLM, independientemente del modelo principal de inferencia
+        # Force a VLM model, regardless of the main inference model
         gemini_vlm_model = os.getenv("GEMINI_VLM_MODEL", "gemini-flash-lite-latest")
         llm = ChatGoogleGenerativeAI(model=gemini_vlm_model, temperature=0.0, max_retries=3)
 
@@ -138,7 +138,7 @@ class ReportIngestor:
                 )
                 page_text = page.get_text()
 
-            # Forzar cast a string por si acaso (Pydantic ValidationError protection)
+            # Force cast to string just in case (Pydantic ValidationError protection)
             if not isinstance(page_text, str):
                 page_text = str(page_text)
 
@@ -262,7 +262,7 @@ class ReportIngestor:
         """
         logger = logging.getLogger(__name__)
 
-        # 1. SIEMPRE usamos Docling para extraer el texto base perfecto
+        # 1. ALWAYS use Docling to extract the perfect base text
         logger.info("[INFO] Extracting base text using Docling (OCR)...")
         raw_elements = self.load_pdf(file_path)
 
@@ -318,19 +318,19 @@ class ReportIngestor:
         final_docs = self.fallback_splitter.split_documents(md_docs)
 
         # =====================================================================
-        # 2. ENRIQUECIMIENTO VLM: CHUNKS INDEPENDIENTES (NUEVO)
+        # 2. VLM ENRICHMENT: INDEPENDENT CHUNKS
         # =====================================================================
         if self.use_vlm:
             logger.info("[INFO] VLM is active. Appending independent visual chunks...")
             vlm_elements = self._load_pdf_vlm(file_path)
             for el in vlm_elements:
-                # Solo si encontró algo y no es ruido de 2 letras
+                # Only if it found something and it's not 2-letter noise
                 if (
                     "NO_IMAGE_DATA" not in el.page_content
                     and len(el.page_content.strip()) > 10
                 ):
                     vlm_text = f"### [Visual Evidence extracted from Image/Terminal] ###\n{el.page_content}"
-                    # Sanitizamos los IoCs que el VLM haya podido leer de la imagen
+                    # Sanitize IoCs that the VLM might have read from the image
                     vlm_text = self.ioc_masker.mask_text(vlm_text)
 
                     final_docs.append(
@@ -352,7 +352,7 @@ class ReportIngestor:
             if match:
                 doc.metadata["page_number"] = match.group(1)
             else:
-                # Fallback para los chunks del VLM que ya traen el page_number
+                # Fallback for VLM chunks that already have the page_number
                 doc.metadata["page_number"] = doc.metadata.get("page_number", "Unknown")
 
             # Clean up HTML comments.

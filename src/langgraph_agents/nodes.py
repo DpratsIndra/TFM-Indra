@@ -108,8 +108,8 @@ def print_retry_warning(retry_state):
     import os
     profile = os.getenv("EXECUTION_PROFILE", "LOCAL").upper()
     provider = "Google AI Studio" if profile == "LOCAL" else "vLLM Remote"
-    print(f"\n[⚠️ ALARMA DE CONEXIÓN] {provider} ha rechazado o fallado en la petición.", file=sys.stderr)
-    print(f"[⏳] Tenacity esperando {retry_state.next_action.sleep} segundos antes del reintento #{retry_state.attempt_number}...", file=sys.stderr)
+    print(f"\n[!] CONNECTION ALARM: {provider} rejected or failed the request.", file=sys.stderr)
+    print(f"[*] Tenacity waiting {retry_state.next_action.sleep} seconds before retry #{retry_state.attempt_number}...", file=sys.stderr)
 
 @retry(
     stop=stop_after_attempt(6), 
@@ -127,15 +127,13 @@ def safe_invoke(callable_chain, input_data):
     try:
         return _invoke_with_retry(callable_chain, input_data)
     except Exception as e:
-        print(f"[ERROR CRÍTICO] Model Invocation Error after all retries exhausted: {e}")
+        print(f"[CRITICAL ERROR] Model Invocation Error after all retries exhausted: {e}")
         raise RuntimeError(f"Rate Limit / API Collapse: {e}") from e
 
 
 def triage_node(state: ChunkState) -> dict:
     """
-    Filtro rápido.
-    Lee el chunk y decide si contiene Inteligencia de Amenazas (TTPs, atacantes)
-    o si es relleno. Si es irrelevante, corta la ejecución.
+    Quick filter to decide if the chunk contains Threat Intelligence.
     """
     t0 = time.time()
     chunk_text = state["chunk_text"]
@@ -194,7 +192,7 @@ def triage_node(state: ChunkState) -> dict:
             parsed = parser.parse(content)
             is_relevant = parsed.is_relevant
         except Exception:
-            is_relevant = True # Fallback a True si falla el parser
+            is_relevant = True # Fallback to True if parser fails
 
     c_idx = state.get("chunk_metadata", {}).get("chunk_index", "?")
     print(f"[DEBUG] [Chunk {c_idx}] Triage - Is Relevant: {is_relevant}")
@@ -208,9 +206,8 @@ def triage_node(state: ChunkState) -> dict:
 
 def extractor_node(state: ChunkState) -> dict:
     """
-    Analiza el chunk, extrae comportamientos tácticos,
-    consulta a la base de datos vectorial para anclar el comportamiento a
-    una técnica oficial de MITRE ATT&CK, y genera un borrador del TTP.
+    Analyzes the chunk, extracts tactical behaviors, and queries the vector 
+    database to map to MITRE ATT&CK techniques.
     """
     t0 = time.time()
     chunk_text = state["chunk_text"]
@@ -221,7 +218,7 @@ def extractor_node(state: ChunkState) -> dict:
     in_tok = 0
     out_tok = 0
 
-    # 1. QUERY TRANSFORMATION: Abstract Keywords Only
+    # 1. Extract Keywords
     c_idx = state.get("chunk_metadata", {}).get("chunk_index", "?")
     if state.get("abstract_keywords") and not val_feedback:
         abstract_keywords = state["abstract_keywords"]
@@ -240,10 +237,12 @@ def extractor_node(state: ChunkState) -> dict:
         )
 
         if val_feedback:
+            # Escape literal curly braces in val_feedback to prevent ChatPromptTemplate parsing errors
+            val_feedback_safe = val_feedback.replace("{", "{{").replace("}", "}}")
             sys_prompt += (
                 "\n\nCRITICAL FEEDBACK FROM PREVIOUS ATTEMPT:\n"
                 "The previous extraction failed or was incomplete. Review the validator's feedback and generate NEW, DIFFERENT abstract keywords to find better techniques.\n"
-                f"Feedback: {val_feedback}"
+                f"Feedback: {val_feedback_safe}"
             )
 
         use_prompt_repetition = os.getenv("USE_PROMPT_REPETITION", "False").lower() in (
@@ -290,7 +289,7 @@ def extractor_node(state: ChunkState) -> dict:
             f"[DEBUG] [Chunk {c_idx}] Extractor - Abstract Keywords: {abstract_keywords}"
         )
 
-    # 2. DYNAMIC MECHANICAL RETRIEVAL
+    # 2. Fetch Candidates
     # Pass the RAW TEXT plus the keywords to the Oracle so no context is lost.
     # We DO NOT include val_feedback in the vector query to avoid polluting the semantic search.
     search_query = f"Raw Text: {chunk_text}\nKeywords: {abstract_keywords}"
@@ -308,11 +307,11 @@ def extractor_node(state: ChunkState) -> dict:
             f"[DEBUG] [Chunk {c_idx}] Extractor - Using cached candidates_list ({len(candidates_list)} candidates)."
         )
     else:
-        # Recuperamos la bolsa de 25
+        # Fetch top 25 candidates
         candidates_list, meta_map = get_mitre_candidates(
             search_query, top_k=25
         )
-        # Fusionamos con el metadata_map previo por si hay varias iteraciones
+        # Merge with previous metadata_map
         current_meta_map.update(meta_map)
 
     if not candidates_list:
@@ -326,7 +325,7 @@ def extractor_node(state: ChunkState) -> dict:
             "extractor_time": state.get("extractor_time", 0.0) + (time.time() - t0),
         }
 
-    # 3. EXTRACTION (BRAINSTORMER)
+    # 3. Extract TTPs
     llm = get_llm(tier="pro")
     
     use_simple_schema = os.getenv("SIMPLIFIED_JSON_SCHEMA", "False").lower() in ("true", "1", "yes")
@@ -404,17 +403,16 @@ def extractor_node(state: ChunkState) -> dict:
                 draft = ttp.model_dump()
                 tech_id = str(draft.get("technique_id", "")).strip().upper()
 
-                # --- HYBRID GUARDIAN ---
+                # --- Validate and enrich ---
                 if tech_id not in current_meta_map:
-                    # 1. El LLM ha propuesto un ID que no le dio Qdrant.
-                    # Vamos a comprobar si es una alucinación (T9999) o si es real (T1203).
+                    # 1. Validate if the LLM-proposed ID is a hallucination or real.
                     
-                    # Cargamos el diccionario global de MITRE (está cacheado, es instantáneo)
+                    # Load global MITRE dictionary
                     global_mitre_db = load_mitre_json() 
                     
                     if tech_id in global_mitre_db:
                         print(f"[DEBUG] Model deduced {tech_id} natively. Accepted for validation.")
-                        # Inyectamos la metadata oficial para que el Validator no se confunda
+                        # Inject official metadata
                         current_meta_map[tech_id] = {
                             "name": global_mitre_db[tech_id]["name"],
                             "tactics": global_mitre_db[tech_id]["tactics"],
@@ -423,15 +421,15 @@ def extractor_node(state: ChunkState) -> dict:
                         draft["technique_id"] = tech_id
                         draft["name"] = global_mitre_db[tech_id]["name"]
                         draft["tactic"] = global_mitre_db[tech_id]["tactics"]
-                        draft["confidence_score"] = 0.0 # Score 0.0 indica que viene de memoria, no de Qdrant
+                        draft["confidence_score"] = 0.0 # Score 0.0 indicates it comes from the LLM, not Qdrant
                         draft["location"] = loc
                         all_drafts.append(draft)
                     else:
                         print(f"[DEBUG] Discarding hallucination: {tech_id} not in MITRE.")
                     
-                    continue # Saltamos a la siguiente iteración
+                    continue # Move to next iteration
 
-                # 2. Si venía de Qdrant (Comportamiento normal)
+                # 2. If from Qdrant (Standard behavior)
                 draft["technique_id"] = tech_id
                 draft["name"] = current_meta_map[tech_id]["name"]
                 draft["tactic"] = current_meta_map[tech_id]["tactics"]
@@ -457,7 +455,7 @@ def extractor_node(state: ChunkState) -> dict:
 
 def validator_node(state: ChunkState) -> dict:
     """
-    Goal: Perform a 'Line-Item Veto'. Strict verification of drafted TTPs against the source text.
+    Strict verification of extracted TTPs against the source text.
     """
     t0 = time.time()
     c_idx = state.get("chunk_metadata", {}).get("chunk_index", "?")
@@ -584,7 +582,7 @@ def validator_node(state: ChunkState) -> dict:
     return {
         "approved_ttps": new_approved,
         "validation_feedback": feedback,
-        "draft_ttps": [],  # Limpiamos los drafts para la siguiente iteración
+        "draft_ttps": [],  # Clear drafts for the next iteration
         "validator_time": state.get("validator_time", 0.0) + (time.time() - t0),
         "input_tokens": state.get("input_tokens", 0) + in_tok,
         "output_tokens": state.get("output_tokens", 0) + out_tok,

@@ -140,7 +140,7 @@ class AptReportDataLoader(BaseDataLoader):
             if not matched_techniques:
                 continue # Saltamos las carpetas de las que no tenemos técnicas en MITRE
                 
-            # Encontrar todos los PDFs en esta carpeta de forma robusta
+            # Robustly find all PDFs in this directory
             pdf_files = []
             for root_dir, _, files in os.walk(dir_path):
                 for f in files:

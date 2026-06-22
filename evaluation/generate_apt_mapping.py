@@ -3,11 +3,11 @@ import os
 
 def generate_mapping(output_path: str = "data/eval_datasets/APT_REPORT/mitre_group_mapping.json"):
     """
-    Descarga la base de datos oficial STIX de MITRE ATT&CK (Enterprise) 
-    y genera un diccionario mapeando todos los aliases de grupos APT 
-    a sus técnicas históricamente utilizadas.
+    Downloads the official MITRE ATT&CK (Enterprise) STIX database 
+    and generates a dictionary mapping all APT group aliases
+    to their historically used techniques.
     """
-    print("[*] Leyendo base de datos STIX local de MITRE ATT&CK Enterprise...")
+    print("[*] Reading local MITRE ATT&CK Enterprise STIX database...")
     local_stix_path = "data/mitre_data/enterprise-attack.json"
     
     if not os.path.exists(local_stix_path):

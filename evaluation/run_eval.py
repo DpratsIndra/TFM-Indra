@@ -44,10 +44,10 @@ def get_langchain_engine():
 
 def get_academic_sample(df: pd.DataFrame, total_size: int = 1000) -> pd.DataFrame:
     """
-    Balancear el dataset TRAM artificialmente. Como el 90% de las oraciones en 
-    reportes CTI no contienen TTPs, si evaluamos todo en crudo el accuracy sería engañoso.
-    Forzamos un split ~50/50 entre oraciones positivas y negativas para obtener 
-    métricas de F1-Score realistas y comparar con papers académicos.
+    Artificially balance the TRAM dataset. Since 90% of sentences in
+    # CTI reports do not contain TTPs, evaluating raw data would lead to misleading accuracy.
+    Force a ~50/50 split between positive and negative sentences to obtain
+    realistic F1-Score metrics to compare with academic papers.
     """
     df_pos = df[df['true_labels'].map(len) > 0]
     df_neg = df[df['true_labels'].map(len) == 0]
@@ -124,7 +124,7 @@ def run_tram_evaluation(file_path: str, sample_size: int = None, pipeline_type: 
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
     
     print("="*60)
-    print(f"🚀 INITIATING INFERENCE LOOP ({pipeline_type.upper()})")
+    print(f"[*] INITIATING INFERENCE LOOP ({pipeline_type.upper()})")
     print("="*60)
     
     start_time = time.time()
@@ -180,7 +180,7 @@ def run_tram_evaluation(file_path: str, sample_size: int = None, pipeline_type: 
                         timing_ph3 = result.get("timing_breakdown_phase3", {})
                 
                 if timing_ph3.get("api_crashed"):
-                    print("\n[!] CORTE DE LLM/API DETECTADO DURANTE ESTA SENTENCIA (LangGraph). Deteniendo ejecución.")
+                    print("\n[!] LLM/API CRASH DETECTED DURING THIS SENTENCE (LangGraph). Stopping execution.")
                     llm_crashed = True
                     break
                     
@@ -262,7 +262,7 @@ def run_tram_evaluation(file_path: str, sample_size: int = None, pipeline_type: 
             })
             
             # Live Terminal Logging
-            match_status = "✅ MATCH" if set(true_lbls) == set(predicted_ids) else "⚠️ DIFF"
+            match_status = "[+] MATCH" if set(true_lbls) == set(predicted_ids) else "[-] DIFF"
             print(f"\n[Sentence {idx+1}/{total_records}] {match_status}")
             print(f"   True: {true_lbls}")
             print(f"   Pred: {predicted_ids}")
@@ -273,11 +273,11 @@ def run_tram_evaluation(file_path: str, sample_size: int = None, pipeline_type: 
             break
         except Exception as e:
             error_str = str(e)
-            print(f"\n[!] Error crítico procesando la sentencia {idx}: {error_str}")
+            print(f"\n[!] Critical error processing sentence {idx}: {error_str}")
             
             api_errors = ["429", "quota", "resourceexhausted", "503", "500", "timeout", "not_found", "api", "connection", "unavailable"]
             if any(err in error_str.lower() for err in api_errors):
-                print("\n[!] CORTE DE LLM/API DETECTADO. Deteniendo ejecución para salvaguardar el progreso.")
+                print("\n[!] LLM/API CRASH DETECTED. Stopping execution to save progress.")
                 llm_crashed = True
                 break
                 
@@ -332,7 +332,7 @@ def run_tram_evaluation(file_path: str, sample_size: int = None, pipeline_type: 
         json.dump(final_output, f, indent=4)
         
     print("\n" + "="*50)
-    print(f"🎯 EVALUATION RESULTS (MICRO) - {pipeline_type.upper()}")
+    print(f"[*] EVALUATION RESULTS (MICRO) - {pipeline_type.upper()}")
     print("="*50)
     print(f"Precision: {results['micro']['precision']}")
     print(f"Recall:    {results['micro']['recall']}")

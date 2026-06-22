@@ -40,16 +40,16 @@ if uploaded_file is not None:
             
             col1, col2 = st.columns(2)
             
-            # Tomamos una muestra generosa del inicio del documento (ej. primeros 3000 caracteres)
+            # Take a generous sample from the beginning of the document (e.g. first 3000 characters)
             sample_raw_text = raw_text[:3000] + ("..." if len(raw_text) > 3000 else "")
             sample_masked_text = masker.mask_text(sample_raw_text)
             
-            # Función para resaltar los tags en el markdown de Streamlit
+            # Function to highlight tags in Streamlit markdown
             def highlight_tags(text: str) -> str:
                 tags = ["<IoC_URL>", "<IoC_EMAIL>", "<IoC_IPv6>", "<IoC_IPv4>", "<IoC_HASH>", "<IoC_DOMAIN>"]
                 highlighted = text
                 for tag in tags:
-                    # Streamlit Markdown soporta colores mediante HTML inline
+                    # Streamlit Markdown supports colors via inline HTML
                     highlighted = highlighted.replace(tag, f"**<span style='color:#FF4B4B;'>{tag}</span>**")
                 return highlighted
 
@@ -84,6 +84,6 @@ if uploaded_file is not None:
             st.error(f"Error processing the file: {e}")
             
         finally:
-            # Limpiar archivo temporal
+            # Clean up temporary file
             if os.path.exists(tmp_file_path):
                 os.remove(tmp_file_path)

@@ -14,9 +14,9 @@ from .nodes import triage_node, extractor_node, validator_node
 
 def triage_router(state: ChunkState) -> str:
     """
-    Router: Decide el siguiente paso tras el Triage.
-    Si el chunk es basura (is_relevant=False), matamos el proceso (END).
-    Si hay contexto útil, pasamos al nodo Extractor.
+    Router: Decide the next step after triage.
+    If the chunk is not relevant, route to END.
+    Otherwise, proceed to the extractor.
     """
     if not state.get("is_relevant", True):
         return "end"
@@ -25,8 +25,7 @@ def triage_router(state: ChunkState) -> str:
 
 def extractor_router(state: ChunkState) -> str:
     """
-    Router: Si el extractor devuelve 0 borradores, significa que ya hemos "agotado"
-    todos los TTPs posibles de este texto. Fin del procesamiento.
+    Router: If the extractor returns no drafts, processing is complete.
     """
     if len(state.get("draft_ttps", [])) == 0:
         return "end"
@@ -45,7 +44,7 @@ def validator_router(state: ChunkState) -> str:
 
 
 # ==============================================================================
-# BUILD THE SUB-GRAPH (THE "MAP" PROCESS)
+# SUB-GRAPH BUILDER
 # ==============================================================================
 
 
@@ -89,7 +88,7 @@ def build_chunk_graph():
 
 
 # ==============================================================================
-# THE CONSOLIDATOR NODE (THE "REDUCE" PROCESS)
+# CONSOLIDATOR NODE
 # ==============================================================================
 
 
@@ -97,8 +96,7 @@ def limpiar_redundancia_jerarquica(
     ttps_aprobados: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
     """
-    Si en la lista final de un chunk tengo una técnica padre (TXXXX) y también una
-    sub-técnica hija (TXXXX.YYY), elimino la técnica padre porque la hija es más precisa.
+    Remove the parent technique from the list if a more specific child sub-technique is present.
     """
     ids_presentes = [ttp.get("technique_id", "") for ttp in ttps_aprobados]
     ttps_limpios = []
@@ -117,15 +115,12 @@ def limpiar_redundancia_jerarquica(
 
 def consolidator_node(state: GlobalState) -> dict:
     """
-    Objetivo: Fase de "Reduce" del pipeline.
-    Recoge todos los TTPs aprobados de todos los chunks procesados en paralelo,
-    elimina duplicados (fusionando evidencias de distintas páginas) y devuelve
-    un JSON limpio y consolidado con el reporte final.
-    matching the standard JSON schema.
+    Goal: Consolidate TTPs across all chunks.
+    Remove duplicates and merge evidence into a clean JSON structure.
     """
     all_ttps = state.get("all_approved_ttps", [])
 
-    # 1. Limpieza Algorítmica de redundancia jerárquica
+    # 1. Hierarchical redundancy cleanup
     all_ttps = limpiar_redundancia_jerarquica(all_ttps)
 
     deduplicated: Dict[str, Dict[str, Any]] = {}
@@ -170,7 +165,7 @@ def consolidator_node(state: GlobalState) -> dict:
 
 
 # ==============================================================================
-# THE MAIN ORCHESTRATOR (MAP-REDUCE EXECUTION)
+# MAIN ORCHESTRATOR
 # ==============================================================================
 
 
@@ -188,7 +183,7 @@ def process_full_report(
     chunk_graph = build_chunk_graph()
     master_ttp_list = []
 
-    # Acumuladores de tiempo
+    # Timing accumulators
     triage_time_total = previous_timing.get("triage_time_total", 0.0) if previous_timing else 0.0
     extraction_time_total = previous_timing.get("extraction_time_total", 0.0) if previous_timing else 0.0
     validation_time_total = previous_timing.get("validation_time_total", 0.0) if previous_timing else 0.0
@@ -238,9 +233,9 @@ def process_full_report(
         try:
             chunk_result = chunk_graph.invoke(initial_chunk_state)
             
-            # LATIDO: Solo imprimimos si extrajo algo útil o si terminó bien
+            # Progress heartbeat log
             aprobados = chunk_result.get("approved_ttps", [])
-            print(f"     [✓] Chunk {i + 1}/{len(sanitized_chunks)} procesado. TTPs válidos: {len(aprobados)}")
+            print(f"     [+] Chunk {i + 1}/{len(sanitized_chunks)} processed. Valid TTPs: {len(aprobados)}")
             
             if cache_path:
                 with cache_lock:
@@ -279,7 +274,7 @@ def process_full_report(
             api_errors = ["429", "quota", "resourceexhausted", "503", "500", "timeout", "not_found", "api", "connection", "unavailable", "rate limit"]
             if any(err in err_str for err in api_errors):
                 global_stop_event.set()
-            print(f"     [!] Error Crítico/Timeout procesando chunk {i + 1}: {str(e)}")
+            print(f"     [!] Critical Error processing chunk {i + 1}: {str(e)}")
             return i, e
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -296,7 +291,7 @@ def process_full_report(
             api_errors = ["429", "quota", "resourceexhausted", "503", "500", "timeout", "not_found", "api", "connection", "unavailable", "rate limit"]
             if any(err in err_str for err in api_errors):
                 if not api_crashed_flag:
-                    print(f"[!] ABORTANDO LangGraph: Fallo de API detectado en chunk {i + 1}. Guardando progreso parcial...")
+                    print(f"[!] ABORTING LangGraph: API failure detected in chunk {i + 1}. Saving partial progress...")
                     api_crashed_flag = True
                 continue
             else:

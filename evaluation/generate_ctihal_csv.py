@@ -17,7 +17,7 @@ def generate_mapping_csv(base_path: str = "data/eval_datasets/ctihal"):
     
     records = []
     
-    # Buscar recursivamente todos los PDFs crudos
+    # Recursively find all raw PDFs
     pdf_pattern = os.path.join(reports_dir, "**", "*.pdf")
     pdf_files = glob.glob(pdf_pattern, recursive=True)
     

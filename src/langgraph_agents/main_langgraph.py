@@ -11,7 +11,7 @@ import subprocess
 
 
 def bootstrap_environment():
-    """Instala dependencias e inicia los servicios requeridos (Ollama y Qdrant)."""
+    """Installs dependencies and starts required services (Ollama)."""
     print("[INFO] Configuring execution environment...")
 
     # Pip install step removed to avoid console spam.
@@ -50,10 +50,9 @@ from src.core.llm_factory import get_llm
 
 def generate_global_context(chunks: List[Any], llm: BaseChatModel) -> str:
     """
-    Objetivo: Generar un resumen de alto nivel (Threat Actor, Malware, Target) a partir de la
-    introducción del reporte. Este "contexto global" se inyectará después en todos los nodos
-    de extracción para ayudar al LLM a resolver pronombres (ej: "ellos" -> APT29) y no perder
-    el hilo conductor de la narrativa durante el procesamiento paralelo por chunks.
+    Goal: Generate a high-level summary (Threat Actor, Malware, Target) from the
+    report introduction. This "global context" will be injected into all extraction
+    nodes to help the LLM resolve pronouns and maintain narrative continuity.
     """
     # Extract text from the first 4 chunks
     # Phase1_ingestion chunks are LangChain Document objects
@@ -86,7 +85,7 @@ def generate_global_context(chunks: List[Any], llm: BaseChatModel) -> str:
     try:
         response = chain.invoke({"text": combined_intro})
 
-        # Extracción robusta del contenido
+        # Robust content extraction
         if isinstance(response.content, str):
             context = response.content
         elif isinstance(response.content, list):
@@ -109,9 +108,9 @@ def generate_global_context(chunks: List[Any], llm: BaseChatModel) -> str:
 
 def run_langgraph_extraction(pdf_path: str):
     """
-    Objetivo: Actuar como punto de entrada limpio para invocar toda la arquitectura multi-agente
-    sobre un PDF. Orquesta la Fase 1 (ingesta), extrae el contexto global y lanza el grafo.
-    Devuelve los TTPs consolidados y las métricas de tiempo para la evaluación.
+    Entry point to invoke the multi-agent architecture on a PDF.
+    Orchestrates Phase 1 (ingestion), extracts global context, and launches the graph.
+    Returns consolidated TTPs and timing metrics.
     """
     t0 = time.time()
 
@@ -198,7 +197,7 @@ def run_langgraph_extraction(pdf_path: str):
         "api_crashed": result_dict.get("timing_breakdown_phase3", {}).get("api_crashed", False)
     }
 
-    # Borrar caché si fue exitoso (no hubo crash de API)
+    # Clear cache if successful (no API crash)
     if not timing_metrics.get("api_crashed", False) and os.path.exists(cache_path):
         try:
             os.remove(cache_path)
@@ -301,15 +300,13 @@ if __name__ == "__main__":
     # 3. Execution Phase (Map-Reduce)
     print("\n[*] [INFO] Phase 4: Starting Graph Execution (Map-Reduce Inference)...")
     t2 = time.time()
-    # === CAMBIO AQUI ===
     result_dict = process_full_report(pdf_path, global_context, sanitized_chunks, cache_path, completed_ttps, previous_timing)
     p3_time = time.time() - t2
     print("[+] [INFO] Phase 4: Graph Execution Completed.")
 
-    # Extraer variables
+    # Extract metrics and TTPs
     extracted_ttps = result_dict.get("extracted_ttps", [])
     p3_breakdown = result_dict.get("timing_breakdown_phase3", {})
-    # ===================
 
 
     # 4. Construct Final JSON matching LangChain standard

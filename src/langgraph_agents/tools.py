@@ -195,7 +195,7 @@ def get_mitre_candidates(query: str, top_k: int = 25) -> tuple:
                     for item in res_data.get("results", []):
                         idx = item["index"]
                         raw_score = float(item["relevance_score"])
-                        # Jina devuelve logits puros que no nos sirven para el corte de 0.50.
+                        # Jina returns raw logits which are not useful for the 0.50 cutoff.
                         # Comprimimos a 0-1 con sigmoide igual que hace el CrossEncoder en local.
                         scores[idx] = 1 / (1 + math.exp(-raw_score))
             except Exception as e:

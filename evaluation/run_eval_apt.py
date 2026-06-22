@@ -15,13 +15,13 @@ from src.langchain_pipeline.main_pipeline import run_cti_extraction
 from src.langgraph_agents.main_langgraph import run_langgraph_extraction
 from dotenv import load_dotenv
 
-# Cargar variables de entorno (USE_VLM_EXTRACTION, USE_PROMPT_REPETITION, etc.)
+# Load environment variables
 load_dotenv()
 
 def run_evaluation():
     """
-    Ejecutar una evaluación End-to-End sobre el dataset APT_REPORT.
-    Se utiliza el nombre de la carpeta (ej. APT28) para obtener las técnicas de MITRE como Ground Truth.
+    Run an End-to-End evaluation on the APT_REPORT dataset.
+    The folder name (e.g. APT28) is used to extract MITRE techniques as Ground Truth.
     """
     parser = argparse.ArgumentParser(description="Run single-config E2E evaluation on APT_REPORT dataset")
     parser.add_argument("--dataset_path", type=str, default="data/eval_datasets/APT_REPORT", help="Path to APT_REPORT dataset")
@@ -30,13 +30,13 @@ def run_evaluation():
     parser.add_argument("--resume_from", type=str, default=None, help="Path to a previous JSON to resume execution")
     args = parser.parse_args()
 
-    # Leer configuración desde las variables de entorno
+    # Read config from environment variables
     vlm_mode = os.getenv("USE_VLM_EXTRACTION", "False")
     rep_mode = os.getenv("USE_PROMPT_REPETITION", "False")
     pipeline = args.pipeline
 
     print("\n" + "="*80)
-    print("🚀 INICIANDO EVALUACIÓN APT_REPORT (CROSS-REFERENCE WITH MITRE GROUPS)")
+    print("[*] INITIATING APT_REPORT EVALUATION (CROSS-REFERENCE WITH MITRE GROUPS)")
     print(f"   Pipeline:           {pipeline.upper()}")
     print(f"   VLM Extraction:     {vlm_mode}")
     print(f"   Prompt Repetition:  {rep_mode}")
@@ -69,7 +69,7 @@ def run_evaluation():
     detailed_results = []
     hierarchy_stats = {"total_exact_matches": 0, "total_more_detailed": 0, "total_more_general": 0}
     
-    # Definir ruta de salida antes del bucle para auto-guardado
+    # Define output path before the loop for auto-saving
     tag_vlm = "vlm_on" if str(vlm_mode).lower() in ["true", "1", "yes"] else "vlm_off"
     tag_rep = "rep_on" if str(rep_mode).lower() in ["true", "1", "yes"] else "rep_off"
     timestamp = datetime.now().strftime("%Y%m%d_%H%M")
@@ -95,7 +95,7 @@ def run_evaluation():
     start_idx_val = len(predicted_labels)
     
     df_remaining = df.iloc[start_idx_val:]
-    # Bucle de inferencia E2E
+    # E2E Inference Loop
     for idx, row in tqdm(df_remaining.iterrows(), total=len(df), desc=f"Eval: {pipeline}", initial=start_idx_val):
             
         pdf_path = row['source_file']
@@ -105,13 +105,13 @@ def run_evaluation():
         pdf_name = os.path.basename(pdf_path)
         
         try:
-            # Ejecución limpia: Dejamos que los logs de Fase pasen (INFO/ERROR)
+            # Clean execution: Allow Phase logs to output (INFO/ERROR)
             if pipeline == "langchain":
                 results_list, timing = run_cti_extraction(pdf_path)
             else:
                 results_list, timing = run_langgraph_extraction(pdf_path)
                         
-            # Normalización y Trazabilidad Jerárquica
+            # Normalization and Hierarchical Traceability
             normalized_preds = []
             traceability_summary = {"exact": 0, "more_detailed": 0, "more_general": 0}
             
@@ -159,8 +159,8 @@ def run_evaluation():
                 metrics["TN"] = 1
             
             if timing.get("api_crashed"):
-                print("\n[!] CORTE DE LLM/API DETECTADO DURANTE ESTE REPORTE. Guardando extracción parcial y deteniendo ejecución.")
-                print("    El documento se reanudará de forma automática gracias al Caché de Chunks en la próxima ejecución.")
+                print("\n[!] LLM/API CRASH DETECTED. Saving partial extraction and stopping execution.")
+                print("    The document will resume automatically via Chunk Cache on the next run.")
                 llm_crashed = True
                 break
                 
@@ -176,18 +176,18 @@ def run_evaluation():
                 "extracted_ttps": results_list
             })
             
-            tqdm.write(f" 📄 [{group_name}] {pdf_name} -> TP: {len(tp)} | FP: {len(fp)} | FN: {len(fn)}")
+            tqdm.write(f" [*] [{group_name}] {pdf_name} -> TP: {len(tp)} | FP: {len(fp)} | FN: {len(fn)}")
         except KeyboardInterrupt:
-            print("\n[!] INTERRUPCIÓN MANUAL (Ctrl+C). Cancelando de forma segura y guardando los reportes completados...")
+            print("\n[!] MANUAL INTERRUPT (Ctrl+C). Safely canceling and saving completed reports...")
             llm_crashed = True
             break
         except Exception as e:
             error_str = str(e)
-            tqdm.write(f" [!] ERROR crítico en {pdf_name}: {error_str}")
+            tqdm.write(f" [!] Critical ERROR in {pdf_name}: {error_str}")
             
             api_errors = ["429", "quota", "resourceexhausted", "503", "500", "timeout", "not_found", "api", "connection", "unavailable"]
             if any(err in error_str.lower() for err in api_errors):
-                print("\n[!] CORTE DE LLM/API DETECTADO. Deteniendo ejecución para salvaguardar el progreso.")
+                print("\n[!] LLM/API CRASH DETECTED. Stopping execution to save progress.")
                 llm_crashed = True
                 break
                 
@@ -196,13 +196,15 @@ def run_evaluation():
         
         predicted_labels.append(predicted_ids)
         
-        # Calcular tiempo total acumulado hasta ahora
+        # Calculate total accumulated time
         total_seconds_partial = sum(
-            sum(v for k, v in d.get("timing_breakdown", {}).items() if isinstance(v, (int, float))) 
+            d.get("timing_breakdown", {}).get("phase1_ingestion_seconds", 0) +
+            d.get("timing_breakdown", {}).get("phase3_retrieval_seconds", 0) +
+            d.get("timing_breakdown", {}).get("phase4_inference_seconds", 0)
             for d in detailed_results if "timing_breakdown" in d
         )
         
-        # NUEVO: AUTO-GUARDADO (CHECKPOINT)
+        # CHECKPOINT AUTO-SAVE
         partial_output = {
             "status": f"INCOMPLETE - Processed {idx + 1}/{len(df)}",
             "model_used": model_used,
@@ -213,33 +215,35 @@ def run_evaluation():
         with open(output_path, "w", encoding="utf-8") as f:
             json.dump(partial_output, f, indent=4)
         
-        # Cuidar el Rate Limit del Free Tier entre documentos pesados
+        # Respect Free Tier Rate Limit between large documents
         time.sleep(2)
         
-        # NUEVO: Forzar limpieza de RAM para evitar OOM Killer con Docling
+        # Force RAM cleanup to prevent Docling OOM Killer
         import gc
         gc.collect()
         
     if len(predicted_labels) < len(df):
-        print(f"\n[!] Evaluados solo {len(predicted_labels)} de {len(df)} reportes debido a interrupción.")
+        print(f"\n[!] Evaluated only {len(predicted_labels)} out of {len(df)} reports due to interruption.")
         df = df.iloc[:len(predicted_labels)].copy()
         
     if len(df) == 0:
-        print("\n[!] No se evaluó ningún reporte por completo. Creando JSON base para permitir reanudación.")
+        print("\n[!] No reports were fully evaluated. Creating base JSON to allow resumption.")
         results = {"micro": {"precision": 0, "recall": 0, "f1": 0, "f0.5": 0}}
     else:
-        # Evaluar y exportar
+        # Evaluate and export
         df['predicted_labels'] = predicted_labels
         evaluator = Evaluator(df)
         results = evaluator.evaluate()
     
-    # Calcular tiempo total de esta config
+    # Calculate total time for this config
     total_seconds = sum(
-        sum(v for k, v in d.get("timing_breakdown", {}).items() if isinstance(v, (int, float))) 
+        d.get("timing_breakdown", {}).get("phase1_ingestion_seconds", 0) +
+        d.get("timing_breakdown", {}).get("phase3_retrieval_seconds", 0) +
+        d.get("timing_breakdown", {}).get("phase4_inference_seconds", 0)
         for d in detailed_results if "timing_breakdown" in d
     )
     
-    # Estructura JSON estandarizada
+    # Standard JSON structure
     final_output = {
         "model_used": model_used,
         "total_execution_minutes": round(total_seconds / 60.0, 2),
@@ -252,7 +256,7 @@ def run_evaluation():
         json.dump(final_output, f, indent=4)
         
     print("\n" + "="*80)
-    print(f"🎯 RESULTADOS MICRO PARA APT_REPORT ({pipeline.upper()})")
+    print(f"[*] MICRO RESULTS FOR APT_REPORT ({pipeline.upper()})")
     print("="*80)
     print(f"F0.5-Score: {results['micro']['f0.5']}")
     print(f"F1-Score:   {results['micro']['f1']}")

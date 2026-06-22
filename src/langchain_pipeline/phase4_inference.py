@@ -159,8 +159,8 @@ class TTPAnalyzer:
 
         def print_retry_warning(retry_state):
             import sys
-            print(f"\n[⚠️ ALARMA DE API / RATE LIMIT] El servidor LLM ha rechazado la petición o ha fallado.", file=sys.stderr)
-            print(f"[⏳] Tenacity esperando {retry_state.next_action.sleep} segundos antes del reintento #{retry_state.attempt_number}...", file=sys.stderr)
+            print(f"\n[!] API ALARM / RATE LIMIT: The LLM server rejected the request or failed.", file=sys.stderr)
+            print(f"[*] Tenacity waiting {retry_state.next_action.sleep} seconds before retry #{retry_state.attempt_number}...", file=sys.stderr)
 
         @retry(
             stop=stop_after_attempt(6),
@@ -269,7 +269,7 @@ class TTPAnalyzer:
                 # ANTI-HALLUCINATION GUARD: Reject if LLM bypassed RAG and invented an ID
                 if tech_id not in inp["_meta_map"]:
                     logger.warning(
-                        f"Descartando TTP alucinado/inventado por el LLM: {tech_id}"
+                        f"Discarding hallucinated/invented TTP by the LLM: {tech_id}"
                     )
                     continue
 
