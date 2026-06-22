@@ -16,7 +16,7 @@ def get_llm(temperature: float = 0.0) -> BaseChatModel:
         use_gemma = os.getenv("USE_GEMMA4", "False").lower() in ("true", "1", "yes")
         
         if use_gemma:
-            vllm_base_url = os.getenv("VLLM_BASE_URL_GEMMA", "http://10.0.152.198:8003/v1")
+            vllm_base_url = os.getenv("VLLM_BASE_URL_GEMMA", "http://localhost:8000/v1")
             model_name = os.getenv("VLLM_MODEL_NAME_GEMMA", "gemma4")
         else:
             vllm_base_url = os.getenv("VLLM_BASE_URL")
